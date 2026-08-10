@@ -3133,39 +3133,56 @@ class PaymentDetectionService {
 
     if (event.decision == PaymentDecision.confirmed) _lastConfirmed = event;
 
-    _eventCtrl.add(event);
-    _uiCtrl.add(ui);
-    unawaited(_tryAutoSettleInvoice(event));
+    // Await auto-settlement check
+    final settled = await _tryAutoSettleInvoice(event);
+    final isSettled = isBillSettlement || settled;
+
+    PaymentEvent finalEvent = event;
+    PaymentUiState finalUi = ui;
+    if (settled) {
+      finalEvent = event.copyWith(
+        decision: PaymentDecision.confirmed,
+      );
+      finalUi = ui.copyWith(
+        decision: PaymentDecision.confirmed,
+        isBillMatch: true,
+      );
+      if (kDebugMode) debugPrint('✅ Auto-upgraded likely event to CONFIRMED due to invoice match');
+    }
+
+    _eventCtrl.add(finalEvent);
+    _uiCtrl.add(finalUi);
     
     // Voice Rule: Bill settlement message PREVENTS standard amount voice
-    if (isBillSettlement && !forceMute) {
-      final t = VoiceBuilder.received(event.amount, null, _voiceLanguage);
-      _voice.enqueueRaw('Bill Paid. $t', _VP.high, fingerprint: event.fingerprint);
+    if (isSettled && !forceMute) {
+      final t = VoiceBuilder.received(finalEvent.amount, null, _voiceLanguage);
+      _voice.enqueueRaw('Payment Confirmed. $t', _VP.high, fingerprint: finalEvent.fingerprint);
     } else if (!forceMute) {
-      _voice.enqueue(event, ui);
+      _voice.enqueue(finalEvent, finalUi);
     }
 
     // ANTI-03: queue LIKELY for merchant confirmation (FIX-D: fully wired)
-    if (event.decision == PaymentDecision.likely) {
-      _confirmMgr.add(event, ui);
+    if (finalEvent.decision == PaymentDecision.likely) {
+      _confirmMgr.add(finalEvent, finalUi);
       // Re-announce if not confirmed in 12s — but only for non-partial payments
-      if (!event.isPartialPayment) {
-        _scheduleLikelyReannounce(event.id, event.amount, event.fingerprint);
+      if (!finalEvent.isPartialPayment) {
+        _scheduleLikelyReannounce(finalEvent.id, finalEvent.amount, finalEvent.fingerprint);
       }
     }
 
     // ANTI-07: async bank verification for CONFIRMED
-    if (event.decision == PaymentDecision.confirmed &&
+    if (finalEvent.decision == PaymentDecision.confirmed &&
         PdsConfig.isBankVerifyEnabled) {
-      unawaited(_verifyWithBank(event));
+      unawaited(_verifyWithBank(finalEvent));
+
     }
   }
 
   // Re-announce LIKELY payment after 12s only if not yet confirmed/rejected.
   // Partial payments excluded — shopkeeper already knows money is pending.
-  Future<void> _tryAutoSettleInvoice(PaymentEvent event) async {
+  Future<bool> _tryAutoSettleInvoice(PaymentEvent event) async {
     try {
-      if (event.decision != PaymentDecision.confirmed || event.amount <= 0) return;
+      if ((event.decision != PaymentDecision.confirmed && event.decision != PaymentDecision.likely) || event.amount <= 0) return false;
       final amount = event.amount;
       final payer = event.payerName?.toLowerCase() ?? '';
       final saleId = event.saleId?.toString() ?? '';
@@ -3174,64 +3191,64 @@ class PaymentDetectionService {
       // Two burst payments cannot both settle the same invoice
       if (saleId.isNotEmpty && _settlingInvoiceIds.contains(saleId)) {
         PdsLogger.w('AUTOSETTL', 'Already settling $saleId, skipping concurrent attempt');
-        return;
+        return false;
       }
       if (saleId.isNotEmpty) _settlingInvoiceIds.add(saleId);
 
       try {
         final sales = await LocalStorageService.loadSales();
         for (var i = 0; i < sales.length; i++) {
-        final sale = Map<String, dynamic>.from(sales[i] as Map);
-        final status = sale['payment_status']?.toString().toUpperCase() ?? '';
-        if (!['UNPAID', 'PARTIAL'].contains(status)) continue;
+          final sale = Map<String, dynamic>.from(sales[i] as Map);
+          final status = sale['payment_status']?.toString().toUpperCase() ?? '';
+          if (!['UNPAID', 'PARTIAL'].contains(status)) continue;
 
-        final total = _toAmount(sale['total'] ?? sale['total_amount']);
-        final paid = _toAmount(sale['paid_amount'] ?? sale['amount_paid'] ?? 0);
-        final due = (total - paid).clamp(0.0, double.infinity);
-        if ((due - amount).abs() > 1.0) continue;
+          final total = _toAmount(sale['total'] ?? sale['total_amount']);
+          final paid = _toAmount(sale['paid_amount'] ?? sale['amount_paid'] ?? 0);
+          final due = (total - paid).clamp(0.0, double.infinity);
+          if ((due - amount).abs() > 1.0) continue;
 
-        if (saleId.isNotEmpty) {
-          final candidateId = sale['sale_id']?.toString() ?? sale['invoice_number']?.toString() ?? sale['invoiceId']?.toString() ?? '';
-          if (candidateId != saleId) continue;
-        }
-
-        if (payer.isNotEmpty) {
-          final customerName = sale['customer_name']?.toString().toLowerCase() ?? '';
-          if (customerName.isNotEmpty && !customerName.contains(payer) && !payer.contains(customerName)) {
-            continue;
+          if (saleId.isNotEmpty) {
+            final candidateId = sale['sale_id']?.toString() ?? sale['invoice_number']?.toString() ?? sale['invoiceId']?.toString() ?? '';
+            if (candidateId != saleId) continue;
           }
+
+          if (payer.isNotEmpty) {
+            final customerName = sale['customer_name']?.toString().toLowerCase() ?? '';
+            if (customerName.isNotEmpty && !customerName.contains(payer) && !payer.contains(customerName)) {
+              continue;
+            }
+          }
+
+          sale['payment_status'] = 'PAID';
+          sale['paid_amount'] = total;
+          sales[i] = sale;
+          await LocalStorageService.saveSales(sales);
+
+          final invoiceNum = sale['sale_id']?.toString() ?? sale['invoice_number']?.toString() ?? sale['invoiceId']?.toString() ?? '';
+          if (invoiceNum.isNotEmpty) {
+            unawaited(SyncService.updateSalePayment(invoiceNum, 'PAID', total));
+          }
+          return true;
         }
 
-        sale['payment_status'] = 'PAID';
-        sale['paid_amount'] = total;
-        sales[i] = sale;
-        await LocalStorageService.saveSales(sales);
+        final invoices = await LocalStorageService.loadLocalInvoices();
+        for (var i = 0; i < invoices.length; i++) {
+          final invoice = Map<String, dynamic>.from(invoices[i] as Map);
+          final status = invoice['status']?.toString().toUpperCase() ?? 'UNPAID';
+          if (!['UNPAID', 'PARTIAL'].contains(status)) continue;
 
-        final invoiceNum = sale['sale_id']?.toString() ?? sale['invoice_number']?.toString() ?? sale['invoiceId']?.toString() ?? '';
-        if (invoiceNum.isNotEmpty) {
-          unawaited(SyncService.updateSalePayment(invoiceNum, 'PAID', total));
+          final total = _toAmount(invoice['total_amount'] ?? invoice['amount'] ?? 0);
+          final paid = _toAmount(invoice['paid_amount'] ?? 0);
+          final due = (total - paid).clamp(0.0, double.infinity);
+          if ((due - amount).abs() > 1.0) continue;
+
+          invoice['status'] = 'PAID';
+          invoice['payment_status'] = 'PAID';
+          invoice['paid_amount'] = total;
+          invoices[i] = invoice;
+          await LocalStorageService.saveLocalInvoices(invoices);
+          return true;
         }
-        return;
-      }
-
-      final invoices = await LocalStorageService.loadLocalInvoices();
-      for (var i = 0; i < invoices.length; i++) {
-        final invoice = Map<String, dynamic>.from(invoices[i] as Map);
-        final status = invoice['status']?.toString().toUpperCase() ?? 'UNPAID';
-        if (!['UNPAID', 'PARTIAL'].contains(status)) continue;
-
-        final total = _toAmount(invoice['total_amount'] ?? invoice['amount'] ?? 0);
-        final paid = _toAmount(invoice['paid_amount'] ?? 0);
-        final due = (total - paid).clamp(0.0, double.infinity);
-        if ((due - amount).abs() > 1.0) continue;
-
-        invoice['status'] = 'PAID';
-        invoice['payment_status'] = 'PAID';
-        invoice['paid_amount'] = total;
-        invoices[i] = invoice;
-        await LocalStorageService.saveLocalInvoices(invoices);
-        return;
-      }
       } finally {
         // ✅ FIX: Always remove lock, even if exception occurred
         if (saleId.isNotEmpty) _settlingInvoiceIds.remove(saleId);
@@ -3239,6 +3256,7 @@ class PaymentDetectionService {
     } catch (e) {
       if (kDebugMode) debugPrint('Auto-settle invoice failed: $e');
     }
+    return false;
   }
 
   double _toAmount(dynamic value) {
@@ -3709,7 +3727,7 @@ abstract class _Extractor {
     caseSensitive: false,
   );
   static final _nameStart = RegExp(
-    r'^([A-Z][A-Za-z]+(?: [A-Z][A-Za-z]+){1,3})\s+(?:has\s+sent|sent)\b',
+    r'^([A-Z][A-Za-z]+(?: [A-Z][A-Za-z]+){1,3})\s+(?:has\s+sent|sent|paid|has\s+paid|transferred|has\s+transferred|has\s+credited|credited)\b',
     caseSensitive: false,
   );
   static String? payerName(String t) =>
