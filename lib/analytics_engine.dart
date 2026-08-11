@@ -42,6 +42,7 @@ class AnalyticsEngine {
   double todayRevenue = 0.0;
   double yesterdayRevenue = 0.0;
   int todayTransactionsCount = 0;
+  int todayOnlineOrders = 0;
   String todayTopProduct = '';
   String todayBestHourLabel = '';
   int yesterdayTransactionsCount = 0;
@@ -62,7 +63,7 @@ class AnalyticsEngine {
 
   String _transactionKey(Map<String, dynamic> sale) {
     for (final field in const ['invoice_id', 'backend_id', 'sale_id', 'invoice_number', 'id']) {
-      final value = sale[field]?.toString().trim() ?? '';
+      final value = sale[field]?.toString().trim().toLowerCase() ?? '';
       if (value.isNotEmpty && value != 'null') return value;
     }
     return '';
@@ -178,6 +179,7 @@ class AnalyticsEngine {
     // Reset Metrics
     todayRevenue = 0.0; yesterdayRevenue = 0.0; previousDayRevenue = 0.0;
     todayTransactionsCount = 0; yesterdayTransactionsCount = 0;
+    todayOnlineOrders = 0;
     totalOnlineOrders = 0; // 🔒 NEW: Reset online orders counter
     filteredOnlineOrders = 0; // 🔒 NEW: Reset filtered online orders counter
     
@@ -185,6 +187,8 @@ class AnalyticsEngine {
     final Map<String, double> yesterdayProductRevenue = {};
     final Map<int, double> todayHourRevenue = {};
     final Map<int, double> yesterdayHourRevenue = {};
+    final Set<String> todayOnlineInvoices = {};
+    final Set<String> yesterdayOnlineInvoices = {};
     
     salesByMonthCache = {};
     for (int i = 11; i >= 0; i--) {
@@ -286,10 +290,10 @@ class AnalyticsEngine {
           todayHourRevenue[dt.hour] = (todayHourRevenue[dt.hour] ?? 0.0) + val;
           if (rawName.isNotEmpty && formattedName != 'Unknown') todayProductRevenue[formattedName] = (todayProductRevenue[formattedName] ?? 0.0) + val;
           
-          // 🔒 NEW: Track online orders
+          // 🔒 NEW: Track today online orders
           final String source = (s['source'] ?? s['order_source'] ?? 'OFFLINE').toString().toUpperCase();
-          if (source == 'ONLINE' || source == 'WEB' || source == 'APP') {
-            if (invoiceKey.isNotEmpty) onlineOrderInvoices.add(invoiceKey);
+          if ((source == 'ONLINE' || source == 'WEB' || source == 'APP') && invoiceKey.isNotEmpty) {
+            todayOnlineInvoices.add(invoiceKey);
           }
           
           if (kDebugMode && todayRevenue > 0) {
@@ -301,10 +305,12 @@ class AnalyticsEngine {
           yesterdayHourRevenue[dt.hour] = (yesterdayHourRevenue[dt.hour] ?? 0.0) + val;
           if (rawName.isNotEmpty && formattedName != 'Unknown') yesterdayProductRevenue[formattedName] = (yesterdayProductRevenue[formattedName] ?? 0.0) + val;
           
-          // 🔒 NEW: Track online orders
-          final String source = (s['source'] ?? s['order_source'] ?? 'OFFLINE').toString().toUpperCase();
-          if (source == 'ONLINE' || source == 'WEB' || source == 'APP') {
-            if (invoiceKey.isNotEmpty) onlineOrderInvoices.add(invoiceKey);
+          if ((s['source'] ?? s['order_source'] ?? 'OFFLINE').toString().toUpperCase() == 'ONLINE' ||
+              (s['source'] ?? s['order_source'] ?? 'OFFLINE').toString().toUpperCase() == 'WEB' ||
+              (s['source'] ?? s['order_source'] ?? 'OFFLINE').toString().toUpperCase() == 'APP') {
+            if (invoiceKey.isNotEmpty) {
+              yesterdayOnlineInvoices.add(invoiceKey);
+            }
           }
           
           if (kDebugMode && yesterdayRevenue > 0) {
@@ -313,10 +319,9 @@ class AnalyticsEngine {
         } else if (day == prevDayDate) {
           previousDayRevenue += val;
           
-          // 🔒 NEW: Track online orders
           final String source = (s['source'] ?? s['order_source'] ?? 'OFFLINE').toString().toUpperCase();
-          if (source == 'ONLINE' || source == 'WEB' || source == 'APP') {
-            if (invoiceKey.isNotEmpty) onlineOrderInvoices.add(invoiceKey);
+          if ((source == 'ONLINE' || source == 'WEB' || source == 'APP') && invoiceKey.isNotEmpty) {
+            onlineOrderInvoices.add(invoiceKey);
           }
         }
 
@@ -359,6 +364,7 @@ class AnalyticsEngine {
     // ── Time Filtered Cache
     todayTransactionsCount = todayUniqueInvoices.isEmpty && todayRevenue > 0 ? 1 : todayUniqueInvoices.length;
     yesterdayTransactionsCount = yesterdayUniqueInvoices.isEmpty && yesterdayRevenue > 0 ? 1 : yesterdayUniqueInvoices.length;
+    todayOnlineOrders = todayOnlineInvoices.length;
     
     // 🔒 NEW: Calculate total online orders from all sales data
     final allOnlineInvoices = flattenedSales.where((s) {

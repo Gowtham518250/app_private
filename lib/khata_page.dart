@@ -360,6 +360,7 @@ class _KhataPageState extends State<KhataPage> with SingleTickerProviderStateMix
 
     if (kDebugMode) debugPrint('📦 Loading ${unified.length} customers from local storage');
 
+    final today = DateTime.now();
     for (var c in unified) {
       // FIX: loadUnifiedCustomersLedger() returns 'unified_balance' and
       // 'history', not 'balance' and 'invoices'. Reading the wrong keys
@@ -369,17 +370,36 @@ class _KhataPageState extends State<KhataPage> with SingleTickerProviderStateMix
       // (exactly the offline-first case), this was the only data source.
       double bal = (c['unified_balance'] as num?)?.toDouble() ?? 0.0;
       if (bal > 0.01) {
+        final dueDateRaw = c['due_date']?.toString();
+        DateTime? dueDate;
+        if (dueDateRaw != null && dueDateRaw.isNotEmpty) {
+          dueDate = DateTime.tryParse(dueDateRaw);
+        }
+
+        bool overdue = false;
+        int daysOverdue = 0;
+        if (dueDate != null) {
+          final dueDateOnly = DateTime(dueDate.year, dueDate.month, dueDate.day);
+          final diff = today.difference(dueDateOnly).inDays;
+          overdue = diff > 0;
+          daysOverdue = overdue ? diff : 0;
+        }
+
         _totalOutstanding += bal;
+        if (overdue) {
+          _totalOverdue += bal;
+          _overdueCount++;
+        }
         _pendingCount++;
         _customers.add({
           'customer_id': c['phone'],
           'customer_name': c['name'] ?? 'Customer',
           'customer_phone': c['phone'] ?? '',
           'total_balance': bal,
-          'overdue_amount': bal,
-          'is_overdue': false,
-          'days_overdue': 0,
-          'earliest_due_date': c['due_date'],
+          'overdue_amount': overdue ? bal : 0.0,
+          'is_overdue': overdue,
+          'days_overdue': daysOverdue,
+          'earliest_due_date': dueDateRaw,
           'invoices': c['history'] ?? []
         });
       }

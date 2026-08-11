@@ -208,7 +208,11 @@ class _SalesEntryPageState extends State<SalesEntryPage>
             entries[targetIdx]['qty']!.text = qty.toString();
           }
           if (entries[targetIdx]['price'] != null) {
-            entries[targetIdx]['price']!.text = price.toString();
+            if (price > 0) {
+              entries[targetIdx]['price']!.text = price.toString();
+            } else {
+              entries[targetIdx]['price']!.text = '';
+            }
           }
         } catch (e) {
           if (kDebugMode) debugPrint('⚠️ Error setting voice order values: $e');
@@ -1087,8 +1091,12 @@ class _SalesEntryPageState extends State<SalesEntryPage>
       if (entries[targetIdx]['qty'] != null) {
         entries[targetIdx]['qty']!.text = qty.toString();
       }
-      if (providedPrice != null && providedPrice > 0 && entries[targetIdx]['price'] != null) {
-        entries[targetIdx]['price']!.text = providedPrice.toStringAsFixed(0);
+      if (entries[targetIdx]['price'] != null) {
+        if (providedPrice != null && providedPrice > 0) {
+          entries[targetIdx]['price']!.text = providedPrice.toStringAsFixed(0);
+        } else {
+          entries[targetIdx]['price']!.text = '';
+        }
       }
       if (providedGst != null && entries[targetIdx]['gst'] != null) {
         entries[targetIdx]['gst']!.text = providedGst.toStringAsFixed(0);
@@ -2578,12 +2586,19 @@ class _SalesEntryPageState extends State<SalesEntryPage>
       return false;
     }
 
-    // STRICT VALIDATION: No ₹0 or negative prices (ANTI-FRAUD)
+    // STRICT VALIDATION: No ₹0 or negative prices, and no zero quantity
     for (var entry in nonEmpty) {
        final price = double.tryParse(entry['price']?.text.trim() ?? '0') ?? 0;
+       final qty = double.tryParse(entry['qty']?.text.trim() ?? '0') ?? 0;
        if (price <= 0) {
           if (mounted) {
             setState(() => message = 'Item "${entry['item']?.text}" has no price! ₹0 sales are blocked.');
+          }
+          return false;
+       }
+       if (qty <= 0) {
+          if (mounted) {
+            setState(() => message = 'Item "${entry['item']?.text}" has invalid quantity.');
           }
           return false;
        }

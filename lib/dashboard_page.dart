@@ -488,17 +488,34 @@ class _DashboardPageState extends State<DashboardPage>
 
   Future<void> _checkPermissions() async {
     final notifGranted = await NotificationListenerService.isPermissionGranted();
-    final smsGranted = (await Permission.sms.status).isGranted;
+    final smsStatus = await Permission.sms.status;
+    final smsGranted = smsStatus.isGranted;
+
+    if (!notifGranted) {
+      try {
+        await NotificationListenerService.requestPermission();
+      } catch (e) {
+        if (kDebugMode) debugPrint('⚠️ Notification permission request failed: $e');
+      }
+    }
+
+    if (!smsGranted) {
+      try {
+        final smsRequest = await Permission.sms.request();
+        if (kDebugMode) debugPrint('📱 SMS permission request result: $smsRequest');
+      } catch (e) {
+        if (kDebugMode) debugPrint('⚠️ SMS permission request failed: $e');
+      }
+    }
+
+    final finalNotifGranted = await NotificationListenerService.isPermissionGranted();
+    final finalSmsGranted = (await Permission.sms.status).isGranted;
 
     if (!mounted) return;
 
-    if (!notifGranted || !smsGranted) {
-      setState(() => _isPermissionsMissing = true);
-    } else {
-      setState(() => _isPermissionsMissing = false);
-    }
+    setState(() => _isPermissionsMissing = !(finalNotifGranted && finalSmsGranted));
 
-    if (notifGranted || smsGranted) {
+    if (finalNotifGranted || finalSmsGranted) {
       await PaymentDetectionService().ensureChannelsRunning();
     }
   }
@@ -2462,12 +2479,13 @@ class _DashboardPageState extends State<DashboardPage>
       }
       
       // 🔧 FIX: Use invoice_number as primary deduplication key for invoice-level deduplication
-      final invoiceNumber = tx['invoice_number']?.toString() ?? 
-                            tx['sale_id']?.toString() ?? 
-                            tx['_bill_id']?.toString();
+      final invoiceNumberRaw = tx['invoice_number']?.toString() ??
+          tx['sale_id']?.toString() ??
+          tx['_bill_id']?.toString();
+      final invoiceNumber = invoiceNumberRaw?.trim().toLowerCase() ?? '';
 
       // 🔧 FIX: Skip if no valid invoice_number (prevents date fallback causing duplicates)
-      if (invoiceNumber == null || invoiceNumber.isEmpty || invoiceNumber == date.toString()) {
+      if (invoiceNumber.isEmpty || invoiceNumber == date.toString()) {
         if (kDebugMode) debugPrint('⚠️ Skipping sale with invalid invoice_number');
         continue;
       }
@@ -8855,7 +8873,17 @@ class _DashboardPageState extends State<DashboardPage>
             width: double.infinity,
             child: ElevatedButton(
               onPressed: () async {
-                await NotificationListenerService.requestPermission();
+                try {
+                  await NotificationListenerService.requestPermission();
+                } catch (e) {
+                  if (kDebugMode) debugPrint('⚠️ Notification permission open failed: $e');
+                }
+                try {
+                  await Permission.sms.request();
+                } catch (e) {
+                  if (kDebugMode) debugPrint('⚠️ SMS permission request failed: $e');
+                }
+                await _checkPermissions();
               },
               style: ElevatedButton.styleFrom(
                 backgroundColor: const Color(0xFFDC2626),
@@ -9711,9 +9739,9 @@ class _DashboardPageState extends State<DashboardPage>
     final dateStr = '${now.day} ${_monthShort(now.month)} ${now.year}';
     
     // Use cached metrics to avoid recalculation on every rebuild
-    final todaySales = _cachedTodaySales ?? _calculateTodaySales();
-    final todayOrders = _cachedTodayOrders ?? _calculateTodayOrders();
-    final todayOnlineOrders = _cachedTodayOnlineOrders ?? _calculateTodayOnlineOrders(); // 🔒 NEW: Online orders
+    final todaySales = engine.todaySalesValue;
+    final todayOrders = engine.todayTransactionsValue;
+    final todayOnlineOrders = engine.todayOnlineOrders;
     final lowStockCount = _lowStockProducts.length;
     
     return Container(
@@ -9861,66 +9889,81 @@ class _DashboardPageState extends State<DashboardPage>
   double _calculateTodaySales() {
     final now = DateTime.now();
     final today = DateTime(now.year, now.month, now.day);
-    
-    double total = 0;
+    final Map<String, double> invoiceTotals = {};
+
     for (final sale in sales) {
       try {
         final saleDate = _getLocalDate(sale);
         final saleDateOnly = DateTime(saleDate.year, saleDate.month, saleDate.day);
-        if (saleDateOnly == today) {
-          final raw = sale['total'] ?? sale['grand_total'] ?? sale['final_amount'] ?? sale['totalAmount'] ?? 0;
-          if (raw is num) {
-            total += raw.toDouble();
-          } else {
-            total += double.tryParse(raw.toString()) ?? 0.0;
-          }
+        if (saleDateOnly != today) continue;
+
+        final invoiceKey = sale['invoice_number']?.toString() ??
+            sale['sale_id']?.toString() ??
+            sale['_bill_id']?.toString() ??
+            sale['id']?.toString() ??
+            sale['created_at']?.toString() ??
+            '';
+        if (invoiceKey.isEmpty) continue;
+
+        if (!invoiceTotals.containsKey(invoiceKey)) {
+          final raw = sale['invoice_total'] ?? sale['total'] ?? sale['grand_total'] ?? sale['final_amount'] ?? sale['totalAmount'] ?? 0;
+          invoiceTotals[invoiceKey] = raw is num ? raw.toDouble() : double.tryParse(raw.toString()) ?? 0.0;
         }
       } catch (_) {}
     }
-    
-    return total;
+
+    return invoiceTotals.values.fold(0.0, (sum, v) => sum + v);
   }
   
   int _calculateTodayOrders() {
     final now = DateTime.now();
     final today = DateTime(now.year, now.month, now.day);
-    
-    int count = 0;
+    final Set<String> invoiceKeys = {};
+
     for (final sale in sales) {
       try {
         final saleDate = _getLocalDate(sale);
         final saleDateOnly = DateTime(saleDate.year, saleDate.month, saleDate.day);
-        if (saleDateOnly == today) {
-          count++;
-        }
+        if (saleDateOnly != today) continue;
+
+        final invoiceKey = sale['invoice_number']?.toString() ??
+            sale['sale_id']?.toString() ??
+            sale['_bill_id']?.toString() ??
+            sale['id']?.toString() ??
+            sale['created_at']?.toString() ??
+            '';
+        if (invoiceKey.isNotEmpty) invoiceKeys.add(invoiceKey);
       } catch (_) {}
     }
     
-    return count;
+    return invoiceKeys.length;
   }
 
   int _calculateTodayOnlineOrders() {
     final now = DateTime.now();
     final today = DateTime(now.year, now.month, now.day);
-    
     final Set<String> onlineInvoices = {};
+
     for (final sale in sales) {
       try {
         final saleDate = _getLocalDate(sale);
         final saleDateOnly = DateTime(saleDate.year, saleDate.month, saleDate.day);
-        if (saleDateOnly == today) {
-          final String source = (sale['source'] ?? sale['order_source'] ?? 'OFFLINE').toString().toUpperCase();
-          if (source == 'ONLINE' || source == 'WEB' || source == 'APP') {
-            final invoiceKey = (sale['created_at'] ?? sale['sale_date'] ?? sale['date'] ?? '').toString();
-            if (invoiceKey.isNotEmpty) {
-              onlineInvoices.add(invoiceKey);
-            }
-          }
-        }
+        if (saleDateOnly != today) continue;
+
+        final String source = (sale['source'] ?? sale['order_source'] ?? 'OFFLINE').toString().toUpperCase();
+        if (source != 'ONLINE' && source != 'WEB' && source != 'APP') continue;
+
+        final invoiceKey = sale['invoice_number']?.toString() ??
+            sale['sale_id']?.toString() ??
+            sale['_bill_id']?.toString() ??
+            sale['id']?.toString() ??
+            sale['created_at']?.toString() ??
+            '';
+        if (invoiceKey.isNotEmpty) onlineInvoices.add(invoiceKey);
       } catch (_) {}
     }
-    
-    return onlineInvoices.isEmpty && sales.isNotEmpty ? 0 : onlineInvoices.length;
+
+    return onlineInvoices.length;
   }
 
   String _monthShort(int m) {

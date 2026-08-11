@@ -5,6 +5,8 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:http/http.dart' as http;
 import 'api_client.dart';
 import 'secure_token_storage.dart';
+import 'log_file_storage_stub.dart'
+    if (dart.library.io) 'log_file_storage.dart';
 
 /// Comprehensive logging service for debug, API, user analytics, and error logging
 /// Supports local file storage (web-compatible) and remote backend API integration
@@ -190,20 +192,21 @@ class ComprehensiveLogger {
     }
   }
 
-  /// Save log entry to local storage
+  /// Save log entry to local storage and file storage.
   static Future<void> _saveToLocalStorage(String logEntry) async {
     try {
       final prefs = await SharedPreferences.getInstance();
       final logs = prefs.getStringList('app_logs') ?? [];
-      
+
       logs.add(logEntry);
-      
+
       // Maintain size limit
       if (logs.length > _maxLocalLogs) {
         logs.removeRange(0, logs.length - _maxLocalLogs);
       }
-      
+
       await prefs.setStringList('app_logs', logs);
+      await LogFileStorage.appendLogEntry(logEntry);
     } catch (e) {
       debugPrint('⚠️ Failed to save log to local storage: $e');
     }
@@ -267,9 +270,14 @@ class ComprehensiveLogger {
     }
   }
 
-  /// Get all local logs
+  /// Get all local logs from file storage when available, otherwise fallback to preferences.
   static Future<List<String>> getLocalLogs() async {
     try {
+      final fileLines = await LogFileStorage.readLogLines();
+      if (fileLines.isNotEmpty) {
+        return fileLines;
+      }
+
       final prefs = await SharedPreferences.getInstance();
       return prefs.getStringList('app_logs') ?? [];
     } catch (e) {
@@ -278,11 +286,22 @@ class ComprehensiveLogger {
     }
   }
 
-  /// Clear all local logs
+  /// Return the path to the local log file when available.
+  static Future<String?> getLocalLogFilePath() async {
+    try {
+      return await LogFileStorage.getLogFilePath();
+    } catch (e) {
+      debugPrint('⚠️ Failed to get log file path: $e');
+      return null;
+    }
+  }
+
+  /// Clear all local logs and file-backed logs.
   static Future<void> clearLocalLogs() async {
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.remove('app_logs');
+      await LogFileStorage.clearLogFile();
       _logBuffer.clear();
       if (kDebugMode) {
         debugPrint('🗑️ Local logs cleared');

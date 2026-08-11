@@ -78,9 +78,18 @@ class SyncQueueManager {
       // Action-specific validation
       switch (action) {
         case 'save_sale':
-          // Validate sale data has required fields
-          if (!data.containsKey('sale_id') || data['sale_id'] == null) {
-            if (kDebugMode) debugPrint('⚠️ Missing sale_id in save_sale data');
+        case 'create_sale':
+          // Validate sale data has a stable identifier: sale_id or invoice number.
+          final saleId = data['sale_id']?.toString().trim().toLowerCase() ?? '';
+          final invoiceNumber = (data['invoice_payload'] is Map<String, dynamic>
+                  ? data['invoice_payload']['invoice_number']?.toString().trim().toLowerCase()
+                  : null) ??
+              (data['payload'] is Map<String, dynamic>
+                  ? data['payload']['invoice_number']?.toString().trim().toLowerCase()
+                  : null) ??
+              data['invoice_number']?.toString().trim().toLowerCase() ?? '';
+          if (saleId.isEmpty && invoiceNumber.isEmpty) {
+            if (kDebugMode) debugPrint('⚠️ Missing sale identifier in $action data');
             return false;
           }
           break;
@@ -172,21 +181,44 @@ class SyncQueueManager {
           }
         }
 
-        // 🔧 FIX: Check if sale_id already exists in queue (idempotency)
-        if (action == 'save_sale' && data.containsKey('sale_id')) {
-          final saleId = data['sale_id'].toString();
-          Map<String, dynamic>? existing;
-          try {
-            existing = box.values.cast<Map<String, dynamic>>().firstWhere(
-              (item) => item['action'] == 'save_sale' &&
-                         item['data']['sale_id']?.toString() == saleId,
-            );
-          } catch (e) {
-            existing = null;
-          }
-          if (existing != null) {
-            if (kDebugMode) debugPrint('📦 [SyncQueue] Sale $saleId already in queue - skipping duplicate');
-            return;
+        // 🔧 FIX: Check if the sale/invoice identifier already exists in the queue (idempotency)
+        if (action == 'save_sale' || action == 'create_sale') {
+          final saleId = data['sale_id']?.toString().trim().toLowerCase() ?? '';
+          final invoiceNumber = (data['invoice_payload'] is Map<String, dynamic>
+                  ? data['invoice_payload']['invoice_number']?.toString().trim().toLowerCase()
+                  : null) ??
+              (data['payload'] is Map<String, dynamic>
+                  ? data['payload']['invoice_number']?.toString().trim().toLowerCase()
+                  : null) ??
+              data['invoice_number']?.toString().trim().toLowerCase() ?? '';
+          final identifier = saleId.isNotEmpty ? saleId : invoiceNumber;
+
+          if (identifier.isNotEmpty) {
+            Map<String, dynamic>? existing;
+            try {
+              existing = box.values.cast<Map<String, dynamic>>().firstWhere(
+                (item) {
+                  if (item['action'] != 'save_sale' && item['action'] != 'create_sale') return false;
+                  final itemData = item['data'] as Map<String, dynamic>?;
+                  if (itemData == null) return false;
+                  final itemSaleId = itemData['sale_id']?.toString().trim().toLowerCase() ?? '';
+                  final itemInvoice = (itemData['invoice_payload'] is Map<String, dynamic>
+                          ? itemData['invoice_payload']['invoice_number']?.toString().trim().toLowerCase()
+                          : null) ??
+                      (itemData['payload'] is Map<String, dynamic>
+                          ? itemData['payload']['invoice_number']?.toString().trim().toLowerCase()
+                          : null) ??
+                      itemData['invoice_number']?.toString().trim().toLowerCase() ?? '';
+                  return itemSaleId == identifier || itemInvoice == identifier;
+                },
+              );
+            } catch (e) {
+              existing = null;
+            }
+            if (existing != null) {
+              if (kDebugMode) debugPrint('📦 [SyncQueue] Sale $identifier already in queue - skipping duplicate');
+              return;
+            }
           }
         }
 

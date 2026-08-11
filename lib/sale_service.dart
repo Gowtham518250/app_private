@@ -166,6 +166,18 @@ try {
     };
   }).toList();
 
+  final invalidItem = lineItems.firstWhere(
+    (line) => (line['unit_price'] ?? 0) <= 0 || (line['quantity'] ?? line['qty'] ?? 0) <= 0,
+    orElse: () => {},
+  );
+  if (invalidItem.isNotEmpty) {
+    return {
+      'success': false,
+      'error': 'INVALID_SALE_ITEM',
+      'message': 'Sale contains an invalid item with zero or negative price/quantity.',
+    };
+  }
+
   try {
     await CrashRecoveryService.instance.registerIncompleteTransaction('sale', {
       'sale_id': saleId,

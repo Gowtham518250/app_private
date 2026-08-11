@@ -100,7 +100,10 @@ class _AttendancePageState extends State<AttendancePage>
     
     // Then sync with backend in background
     try {
-      final res = await ApiClient.getJson(ApiClient.attendanceWorkers);
+      final url = (_userId != null && _userId! > 0)
+          ? '${ApiClient.attendanceWorkers}?user_id=$_userId'
+          : ApiClient.attendanceWorkers;
+      final res = await ApiClient.getJson(url);
       if (res.statusCode == 200) {
         final data = json.decode(res.body);
         if (mounted) {

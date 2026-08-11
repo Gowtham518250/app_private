@@ -212,7 +212,7 @@ mixin ErrorBoundaryMixin<T extends StatefulWidget> on State<T> {
       };
       if (kDebugMode) {
         // ignore: avoid_print
-        print('[ErrorBoundary] Captured context: \\$\{_lastErrorContext}\n');
+        print('[ErrorBoundary] Captured context: ${_lastErrorContext}\n');
       }
     } catch (e) {
       if (kDebugMode) {
