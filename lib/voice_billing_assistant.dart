@@ -978,7 +978,23 @@ class _VoiceBillingAssistantState extends State<VoiceBillingAssistant>
     } else if (_lastPreviewItems.isNotEmpty) {
       // Even if transcript is empty, we had preview items from partial results
       // Commit them directly instead of losing them
-      _committedItems.addAll(_lastPreviewItems);
+      for (final newItem in _lastPreviewItems) {
+        final existingIdx = _committedItems.indexWhere(
+          (c) => c.name.trim().toLowerCase() == newItem.name.trim().toLowerCase(),
+        );
+        if (existingIdx >= 0) {
+          final existing = _committedItems[existingIdx];
+          _committedItems[existingIdx] = ParsedItem(
+            name: existing.name,
+            qty: existing.qty + newItem.qty,
+            unit: newItem.unit.isNotEmpty ? newItem.unit : existing.unit,
+            price: newItem.price > 0 ? newItem.price : existing.price,
+            confidence: newItem.confidence,
+          );
+        } else {
+          _committedItems.add(newItem);
+        }
+      }
       _clearEditControllers();
       if (mounted) {
         setState(() {

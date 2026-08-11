@@ -3909,10 +3909,21 @@ class _SalesEntryPageState extends State<SalesEntryPage>
     if (phone.isEmpty) return;
     final List<dynamic> history = await LocalStorageService.loadSales();
     
-    final pendingBorrows = history.wher    } catch (e) {
-      if (kDebugMode) debugPrint('â Œ Error queueing action: $e');
+    final pendingBorrows = history.where((tx) {
+      return (tx['phone'] == phone || tx['phone_number'] == phone) &&
+             tx['payment_status'] == 'PENDING';
+    }).toList();
+    if (pendingBorrows.isNotEmpty) {
+       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+         content: Text('Alert: Customer has ${pendingBorrows.length} pending borrows'),
+         backgroundColor: Colors.orange,
+       ));
     }
-  }tInstance();  // 🔧 Added: Initialize prefs for local storage
+  }
+
+  Future<void> _saveCustomerToBackend(String name, String phone, String address) async {
+    final token = await SecureTokenStorage.getToken() ?? '';
+    final prefs = await SharedPreferences.getInstance();  // 🔧 Added: Initialize prefs for local storage
     
     try {
       // If online, sync immediately

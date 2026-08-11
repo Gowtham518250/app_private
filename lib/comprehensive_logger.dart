@@ -335,7 +335,7 @@ class ComprehensiveLogger {
     _log(level: WARNING, location: location, message: message, data: data);
   }
 
-  static void logError(String location, String message, [Map<String, dynamic>? data]) {
+  static void logError({required String location, required String message, Map<String, dynamic>? data}) {
     _log(level: ERROR, location: location, message: message, data: data);
   }
 

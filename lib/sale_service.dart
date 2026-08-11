@@ -547,74 +547,90 @@ try {
   }) async {
     List<dynamic> history = await LocalStorageService.loadSales();
 
-if (!history.any((s) => s['sale_id'] == saleId)) {
-  final String safePhone = customerPhone.isNotEmpty
-      ? customerPhone
-      : 'GUEST_${saleId.length >= 6 ? saleId.substring(saleId.length - 6) : saleId.padLeft(6, '0')}';
+    int existingIndex = history.indexWhere((s) {
+      if (s is! Map) return false;
+      final id = (s['sale_id'] ?? s['invoice_number'] ?? s['id'] ?? '').toString();
+      return id == saleId;
+    });
 
-  final String saleTimestamp = DateTime.now().toUtc().toIso8601String();
+    final String safePhone = customerPhone.isNotEmpty
+        ? customerPhone
+        : 'GUEST_${saleId.length >= 6 ? saleId.substring(saleId.length - 6) : saleId.padLeft(6, '0')}';
 
-  final List<Map<String, dynamic>> normalizedItems = items.map((item) {
-    final double price = (item['unit_price'] ?? item['price'] ?? 0.0) is num
-        ? (item['unit_price'] ?? item['price'] ?? 0.0).toDouble()
-        : double.tryParse((item['unit_price'] ?? item['price'] ?? '0').toString()) ?? 0.0;
-    final double qty = (item['quantity'] ?? item['qty'] ?? 1) is num
-        ? (item['quantity'] ?? item['qty'] ?? 1).toDouble()
-        : double.tryParse((item['quantity'] ?? item['qty'] ?? '1').toString()) ?? 1.0;
-    final double lineTotal = (item['line_total'] ?? item['total']) is num
-        ? (item['line_total'] ?? item['total']).toDouble()
-        : CurrencyManager.multiply(price, qty);
+    final String saleTimestamp = DateTime.now().toUtc().toIso8601String();
 
-    return {
-      ...item,
-      'price': price,
-      'price_str': price.toString(),
-      'unit_price': price,
-      'qty': qty,
-      'quantity': qty,
-      'qty_str': qty.toString(),
-      'total': lineTotal,
-      'line_total': lineTotal,
-      'total_with_tax': lineTotal,
-      'product': item['product_name'] ?? item['product'] ?? item['item'] ?? '',
-      'name': item['product_name'] ?? item['product'] ?? item['item'] ?? '',
-      'item': item['product_name'] ?? item['product'] ?? item['item'] ?? '',
+    final List<Map<String, dynamic>> normalizedItems = items.map((item) {
+      final double price = (item['unit_price'] ?? item['price'] ?? 0.0) is num
+          ? (item['unit_price'] ?? item['price'] ?? 0.0).toDouble()
+          : double.tryParse((item['unit_price'] ?? item['price'] ?? '0').toString()) ?? 0.0;
+      final double qty = (item['quantity'] ?? item['qty'] ?? 1) is num
+          ? (item['quantity'] ?? item['qty'] ?? 1).toDouble()
+          : double.tryParse((item['quantity'] ?? item['qty'] ?? '1').toString()) ?? 1.0;
+      final double lineTotal = (item['line_total'] ?? item['total']) is num
+          ? (item['line_total'] ?? item['total']).toDouble()
+          : CurrencyManager.multiply(price, qty);
+
+      return {
+        ...item,
+        'price': price,
+        'price_str': price.toString(),
+        'unit_price': price,
+        'qty': qty,
+        'quantity': qty,
+        'qty_str': qty.toString(),
+        'total': lineTotal,
+        'line_total': lineTotal,
+        'total_with_tax': lineTotal,
+        'product': item['product_name'] ?? item['product'] ?? item['item'] ?? '',
+        'name': item['product_name'] ?? item['product'] ?? item['item'] ?? '',
+        'item': item['product_name'] ?? item['product'] ?? item['item'] ?? '',
+      };
+    }).toList();
+
+    final userId = prefs.getInt('user_id') ?? prefs.getInt('userId');
+
+    final Map<String, dynamic> saleRecord = {
+      'sale_id': saleId,
+      'invoice_number': saleId,
+      'created_at': saleTimestamp,
+      'updated_at': saleTimestamp,
+      'user_id': userId,
+      'sync_status': syncStatus,
+      'pending_sync': syncStatus != 'synced',
+      'sync_attempts': 0,
+      'last_sync_attempt': null,
+      'backend_id': null,
+      'is_deleted': false,
+      'customer_name': customerName.isNotEmpty ? customerName : 'Guest Customer',
+      'customer_phone': customerPhone,
+      'guest_id': safePhone,
+      'items': normalizedItems,
+      'sale_date': saleTimestamp,
+      'date': saleTimestamp,
+      'subtotal': totals['subtotal'].toString(),
+      'total': grandTotal.toString(),
+      'total_amount': grandTotal,
+      'paid_amount': paidAmount.toString(),
+      'payment_status': paymentStatusFor(paidAmount, grandTotal),
+      'gst_applied': withTax,
+      'payment_method': paymentMethod,
     };
-  }).toList();
 
-  final userId = prefs.getInt('user_id') ?? prefs.getInt('userId');
+    if (existingIndex >= 0) {
+      final existingSale = Map<String, dynamic>.from(history[existingIndex] as Map);
+      history[existingIndex] = {
+        ...existingSale,
+        ...saleRecord,
+        'updated_at': saleTimestamp,
+      };
+    } else {
+      history.add(saleRecord);
+    }
 
-  history.add({
-    'sale_id': saleId,
-    'created_at': saleTimestamp,
-    'updated_at': saleTimestamp,
-    'user_id': userId,
-    'sync_status': syncStatus,
-    'pending_sync': syncStatus != 'synced',
-    'sync_attempts': 0,
-    'last_sync_attempt': null,
-    'backend_id': null,
-    'is_deleted': false,
-    'customer_name': customerName.isNotEmpty ? customerName : 'Guest Customer',
-    'customer_phone': customerPhone,
-    'guest_id': safePhone,
-    'items': normalizedItems,
-    'sale_date': saleTimestamp,
-    'date': saleTimestamp,
-    'subtotal': totals['subtotal'].toString(),
-    'total': grandTotal.toString(),
-    'total_amount': grandTotal,
-    'paid_amount': paidAmount.toString(),
-    'payment_status': paymentStatusFor(paidAmount, grandTotal),
-    'gst_applied': withTax,
-    'payment_method': paymentMethod,
-  });
-
-  if (history.length > 5000) {
-    history = history.sublist(history.length - 5000);
+    if (history.length > 5000) {
+      history = history.sublist(history.length - 5000);
+    }
+    await LocalStorageService.saveSales(history);
+    if (kDebugMode) debugPrint('📝 Created local sale with sync metadata: $saleId');
   }
-  await LocalStorageService.saveSales(history);
-  if (kDebugMode) debugPrint('📝 Created local sale with sync metadata: $saleId');
-  }
-}
 }

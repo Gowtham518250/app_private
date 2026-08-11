@@ -486,9 +486,19 @@ class _DashboardPageState extends State<DashboardPage>
   }
 
   Future<void> _checkPermissions() async {
-    final granted = await NotificationListenerService.isPermissionGranted();
-    if (!granted && mounted) {
+    final notifGranted = await NotificationListenerService.isPermissionGranted();
+    final smsGranted = (await Permission.sms.status).isGranted;
+
+    if (!mounted) return;
+
+    if (!notifGranted || !smsGranted) {
       setState(() => _isPermissionsMissing = true);
+    } else {
+      setState(() => _isPermissionsMissing = false);
+    }
+
+    if (notifGranted || smsGranted) {
+      await PaymentDetectionService().ensureChannelsRunning();
     }
   }
 
@@ -8828,7 +8838,7 @@ class _DashboardPageState extends State<DashboardPage>
           ),
           const SizedBox(height: 8),
           Text(
-            'To speak payments out loud, the app needs "Notification Access". Please turn it ON in settings.',
+            'To detect payments reliably, the app needs Notification Access and SMS permission. Please allow both in settings.',
             style: GoogleFonts.poppins(
               color: const Color(0xFF991B1B),
               fontSize: 13,
@@ -8851,7 +8861,7 @@ class _DashboardPageState extends State<DashboardPage>
                 padding: const EdgeInsets.symmetric(vertical: 12),
               ),
               child: Text(
-                'ENABLE VOICE NOW',
+                'OPEN PERMISSIONS',
                 style: GoogleFonts.poppins(
                   fontWeight: FontWeight.bold,
                   letterSpacing: 1,
@@ -9523,7 +9533,8 @@ class _DashboardPageState extends State<DashboardPage>
             ElevatedButton(
               onPressed: () async {
                 final masterPin = await SecurityService.getMasterPin();
-                if (controller.text == masterPin) {
+                final inputHash = sha256.convert(utf8.encode(controller.text)).toString();
+                if (inputHash == masterPin) {
                   if (ctx.mounted) Navigator.pop(ctx);
                   onResult(true);
                 } else {

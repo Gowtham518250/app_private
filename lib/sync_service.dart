@@ -452,12 +452,16 @@ class SyncService {
         'date': saleDate,
       };
       try {
-        // Fix Bug #13: Use JSON post instead of form-data to match the backend expectation
-        final res = await ApiClient.post(
+        // Fix Bug #13: Use JSON post and decode response body to Map
+        final resp = await ApiClient.postJson(
           ApiClient.salesEndpoint,
           body,
           headers: {'Authorization': 'Bearer $authToken'},
         );
+        final Map<String, dynamic> res = resp.body.isNotEmpty
+            ? (jsonDecode(resp.body) as Map<String, dynamic>)
+            : <String, dynamic>{};
+
         if (res['status'] == 'success' || res['success'] == true || res['id'] != null) {
           synced++;
         } else {

@@ -19,7 +19,7 @@ class StoredSale {
       };
 
   factory StoredSale.fromJson(Map<String, dynamic> json) {
-    final saleId = json['sale_id']?.toString() ?? json['id']?.toString() ?? '';
+    final saleId = json['sale_id']?.toString() ?? json['invoice_number']?.toString() ?? json['id']?.toString() ?? '';
     return StoredSale(
       saleId: saleId,
       status: json['status']?.toString() ?? 'PENDING',

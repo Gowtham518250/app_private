@@ -1,4 +1,5 @@
 import 'dart:math';
+import 'dart:convert';
 import 'package:flutter/foundation.dart' show kDebugMode, debugPrint;
 import 'email_sender_service.dart';
 import 'api_client.dart';
@@ -66,16 +67,19 @@ class OTPService {
   /// Now uses backend validation via ApiClient
   static Future<Map<String, dynamic>> verifyOTP(String email, String enteredOTP) async {
     try {
-      // Import ApiClient inside the method if not imported globally to avoid circular deps
-      final res = await ApiClient.post(
+      final resp = await ApiClient.postJson(
         ApiClient.authVerifyOtp,
         {'email': email.trim(), 'otp': enteredOTP.trim()},
       );
-      
+
+      final Map<String, dynamic> res = resp.body.isNotEmpty
+          ? (jsonDecode(resp.body) as Map<String, dynamic>)
+          : <String, dynamic>{};
+
       if (res['status'] == 'success' || res['success'] == true) {
         return {
-          'success': true, 
-          'message': 'OTP verified', 
+          'success': true,
+          'message': 'OTP verified',
           'token': res['token'] ?? res['jwt'] ?? 'local_verified'
         };
       }

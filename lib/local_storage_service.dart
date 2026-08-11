@@ -709,14 +709,8 @@ class LocalStorageService {
     final box = await _getBox(_salesBoxBase, encrypted: true);
     final userId = await _getUserId();
 
-    final List<dynamic> existingSales = box.get('all_sales', defaultValue: []);
-
-    final List<dynamic> combinedRaw;
-    if (salesHistory.length >= existingSales.length && existingSales.isNotEmpty && salesHistory.any((s) => s['sale_id'] == existingSales.first['sale_id'])) {
-      combinedRaw = [...salesHistory];
-    } else {
-      combinedRaw = [...existingSales, ...salesHistory];
-    }
+    final List<dynamic> existingSales = List<dynamic>.from(box.get('all_sales', defaultValue: []));
+    final List<dynamic> combinedRaw = [...existingSales, ...salesHistory];
 
     final dedupedSales = SalesDedupHelper.dedupeBills(combinedRaw);
     final List<StoredSale> typedSales = dedupedSales.map<StoredSale>((sale) {
@@ -724,7 +718,7 @@ class LocalStorageService {
     }).toList();
 
     await box.put('all_sales', typedSales.map((sale) => sale.toJson()).toList());
-    if (kDebugMode) debugPrint('💾 [LocalStorage] Merged ${salesHistory.length} sales (total: ${typedSales.length}) for user: $userId');
+    if (kDebugMode) debugPrint('💾 [LocalStorage] Saved ${typedSales.length} deduplicated sales for user: $userId');
   }
 
   static Future<List<dynamic>> loadSales() async {
@@ -808,7 +802,35 @@ class LocalStorageService {
       throw Exception('SECURITY: Cannot save invoices without authenticated user_id. Please log in first.');
     }
     final box = await _getBox(_invoicesBoxBase);
-    await box.put('manual_invoices', invoices);
+    final List<dynamic> existingInvoices = List<dynamic>.from(box.get('manual_invoices', defaultValue: []));
+    final Map<String, Map<String, dynamic>> invoiceMap = {};
+
+    for (final rawInvoice in [...existingInvoices, ...invoices]) {
+      if (rawInvoice is! Map) continue;
+      final invoice = Map<String, dynamic>.from(rawInvoice);
+      final id = invoice['sale_id']?.toString() ??
+                 invoice['invoice_number']?.toString() ??
+                 invoice['id']?.toString() ??
+                 invoice['invoiceId']?.toString() ??
+                 '';
+      if (id.isEmpty) {
+        final key = '__anon_invoice_${invoiceMap.length}';
+        invoiceMap[key] = invoice;
+      } else {
+        final existing = invoiceMap[id];
+        if (existing == null) {
+          invoiceMap[id] = invoice;
+        } else {
+          final existingUpdatedAt = DateTime.tryParse(existing['updated_at']?.toString() ?? existing['created_at']?.toString() ?? '') ?? DateTime(1970);
+          final currentUpdatedAt = DateTime.tryParse(invoice['updated_at']?.toString() ?? invoice['created_at']?.toString() ?? '') ?? DateTime(1970);
+          invoiceMap[id] = currentUpdatedAt.isAfter(existingUpdatedAt) ? invoice : existing;
+        }
+      }
+    }
+
+    final dedupedInvoices = invoiceMap.values.toList();
+    await box.put('manual_invoices', dedupedInvoices);
+    if (kDebugMode) debugPrint('💾 [LocalStorage] Saved ${dedupedInvoices.length} invoices');
   }
 
   static Future<List<dynamic>> loadLocalInvoices() async {
@@ -931,7 +953,7 @@ class LocalStorageService {
 
     // Add unpaid invoices debt that is NOT already accounted for
     // Assuming khata_balance only reflects manual payments/credit sales.
-    // If an invoice is UNPAID, add it to their debt.
+    // If an invoice is UNPAID or PARTIAL, add only the outstanding amount.
     for (var inv in invoices) {
       final phone = inv['customer_phone']?.toString() ?? '';
       if (phone.isEmpty) continue;
@@ -948,34 +970,37 @@ class LocalStorageService {
         };
       }
 
-      // FIX: invoices store payment status under 'payment_status' (see
-      // sale_service.dart's create-invoice payload), not 'status' — 'status'
-      // on an invoice/sale record means sync status ('COMMITTED_LOCALLY',
-      // 'QUEUED_OFFLINE', etc.), a completely different field. Reading
-      // inv['status'] here meant it was always null, so isPaid was always
-      // false, so every invoice — including fully paid ones — got added to
-      // the customer's outstanding unified_balance debt.
-      final isPaid = inv['payment_status']?.toString().toUpperCase() == 'PAID';
-      if (!isPaid) {
-        final amount = double.tryParse(inv['total_amount']?.toString() ?? '0') ?? 0.0;
-        unified[phone]!['unified_balance'] = (unified[phone]!['unified_balance'] as double) + amount;
+      final total = double.tryParse(inv['total_amount']?.toString() ?? inv['total']?.toString() ?? '0') ?? 0.0;
+      final paid = double.tryParse(inv['paid_amount']?.toString() ?? '0') ?? 0.0;
+      final status = inv['payment_status']?.toString().toUpperCase() ?? _deriveInvoiceStatus(total, paid);
+      final outstanding = (total - paid).clamp(0.0, double.infinity);
+
+      if (status != 'PAID' && outstanding > 0.0) {
+        unified[phone]!['unified_balance'] = (unified[phone]!['unified_balance'] as double) + outstanding;
       }
     }
 
     return unified.values.toList();
   }
 
+  static String _deriveInvoiceStatus(double total, double paid) {
+    if (paid >= total - 0.01) return 'PAID';
+    if (paid > 0) return 'PARTIAL';
+    return 'UNPAID';
+  }
+
   static Future<void> recordUnifiedPayment(String customerPhone, double amount) async {
     final balances = await loadKhataBalances();
     final current = balances[customerPhone] ?? 0.0;
-    
+
     // Instead of just reducing khata, we also check unpaid invoices if needed, but for simplicity:
     // Allow khataBalance to go negative if they overpay or pay off an invoice via Khata.
     // That way, unified_balance = khataBalance (negative) + unpaid_invoices (positive) = 0.
-    balances[customerPhone] = current - amount; 
+    balances[customerPhone] = current - amount;
     await saveKhataBalances(balances);
   }
-static Future<void> updateCustomerBalance(String customerId, double balance) async {
+
+  static Future<void> updateCustomerBalance(String customerId, double balance) async {
     final balances = await loadKhataBalances();
     balances[customerId] = balance;
     await saveKhataBalances(balances);

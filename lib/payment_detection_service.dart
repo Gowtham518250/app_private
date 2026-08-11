@@ -200,6 +200,7 @@ class PaymentUiState {
     PaymentDecision? decision,
     bool?            isUserConfirmed,
     bool?            isUserRejected,
+    bool?            isBillMatch,
   }) => PaymentUiState(
     id:              id,
     decision:        decision        ?? this.decision,
@@ -209,7 +210,7 @@ class PaymentUiState {
     isFailed:        isFailed,
     isPartial:       isPartial,
     shortfall:       shortfall,
-    isBillMatch:     isBillMatch,
+    isBillMatch:     isBillMatch    ?? this.isBillMatch,
     detectedAt:      detectedAt,
     isUserConfirmed: isUserConfirmed ?? this.isUserConfirmed,
     isUserRejected:  isUserRejected  ?? this.isUserRejected,
@@ -2218,6 +2219,34 @@ class PaymentDetectionService {
     return notifOk || smsOk;
   }
 
+  Future<void> _ensureDetectionPermissions() async {
+    if (!PdsConfig.isNotificationEnabled) {
+      PdsLogger.i('SVC', 'Notification channel disabled by config');
+    } else if (!await NotificationListenerService.isPermissionGranted()) {
+      PdsLogger.w('SVC', 'Notification listener permission missing; requesting');
+      try {
+        await NotificationListenerService.requestPermission();
+      } catch (e, st) {
+        PdsLogger.e('SVC', 'Notification permission request failed', e, st);
+      }
+    }
+
+    if (!PdsConfig.isSmsEnabled) {
+      PdsLogger.i('SVC', 'SMS channel disabled by config');
+    } else {
+      try {
+        final granted = await Telephony.instance.requestSmsPermissions;
+        if (granted == true) {
+          PdsLogger.i('SVC', 'SMS permission granted');
+        } else {
+          PdsLogger.w('SVC', 'SMS permission denied or unavailable');
+        }
+      } catch (e, st) {
+        PdsLogger.e('SVC', 'SMS permission request failed', e, st);
+      }
+    }
+  }
+
   void repeatLastPayment() {
     if (_lastConfirmed == null) return;
     final text = VoiceBuilder.received(
@@ -2322,6 +2351,7 @@ class PaymentDetectionService {
     await PdsStateStore.loadDedup(_dedupStore);
     await TrustedSenderStore.preload(); // FIX-B
 
+    await _ensureDetectionPermissions();
     await _startNotificationListener();
     await _startSmsListener();
     _startAccessibilityListener();
@@ -2451,23 +2481,25 @@ class PaymentDetectionService {
   Future<void> _startNotificationListener() async {
     if (!PdsConfig.isNotificationEnabled) return;
     try {
-      if (await NotificationListenerService.isPermissionGranted()) {
-        await _notifSub?.cancel();
-        _notifSub = NotificationListenerService.notificationsStream.listen(
-          _handleNotification,
-          onError: (Object e, StackTrace st) {
-            PdsLogger.e('L1', 'Stream error', e, st);
-            _emitStatus(ChannelType.notification, ChannelStatus.error);
-            Future<void>.delayed(
-                const Duration(seconds: 10), _startNotificationListener);
-          },
-        );
-        PdsLogger.i('L1', 'Notification ONLINE');
-        _emitStatus(ChannelType.notification, ChannelStatus.online);
-      } else {
-        PdsLogger.w('L1', 'Notification PERMISSION_DENIED');
+      final permissionGranted = await NotificationListenerService.isPermissionGranted();
+      if (!permissionGranted) {
+        PdsLogger.w('L1', 'Notification permission was not granted when starting listener');
         _emitStatus(ChannelType.notification, ChannelStatus.permissionDenied);
+        return;
       }
+
+      await _notifSub?.cancel();
+      _notifSub = NotificationListenerService.notificationsStream.listen(
+        _handleNotification,
+        onError: (Object e, StackTrace st) {
+          PdsLogger.e('L1', 'Stream error', e, st);
+          _emitStatus(ChannelType.notification, ChannelStatus.error);
+          Future<void>.delayed(
+              const Duration(seconds: 10), _startNotificationListener);
+        },
+      );
+      PdsLogger.i('L1', 'Notification ONLINE');
+      _emitStatus(ChannelType.notification, ChannelStatus.online);
     } catch (e, st) {
       PdsLogger.e('L1', 'Start error', e, st);
       _emitStatus(ChannelType.notification, ChannelStatus.error, detail: '$e');
@@ -2491,6 +2523,18 @@ class PaymentDetectionService {
         PdsLogger.i('L2', 'SMS ONLINE');
         _emitStatus(ChannelType.sms, ChannelStatus.online);
       } else {
+        if (await Telephony.instance.requestSmsPermissions ?? false) {
+          // Retry once in case of transient denial
+          _isSmsListening = true;
+          Telephony.instance.listenIncomingSms(
+            onNewMessage: (m) => handleSms(m.address ?? '', m.body ?? ''),
+            onBackgroundMessage: smsBackgroundHandler,
+            listenInBackground: true,
+          );
+          PdsLogger.i('L2', 'SMS ONLINE after retry');
+          _emitStatus(ChannelType.sms, ChannelStatus.online);
+          return;
+        }
         PdsLogger.w('L2', 'SMS PERMISSION_DENIED');
         _emitStatus(ChannelType.sms, ChannelStatus.permissionDenied);
       }
@@ -2544,6 +2588,26 @@ class PaymentDetectionService {
       NotificationListenerService.isPermissionGranted();
   static Future<void>  openNotificationSettings() =>
       NotificationListenerService.requestPermission();
+  static Future<bool>  hasSmsPermission() async =>
+      (await Permission.sms.status).isGranted;
+  static Future<void>  openSmsSettings() async {
+    try {
+      await openAppSettings();
+    } catch (_) {
+      // ignore
+    }
+  }
+
+  Future<void> ensureChannelsRunning() async {
+    if (!_isStarted) return;
+    if (PdsConfig.isNotificationEnabled && await hasNotificationPermission()) {
+      await _startNotificationListener();
+    }
+    if (PdsConfig.isSmsEnabled && await hasSmsPermission()) {
+      await _startSmsListener();
+    }
+  }
+
   static Future<bool>  isBatteryOptimizationIgnored() async =>
       (await Permission.ignoreBatteryOptimizations.status).isGranted;
   static Future<void>  requestBatteryExemption() =>
@@ -3199,7 +3263,7 @@ class PaymentDetectionService {
         final sales = await LocalStorageService.loadSales();
         for (var i = 0; i < sales.length; i++) {
           final sale = Map<String, dynamic>.from(sales[i] as Map);
-          final status = sale['payment_status']?.toString().toUpperCase() ?? '';
+          final status = _derivePaymentStatus(sale);
           if (!['UNPAID', 'PARTIAL'].contains(status)) continue;
 
           final total = _toAmount(sale['total'] ?? sale['total_amount']);
@@ -3208,7 +3272,7 @@ class PaymentDetectionService {
           if ((due - amount).abs() > 1.0) continue;
 
           if (saleId.isNotEmpty) {
-            final candidateId = sale['sale_id']?.toString() ?? sale['invoice_number']?.toString() ?? sale['invoiceId']?.toString() ?? '';
+            final candidateId = _extractRecordId(sale);
             if (candidateId != saleId) continue;
           }
 
@@ -3234,13 +3298,18 @@ class PaymentDetectionService {
         final invoices = await LocalStorageService.loadLocalInvoices();
         for (var i = 0; i < invoices.length; i++) {
           final invoice = Map<String, dynamic>.from(invoices[i] as Map);
-          final status = invoice['status']?.toString().toUpperCase() ?? 'UNPAID';
+          final status = _derivePaymentStatus(invoice);
           if (!['UNPAID', 'PARTIAL'].contains(status)) continue;
 
           final total = _toAmount(invoice['total_amount'] ?? invoice['amount'] ?? 0);
           final paid = _toAmount(invoice['paid_amount'] ?? 0);
           final due = (total - paid).clamp(0.0, double.infinity);
           if ((due - amount).abs() > 1.0) continue;
+
+          if (saleId.isNotEmpty) {
+            final candidateId = _extractRecordId(invoice);
+            if (candidateId != saleId) continue;
+          }
 
           invoice['status'] = 'PAID';
           invoice['payment_status'] = 'PAID';
@@ -3264,6 +3333,29 @@ class PaymentDetectionService {
     if (value is num) return value.toDouble();
     final cleaned = value.toString().replaceAll(RegExp(r'[^0-9.]'), '');
     return double.tryParse(cleaned) ?? 0.0;
+  }
+
+  String _extractRecordId(Map<String, dynamic> record) {
+    return record['sale_id']?.toString() ??
+           record['invoice_number']?.toString() ??
+           record['saleId']?.toString() ??
+           record['invoiceId']?.toString() ??
+           record['id']?.toString() ??
+           '';
+  }
+
+  String _derivePaymentStatus(Map<String, dynamic> record) {
+    final explicit = (record['payment_status'] ?? record['status'] ?? record['paymentStatus'])?.toString().toUpperCase() ?? '';
+    if (explicit.isNotEmpty) return explicit;
+
+    final total = _toAmount(record['total'] ?? record['total_amount'] ?? record['grand_total'] ?? 0);
+    final paid = _toAmount(record['paid_amount'] ?? record['amount_paid'] ?? 0);
+    if (total <= 0) {
+      return paid > 0 ? 'PAID' : 'UNPAID';
+    }
+    if (paid >= total - 0.01) return 'PAID';
+    if (paid > 0) return 'PARTIAL';
+    return 'UNPAID';
   }
 
   void _scheduleLikelyReannounce(String id, double amount, String fingerprint) {
