@@ -115,18 +115,23 @@ class _KhataPageState extends State<KhataPage> with SingleTickerProviderStateMix
       final invoices = raw
           .map((e) {
             final invoice = Map<String, dynamic>.from(e as Map);
-            final phone = invoice['customer_phone'] ?? invoice['phone'] ?? invoice['mobile'] ?? '';
-            final total = parseAmount(invoice['total_amount'] ?? invoice['total'] ?? invoice['amount']);
-            final paid = parseAmount(invoice['paid_amount'] ?? invoice['amount_paid'] ?? invoice['paid']);
+            final rawName = invoice['customer_name'] ?? invoice['name'] ?? invoice['customer'] ?? '';
+            final customerName = rawName.toString().trim();
+            final phone = (invoice['customer_phone'] ?? invoice['phone'] ?? invoice['mobile'] ?? invoice['contact'] ?? '').toString().trim();
+            final total = parseAmount(invoice['total_amount'] ?? invoice['total'] ?? invoice['amount'] ?? invoice['invoice_total'] ?? invoice['grand_total']);
+            final paid = parseAmount(invoice['paid_amount'] ?? invoice['amount_paid'] ?? invoice['paid'] ?? invoice['received_amount']);
+            final businessDate = invoice['business_date'] ?? invoice['invoice_date'] ?? invoice['sale_date'] ?? invoice['date'] ?? invoice['created_at'];
+            final invoiceNumber = invoice['invoice_number'] ?? invoice['number'] ?? invoice['sale_id'] ?? invoice['id'] ?? phone;
+            final status = (invoice['payment_status'] ?? invoice['status'] ?? _deriveStatus(total, paid)).toString().toUpperCase();
             return {
               ...invoice,
-              'invoice_number': invoice['invoice_number'] ?? invoice['number'] ?? invoice['sale_id'] ?? invoice['id'],
-              'customer_name': invoice['customer_name'] ?? invoice['name'] ?? invoice['customer'] ?? 'Guest Customer',
+              'invoice_number': invoiceNumber,
+              'customer_name': customerName.isNotEmpty ? customerName : (phone.isNotEmpty ? 'Guest Customer' : ''),
               'customer_phone': phone,
-              'business_date': invoice['business_date'] ?? invoice['invoice_date'] ?? invoice['sale_date'] ?? invoice['date'],
+              'business_date': businessDate,
               'total_amount': total,
               'paid_amount': paid,
-              'payment_status': invoice['payment_status'] ?? invoice['status'] ?? _deriveStatus(total, paid),
+              'payment_status': status,
             };
           })
           .toList();
@@ -170,9 +175,10 @@ class _KhataPageState extends State<KhataPage> with SingleTickerProviderStateMix
         // Uncleared amount for this invoice (0 if fully paid)
         final outstanding = (total - paidAmt).clamp(0, double.infinity);
         if (outstanding > 0.01) {
-          final name = inv['customer_name']?.toString().trim();
-          final phone = inv['customer_phone']?.toString().trim() ?? '';
-          final displayName = (name == null || name.isEmpty) ? 'Guest Customer' : name;
+final name = inv['customer_name']?.toString().trim() ?? '';
+        final phone = inv['customer_phone']?.toString().trim() ?? '';
+        if (name.isEmpty && phone.isEmpty) continue;
+        final displayName = name.isNotEmpty ? name : 'Guest Customer';
           // Key by phone when available so the same person's invoices merge together
           final key = phone.isNotEmpty ? phone : displayName;
 
@@ -313,14 +319,9 @@ class _KhataPageState extends State<KhataPage> with SingleTickerProviderStateMix
             final balance = balanceValue is num
                 ? balanceValue.toDouble()
                 : double.tryParse(balanceValue.toString()) ?? 0.0;
-            final name = customer['customer_name'] ??
-                customer['name'] ??
-                customer['customer'] ??
-                'Customer';
-            final phone = customer['customer_phone'] ??
-                customer['phone'] ??
-                customer['mobile'] ??
-                '';
+            final rawName = customer['customer_name'] ?? customer['name'] ?? customer['customer'] ?? '';
+            final name = rawName.toString().trim().isNotEmpty ? rawName.toString().trim() : 'Customer';
+            final phone = (customer['customer_phone'] ?? customer['phone'] ?? customer['mobile'] ?? '').toString().trim();
             return {
               ...customer,
               'customer_id': customer['customer_id'] ?? customer['id'] ?? phone,

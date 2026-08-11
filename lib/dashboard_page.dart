@@ -315,36 +315,46 @@ class _DashboardPageState extends State<DashboardPage>
       double yesterdaySalesAmount = 0;
 
       double _parseSaleAmount(Map<String, dynamic> s) {
-        // Feature Request: "sync with sales if i enterd paid then only paid amount need to sales otherwise not"
         final raw =
+            s['invoice_total'] ??
+            s['total_amount'] ??
             s['total'] ??
             s['grand_total'] ??
-            s['invoice_total'] ??
             s['final_amount'] ??
             s['totalAmount'] ??
-            s['paid_amount'] ??
-            0;
-        if (raw is num) return raw.toDouble();
-        return double.tryParse(raw.toString()) ?? 0.0;
+            s['price'];
+        if (raw is num) {
+          if (raw.toDouble() > 0) return raw.toDouble();
+        }
+
+        final parsed = double.tryParse(raw?.toString() ?? '') ?? 0.0;
+        if (parsed > 0) return parsed;
+
+        final price = double.tryParse(s['price']?.toString() ?? '') ?? 0.0;
+        final qty = double.tryParse(s['quantity']?.toString() ?? s['qty']?.toString() ?? '1') ?? 1.0;
+        return (price * qty).clamp(0.0, double.infinity);
       }
 
       final Set<String> processedTodayBills = {};
       for (final sale in todaysSales) {
-        final billId = sale['_bill_id']?.toString() ?? sale['sale_id']?.toString() ?? '';
-        // If billId is empty, it might be an older unmigrated record. Add it directly.
-        if (billId.isEmpty || !processedTodayBills.contains(billId)) {
-          if (billId.isNotEmpty) processedTodayBills.add(billId);
-          todaySalesAmount += _parseSaleAmount(sale);
-        }
+        final billId = (sale['_bill_id'] ?? sale['invoice_number'] ?? sale['sale_id'] ?? sale['id'])?.toString().trim() ?? '';
+        final invoiceKey = billId.isNotEmpty
+            ? billId
+            : '${sale['product_name'] ?? sale['product'] ?? sale['item'] ?? ''}_${sale['date'] ?? sale['business_date'] ?? sale['sale_date'] ?? sale['created_at'] ?? ''}';
+        if (processedTodayBills.contains(invoiceKey)) continue;
+        processedTodayBills.add(invoiceKey);
+        todaySalesAmount += _parseSaleAmount(sale);
       }
 
       final Set<String> processedYesterdayBills = {};
       for (final sale in yesterdaysSales) {
-        final billId = sale['_bill_id']?.toString() ?? sale['sale_id']?.toString() ?? '';
-        if (billId.isEmpty || !processedYesterdayBills.contains(billId)) {
-          if (billId.isNotEmpty) processedYesterdayBills.add(billId);
-          yesterdaySalesAmount += _parseSaleAmount(sale);
-        }
+        final billId = (sale['_bill_id'] ?? sale['invoice_number'] ?? sale['sale_id'] ?? sale['id'])?.toString().trim() ?? '';
+        final invoiceKey = billId.isNotEmpty
+            ? billId
+            : '${sale['product_name'] ?? sale['product'] ?? sale['item'] ?? ''}_${sale['date'] ?? sale['business_date'] ?? sale['sale_date'] ?? sale['created_at'] ?? ''}';
+        if (processedYesterdayBills.contains(invoiceKey)) continue;
+        processedYesterdayBills.add(invoiceKey);
+        yesterdaySalesAmount += _parseSaleAmount(sale);
       }
 
       final score = DailyHealthScoreService.computeScore(
@@ -354,8 +364,8 @@ class _DashboardPageState extends State<DashboardPage>
         duesPending: duesPending,
         todaySalesAmount: todaySalesAmount,
         yesterdaySalesAmount: yesterdaySalesAmount,
-        todayBillCount: todaysSales.length,
-        yesterdayBillCount: yesterdaysSales.length,
+        todayBillCount: processedTodayBills.length,
+        yesterdayBillCount: processedYesterdayBills.length,
       );
 
       if (!mounted) return;
@@ -372,10 +382,19 @@ class _DashboardPageState extends State<DashboardPage>
   StreamSubscription? _syncSubscription;
 
   DateTime _getLocalDate(Map<String, dynamic> sale) {
-    final dateStr = (sale['business_date'] ?? sale['sale_date'] ?? sale['invoice_date'] ?? sale['date'])?.toString() ?? '';
+    final dateStr = (sale['business_date'] ?? sale['sale_date'] ?? sale['invoice_date'] ?? sale['date'] ?? sale['created_at'] ?? sale['createdAt'])?.toString().trim() ?? '';
+    if (dateStr.isEmpty) return DateTime(1970);
+
     try {
-      return DateTime.parse(dateStr);
-    } catch (_) {
+      if (RegExp(r'^\d{4}-\d{2}-\d{2}\$').hasMatch(dateStr)) {
+        return DateTime.parse(dateStr);
+      }
+
+      final parsed = DateTime.parse(dateStr);
+      final hasExplicitZone = dateStr.endsWith('Z') || RegExp(r'[+-]\d{2}:?\d{2}\$').hasMatch(dateStr);
+      return hasExplicitZone ? parsed.toLocal() : DateTime(parsed.year, parsed.month, parsed.day, parsed.hour, parsed.minute, parsed.second, parsed.millisecond, parsed.microsecond);
+    } catch (e) {
+      if (kDebugMode) debugPrint('⚠️ Invalid sale date format: $dateStr');
       return DateTime(1970);
     }
   }
@@ -2472,7 +2491,9 @@ class _DashboardPageState extends State<DashboardPage>
       final date = tx['business_date'] ??
           tx['sale_date'] ??
           tx['invoice_date'] ??
-          tx['date'];
+          tx['date'] ??
+          tx['created_at'] ??
+          tx['createdAt'];
       if (date == null || date.toString().trim().isEmpty) {
         if (kDebugMode) debugPrint('⚠️ Skipping sale without business_date during dashboard flattening');
         continue;
@@ -2482,11 +2503,14 @@ class _DashboardPageState extends State<DashboardPage>
       final invoiceNumberRaw = tx['invoice_number']?.toString() ??
           tx['sale_id']?.toString() ??
           tx['_bill_id']?.toString();
-      final invoiceNumber = invoiceNumberRaw?.trim().toLowerCase() ?? '';
+      final fallbackInvoiceNumber = tx['id']?.toString() ?? tx['created_at']?.toString() ?? tx['createdAt']?.toString() ?? '';
+      final invoiceNumber = (invoiceNumberRaw?.trim().isNotEmpty == true ? invoiceNumberRaw : fallbackInvoiceNumber)
+          .toString()
+          .trim()
+          .toLowerCase();
 
-      // 🔧 FIX: Skip if no valid invoice_number (prevents date fallback causing duplicates)
-      if (invoiceNumber.isEmpty || invoiceNumber == date.toString()) {
-        if (kDebugMode) debugPrint('⚠️ Skipping sale with invalid invoice_number');
+      if (invoiceNumber.isEmpty) {
+        if (kDebugMode) debugPrint('⚠️ Skipping sale with invalid invoice_number and no fallback ID');
         continue;
       }
 

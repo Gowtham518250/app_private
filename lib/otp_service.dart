@@ -63,31 +63,9 @@ class OTPService {
     }
   }
 
-  /// Verify OTP purely locally (Frontend verification only) - DEPRECATED
-  /// Now uses backend validation via ApiClient
+  /// Verify OTP purely locally (frontend-only verification)
   static Future<Map<String, dynamic>> verifyOTP(String email, String enteredOTP) async {
-    try {
-      final resp = await ApiClient.postJson(
-        ApiClient.authVerifyOtp,
-        {'email': email.trim(), 'otp': enteredOTP.trim()},
-      );
-
-      final Map<String, dynamic> res = resp.body.isNotEmpty
-          ? (jsonDecode(resp.body) as Map<String, dynamic>)
-          : <String, dynamic>{};
-
-      if (res['status'] == 'success' || res['success'] == true) {
-        return {
-          'success': true,
-          'message': 'OTP verified',
-          'token': res['token'] ?? res['jwt'] ?? 'local_verified'
-        };
-      }
-      return {'success': false, 'message': res['message'] ?? 'Invalid OTP'};
-    } catch (e) {
-      if (kDebugMode) debugPrint('Backend OTP verify failed, falling back to local: $e');
-      return _verifyOTPLocally(enteredOTP);
-    }
+    return _verifyOTPLocally(enteredOTP);
   }
 
   /// Internal local verification logic (Fallback only if backend is unreachable)

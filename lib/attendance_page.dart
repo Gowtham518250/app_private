@@ -159,12 +159,8 @@ class _AttendancePageState extends State<AttendancePage>
             final workerData = json.decode(workerRes.body);
             if (workerData is Map && workerData['records'] is List) {
               final workerRecords = List<dynamic>.from(workerData['records'] as List);
-              // Filter for today's records only
-              final todayWorkerRecords = workerRecords.where((r) {
-                final recDate = (r['attendance_date'] ?? '').toString().split('T').first.trim();
-                return recDate == today;
-              }).toList();
-              allRecords.addAll(todayWorkerRecords);
+              // Keep all worker attendance records so payroll can compute monthly totals
+              allRecords.addAll(workerRecords);
             }
           }
         } catch (e) {
@@ -202,7 +198,7 @@ class _AttendancePageState extends State<AttendancePage>
       final recDate = (r['attendance_date'] ?? '').toString().split('T').first.trim();
       final empId = r['employee_id'];
       // Handle both int and string employee_id from backend JSON
-      final empIdMatch = empId == _userId || empId.toString() == _userId.toString();
+      final empIdMatch = empId != null && _userId != null && empId.toString().trim() == _userId.toString().trim();
       return empIdMatch && recDate == today;
     }).firstOrNull;
 
@@ -258,9 +254,11 @@ class _AttendancePageState extends State<AttendancePage>
     for (var r in _records) {
       // Use worker_id if available, otherwise fall back to employee_id for backward compatibility
       final recordWorkerId = r['worker_id'] ?? r['employee_id'];
-      if (recordWorkerId.toString() != workerId.toString()) continue;
+      if (recordWorkerId == null) continue;
+      if (recordWorkerId.toString().trim() != workerId.toString().trim()) continue;
       
-      final attDate = DateTime.tryParse(r['attendance_date'] ?? '');
+      final attDateStr = (r['attendance_date'] ?? '').toString().split('T').first.trim();
+      final attDate = DateTime.tryParse(attDateStr);
       if (attDate == null) continue;
       if (attDate.year != now.year || attDate.month != now.month) continue;
       
@@ -268,8 +266,8 @@ class _AttendancePageState extends State<AttendancePage>
       if (r['working_hours'] != null) {
         totalHours += (r['working_hours'] as num).toDouble();
       } else if (r['check_in_time'] != null && r['check_out_time'] != null) {
-        final cin = DateTime.tryParse(r['check_in_time']);
-        final cout = DateTime.tryParse(r['check_out_time']);
+        final cin = _parseServerTime(r['check_in_time']);
+        final cout = _parseServerTime(r['check_out_time']);
         if (cin != null && cout != null) {
           totalHours += cout.difference(cin).inMinutes / 60.0;
         }
@@ -525,7 +523,7 @@ class _AttendancePageState extends State<AttendancePage>
       if (recordWorkerId == null) return false;
       
       final recDate = (r['attendance_date'] ?? '').toString().split('T').first.trim();
-      return recordWorkerId.toString() == worker.id.toString() && recDate == today;
+      return recordWorkerId.toString().trim() == worker.id.toString().trim() && recDate == today;
     }).firstOrNull;
     
     bool isIn = workerRecord != null && 

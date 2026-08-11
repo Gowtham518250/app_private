@@ -97,7 +97,7 @@ class AnalyticsEngine {
   /// Parse sale date with multiple format support and force Indian Time (IST)
   DateTime getLocalDate(Map<String, dynamic> sale) {
     try {
-      final str = (sale['business_date'] ?? sale['sale_date'] ?? sale['invoice_date'] ?? sale['date'] ?? '').toString().trim();
+      final str = (sale['business_date'] ?? sale['sale_date'] ?? sale['invoice_date'] ?? sale['date'] ?? sale['created_at'] ?? sale['createdAt'] ?? '').toString().trim();
       if (str.isEmpty) return DateTime(1970);
       
       if (kDebugMode) debugPrint('🔍 Date parsing: "$str", is_local: ${sale['is_local']}, available fields: ${sale.keys.join(', ')}');
@@ -138,7 +138,7 @@ class AnalyticsEngine {
   }
 
   DateTime? _tryGetBusinessDate(Map<String, dynamic> sale) {
-    final value = sale['business_date'] ?? sale['sale_date'] ?? sale['invoice_date'] ?? sale['date'];
+    final value = sale['business_date'] ?? sale['sale_date'] ?? sale['invoice_date'] ?? sale['date'] ?? sale['created_at'] ?? sale['createdAt'];
     if (value == null || value.toString().trim().isEmpty) return null;
     final parsed = getLocalDate(sale);
     return parsed.year == 1970 && parsed.month == 1 && parsed.day == 1 ? null : parsed;

@@ -21,6 +21,7 @@ class SyncService {
   
   static final _syncStatusController = StreamController<int>.broadcast();
   static Stream<int> get syncQueueStream => _syncStatusController.stream;
+  static const int _maxQueueRetries = 8;
   
   // 🔒 Use Lock for atomic operations (prevents race conditions)
   static final _syncLock = Lock();
@@ -567,6 +568,12 @@ class SyncService {
         
         // Exponential backoff check
         final retries = item['retries'] ?? 0;
+        if (retries >= _maxQueueRetries) {
+          if (kDebugMode) debugPrint('🛑 Action $actionId exceeded retry limit and is being parked');
+          item['status'] = 'PARKED';
+          await SyncQueueManager.update(actionId, item);
+          continue;
+        }
         final lastAttemptStr = item['last_attempt'];
         if (retries > 0 && lastAttemptStr != null) {
           final lastAttempt = DateTime.tryParse(lastAttemptStr);
@@ -677,8 +684,12 @@ class SyncService {
             // Increment retry count
             item['retries'] = (item['retries'] ?? 0) + 1;
             item['last_attempt'] = DateTime.now().toIso8601String();
-            // We DO NOT park sales anymore. Keep retrying until the internet successfully delivers them.
-            if (kDebugMode) debugPrint('⚠️ Action $actionId failed, will retry later.');
+            if (item['retries'] >= _maxQueueRetries) {
+              item['status'] = 'PARKED';
+              if (kDebugMode) debugPrint('🛑 Action $actionId failed repeatedly and has been parked');
+            } else {
+              if (kDebugMode) debugPrint('⚠️ Action $actionId failed, will retry later.');
+            }
             await SyncQueueManager.update(actionId, item);
             failureCount++;
             consecutiveNetworkFailures++;
@@ -694,7 +705,10 @@ class SyncService {
           // Update retry count
           item['retries'] = (item['retries'] ?? 0) + 1;
           item['last_attempt'] = DateTime.now().toIso8601String();
-          // We DO NOT park sales anymore. Keep retrying until the internet successfully delivers them.
+          if (item['retries'] >= _maxQueueRetries) {
+            item['status'] = 'PARKED';
+            if (kDebugMode) debugPrint('🛑 Action $actionId error exceeded retry limit and has been parked');
+          }
           await SyncQueueManager.update(actionId, item);
         }
       }
