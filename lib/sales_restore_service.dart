@@ -176,7 +176,24 @@ class SalesRestoreService {
   static Future<Map<String, dynamic>> completeRestoration() async {
     try {
       if (kDebugMode) debugPrint('🚀 Starting complete data restoration...');
-      
+
+      // Guard: skip if restoration was already completed on this device.
+      // Without this guard the service runs on every login, merges backend
+      // sales into local storage each time, and the dedup logic can still
+      // produce duplicate bill records (e.g. after clearing app data and
+      // re-logging in the pref key is gone so the guard would allow one
+      // restore run, then markRestorationComplete() writes the key and
+      // subsequent logins are skipped — which is the desired behaviour).
+      final alreadyDone = await isRestorationComplete();
+      if (alreadyDone) {
+        if (kDebugMode) debugPrint('✅ Restoration already complete — skipping to prevent duplicates');
+        return {
+          'success': true,
+          'message': 'Restoration already completed on this device',
+          'steps_completed': [],
+        };
+      }
+
       // Step 1: Get restore summary
       final summary = await getRestoreSummary();
       if (!summary['success'] || !summary['available_for_restore']) {

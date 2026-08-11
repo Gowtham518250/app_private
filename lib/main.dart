@@ -309,9 +309,18 @@ void main() async {
   bool hiveRecoveryNeeded = false;
   String? hiveBackupPath;
   bool hiveInitSuccess = false;
-  
-  try {
+  // Guard so recovery paths never call Hive.initFlutter() a second time on the
+  // same process — Hive throws if already initialized (Bug #14 from audit).
+  bool _hiveInited = false;
+
+  Future<void> safeHiveInit() async {
+    if (_hiveInited) return;
     await Hive.initFlutter();
+    _hiveInited = true;
+  }
+
+  try {
+    await safeHiveInit();
     hiveInitSuccess = true;
     debugPrint('✅ Hive initialized successfully');
     
@@ -369,7 +378,7 @@ void main() async {
           
           // Try to recover with fresh Hive initialization
           try {
-            await Hive.initFlutter();
+            await safeHiveInit();
             
             // Verify the fresh initialization works
             final testBox = await Hive.openBox('recovery_test');
@@ -398,7 +407,7 @@ void main() async {
               debugPrint('✅ Rollback successful - data restored from backup');
               
               // Try initialization with restored data
-              await Hive.initFlutter();
+              await safeHiveInit();
               debugPrint('✅ Hive initialized with restored data');
               hiveRecoveryNeeded = false;
               
@@ -417,7 +426,7 @@ void main() async {
         }
       } else {
         debugPrint('⚠️ Hive directory does not exist, creating fresh initialization');
-        await Hive.initFlutter();
+        await safeHiveInit();
         hiveRecoveryNeeded = false;
         debugPrint('✅ Fresh Hive initialization completed');
       }
@@ -445,7 +454,7 @@ void main() async {
           
           // Try to reinitialize with fresh Hive
           try {
-            await Hive.initFlutter();
+            await safeHiveInit();
             
             // Verify fresh initialization
             final testBox = await Hive.openBox('emergency_test');
@@ -465,7 +474,7 @@ void main() async {
                 await hiveDir.delete(recursive: true);
               }
               await emergencyBackup.rename(hiveDir.path);
-              await Hive.initFlutter();
+              await safeHiveInit();
               debugPrint('✅ Rollback from emergency backup successful');
               hiveRecoveryNeeded = false;
             } catch (emergencyRollbackError) {
@@ -476,7 +485,7 @@ void main() async {
           }
         } else {
           // No existing hive directory, create fresh
-          await Hive.initFlutter();
+          await safeHiveInit();
           hiveRecoveryNeeded = false;
           debugPrint('✅ Fresh Hive initialization (no existing data)');
         }

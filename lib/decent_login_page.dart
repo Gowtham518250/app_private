@@ -280,11 +280,21 @@ class _DecentLoginPageState extends State<DecentLoginPage>
         if (kDebugMode) debugPrint('⚠️ [Background] Sync queue error: $e');
       }
 
-      // Merge with backend sales
+      // Merge with backend sales — only run the full restore once per user.
+      // Without this guard, completeRestoration() re-downloads and re-merges
+      // backend sales on every single login, which is wasted work and an
+      // unnecessary duplication risk surface.
       try {
-        final restorationResult = await SalesRestoreService.completeRestoration();
-        if (restorationResult['success']) {
-          await SalesRestoreService.markRestorationComplete();
+        final alreadyRestored = await SalesRestoreService.wasRestorationCompleted();
+        if (!alreadyRestored) {
+          final restorationResult = await SalesRestoreService.completeRestoration();
+          if (restorationResult['success']) {
+            await SalesRestoreService.markRestorationComplete();
+          }
+        } else {
+          if (kDebugMode) {
+            debugPrint('ℹ️ [Background] Skipping sales restore — already completed for this user');
+          }
         }
       } catch (e) {
         if (kDebugMode) debugPrint('⚠️ [Background] Sales restore error: $e');

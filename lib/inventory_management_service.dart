@@ -293,10 +293,15 @@ class InventoryManagementService {
     try {
       final List<Map<String, dynamic>> backendProducts = await LocalStorageService.loadBackendProducts();
       final String normName = FormatHelper.normalizeName(productName);
-      
+
+      // Pass 1: exact match only. Always prefer this over any fuzzy match —
+      // otherwise a short generic name like "oil" can match "coconut oil"
+      // (or vice versa) purely because one string contains the other, and
+      // whichever happens to come first in iteration order silently wins,
+      // reporting the wrong product's stock.
       for (var p in backendProducts) {
         final invName = FormatHelper.normalizeName(p['product_name'] ?? '');
-        if (invName == normName || invName.contains(normName) || normName.contains(invName)) {
+        if (invName == normName) {
           final stock = InventoryStockHelper.readStock(p);
           final minS = (p['min_stock'] as num?)?.toDouble() ?? 10.0;
           return {
@@ -307,6 +312,37 @@ class InventoryManagementService {
           };
         }
       }
+
+      // Pass 2: fall back to substring containment only when there's no
+      // exact match anywhere, and among all substring candidates pick the
+      // one whose name length is closest to normName's — the closest-length
+      // match is far less likely to be an unrelated product that merely
+      // happens to share a short generic word (e.g. "oil", "soap", "salt").
+      Map<String, dynamic>? bestCandidate;
+      int bestLengthDiff = -1;
+      for (var p in backendProducts) {
+        final invName = FormatHelper.normalizeName(p['product_name'] ?? '');
+        if (invName.isEmpty) continue;
+        if (invName.contains(normName) || normName.contains(invName)) {
+          final lengthDiff = (invName.length - normName.length).abs();
+          if (bestCandidate == null || lengthDiff < bestLengthDiff) {
+            bestCandidate = p;
+            bestLengthDiff = lengthDiff;
+          }
+        }
+      }
+
+      if (bestCandidate != null) {
+        final stock = InventoryStockHelper.readStock(bestCandidate);
+        final minS = (bestCandidate['min_stock'] as num?)?.toDouble() ?? 10.0;
+        return {
+          'productName': bestCandidate['product_name'],
+          'stock': stock,
+          'isLow': stock < minS,
+          'minStock': minS
+        };
+      }
+
       return null;
     } catch (e) {
       return null;
@@ -695,5 +731,3 @@ class InventoryManagementService {
     }
   }
 }
-
-
