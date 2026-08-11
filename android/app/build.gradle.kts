@@ -32,6 +32,16 @@ android {
             // TODO: Add your own signing config for the release build.
             // Signing with the debug keys for now, so `flutter run --release` works.
             signingConfig = signingConfigs.getByName("debug")
+            // 🔧 FIX: this was missing entirely — the release build runs R8
+            // minification (Flutter's default) with zero app-level keep
+            // rules, which is what caused the WorkDatabase crash. See
+            // proguard-rules.pro for the full explanation.
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
         }
     }
 }

@@ -10,6 +10,7 @@ import 'dart:collection';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'api_client.dart';
 import 'secure_token_storage.dart';
+import 'scoped_shared_preferences.dart';
 import 'app_localizations.dart';
 import 'sync_queue_manager.dart';
 import 'stock_alert_service.dart';
@@ -2400,8 +2401,7 @@ class _SalesEntryPageState extends State<SalesEntryPage>
   Future<void> _applyFlashSaleDiscount(double subTotal) async {
     double flashSaleDiscount = 0.0;
     try {
-      final prefs = await SharedPreferences.getInstance();
-      final flashSaleData = prefs.getString('active_flash_sale');
+      final flashSaleData = await ScopedSharedPreferences.getString('active_flash_sale');
 
       if (flashSaleData != null && flashSaleData.isNotEmpty) {
         final flashSale = jsonDecode(flashSaleData);
@@ -2416,7 +2416,7 @@ class _SalesEntryPageState extends State<SalesEntryPage>
           }
         } else {
           // Flash sale expired, clear local data
-          await prefs.remove('active_flash_sale');
+          await ScopedSharedPreferences.remove('active_flash_sale');
           if (kDebugMode) debugPrint('⏰ Flash sale expired during sale, cleared');
         }
       }
@@ -2491,7 +2491,11 @@ class _SalesEntryPageState extends State<SalesEntryPage>
         grand = double.parse(((subTotal + gstTotal - totalDiscount)).toStringAsFixed(2));
       }
     } catch (e) {
-      // Ignore scheme errors, proceed with normal total
+      // Keep the deterministic normal total, but surface the failed scheme
+      // evaluation in diagnostics instead of silently hiding it.
+      if (kDebugMode) debugPrint('⚠️ Scheme calculation failed; using normal total: $e');
+      _schemeDiscount = 0.0;
+      _activeSchemeName = '';
     }
 
     if (mounted) {
@@ -2608,16 +2612,13 @@ class _SalesEntryPageState extends State<SalesEntryPage>
       );
       final realProductId = match.isNotEmpty ? (match['id'] ?? barcode) : barcode;
 
-      // 🔧 FIX: Ensure quantity is sent as integer for proper inventory deduction
-      final intQty = qty.toInt();
-
       return {
         'product_name': rawName,
         'product_id':   realProductId, 
         'barcode':      barcode,
         'price':        price.toString(),
-        'qty':          intQty, // Send as integer to avoid string parsing issues
-        'quantity':     intQty, // Also include as 'quantity' for compatibility
+        'qty':          qty,
+        'quantity':     qty,
         'gst_percent':  gstPct.toString(),
         'total_with_tax': lineTotal.toString(),
         'item_index':   entries.indexOf(e),
@@ -2627,6 +2628,19 @@ class _SalesEntryPageState extends State<SalesEntryPage>
 
   Future<bool> submitAllSales({bool isBorrow = false}) async {
     if (isLoading) return false;
+
+    // FIX: isLoading used to only get set to true after two awaited calls
+    // below (session check + loadSales). A fast double-tap on the bill
+    // button could get a second call past the `if (isLoading) return false`
+    // guard before the first call had set the flag, and since saleId is
+    // generated fresh per call (microsecond timestamp), SaleService's
+    // idempotency check — keyed by saleId — never saw them as duplicates.
+    // Setting isLoading synchronously here, before any await, closes that
+    // window: the second tap now sees isLoading == true immediately.
+    setState(() {
+      isLoading = true;
+      message = 'Processing Transaction...';
+    });
 
     // 🔧 FIX: Check local session validity (7-day timestamp check)
     // Note: ApiClient will handle auto-refresh on 401 errors automatically
@@ -2643,6 +2657,9 @@ class _SalesEntryPageState extends State<SalesEntryPage>
             ),
           );
         }
+        // FIX: reset the flag we now set up-front (see comment above), or
+        // the bill button stays permanently disabled after this bounce.
+        if (mounted) setState(() => isLoading = false);
         return false;
       }
     } catch (e) {
@@ -2653,7 +2670,11 @@ class _SalesEntryPageState extends State<SalesEntryPage>
     final totals = calculateTotal() as Map<String, dynamic>;
     final grandTotal = totals['total'] ?? 0.0;
 
-    if (!_validateSaleInputs(grandTotal)) return false;
+    if (!_validateSaleInputs(grandTotal)) {
+      // FIX: reset isLoading here too — same reason as above.
+      if (mounted) setState(() => isLoading = false);
+      return false;
+    }
 
     // First-sale celebration: detect if this is the first bill on this device/user.
     // (Helps D1→D7 retention; backend sync can happen later.)
@@ -2661,14 +2682,6 @@ class _SalesEntryPageState extends State<SalesEntryPage>
 
     // Generate unique ID for this sale using Microseconds for absolute collision avoidance
     final saleId = 'SALE_${DateTime.now().microsecondsSinceEpoch}';
-
-    // Auto-pay logic (Borrow transactions allow partial payment)
-    if (!isBorrow && _paidAmount < grandTotal - 0.5) _paidAmount = grandTotal;
-
-    setState(() {
-      isLoading = true;
-      message = 'Processing Transaction...';
-    });
 
     try {
       final items = _getProcessedItems();
@@ -2687,12 +2700,10 @@ class _SalesEntryPageState extends State<SalesEntryPage>
 
       // If it's a borrow sale, also create an invoice!
       if (isBorrow) {
-        final prefs = await SharedPreferences.getInstance();
-        // Generate sequential invoice number using SALE_ prefix to match sales
-        int lastInvNum = prefs.getInt('last_invoice_number') ?? 0;
-        lastInvNum++;
-        await prefs.setInt('last_invoice_number', lastInvNum);
-        final String invoiceNumber = 'SALE_${lastInvNum.toString().padLeft(4, '0')}';
+        // Reuse the canonical sale id as the invoice identity.
+        // SaleService already syncs borrow sales with saleId as the backend
+        // idempotency key. Keep this local mirror on that same canonical id.
+        final String invoiceNumber = saleId;
         
         // Build product list string for invoice
         final String productList = items.map((e) {
@@ -2717,21 +2728,27 @@ class _SalesEntryPageState extends State<SalesEntryPage>
           'due_date': dueDate,
           'status': 'UNPAID',
           'payment_status': 'UNPAID',
-          'is_local': true,
-          'created_at': DateTime.now().toIso8601String(),
+          'is_local': result['status'] != 'SYNCED',
+          'business_date': DateFormat('yyyy-MM-dd').format(DateTime.now()),
+          'created_at': DateTime.now().toUtc().toIso8601String(),
           'sale_id': saleId,
         };
         
-        // Save invoice locally (NO BACKEND SYNC)
+        // Save a local mirror; SaleService already attempted backend sync
+        // above using the same saleId.
         final localInvoices = await LocalStorageService.loadLocalInvoices();
+        localInvoices.removeWhere((invoice) => invoice['invoice_number']?.toString() == invoiceNumber);
         localInvoices.add(newInvoice);
         await LocalStorageService.saveLocalInvoices(localInvoices);
         
-        if (kDebugMode) debugPrint('✅ Invoice created locally (NO BACKEND SYNC)');
+        if (kDebugMode) debugPrint('✅ Borrow invoice mirror saved with canonical id $invoiceNumber');
       }
 
       if (result['success'] == true) {
         _hapticSuccess();
+        final commitPrefs = await SharedPreferences.getInstance();
+        final committedBillNumber = commitPrefs.getInt('last_bill_number') ?? 0;
+        await commitPrefs.setInt('last_bill_number', committedBillNumber + 1);
         // ✅ CRITICAL: Reset loading BEFORE clearing interface so buttons re-enable
         if (mounted) setState(() { isLoading = false; message = ''; });
         _clearSaleInterface();
@@ -3104,10 +3121,7 @@ class _SalesEntryPageState extends State<SalesEntryPage>
       return;
     }
 
-    // ── AUTO-PAY: For normal bills, force state to PAID before continuing  ──
     setState(() {
-      _paidAmount = freshTotal;
-      _paymentConfirmed = true; // Prevents further prompts
       message = '';
     });
 

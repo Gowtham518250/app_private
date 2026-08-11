@@ -108,14 +108,33 @@ class _KhataPageState extends State<KhataPage> with SingleTickerProviderStateMix
 
     try {
       final raw = await LocalStorageService.loadLocalInvoices();
+      double parseAmount(dynamic value) {
+        if (value is num) return value.toDouble();
+        return double.tryParse(value?.toString() ?? '') ?? 0.0;
+      }
       final invoices = raw
-          .map((e) => Map<String, dynamic>.from(e as Map))
+          .map((e) {
+            final invoice = Map<String, dynamic>.from(e as Map);
+            final phone = invoice['customer_phone'] ?? invoice['phone'] ?? invoice['mobile'] ?? '';
+            final total = parseAmount(invoice['total_amount'] ?? invoice['total'] ?? invoice['amount']);
+            final paid = parseAmount(invoice['paid_amount'] ?? invoice['amount_paid'] ?? invoice['paid']);
+            return {
+              ...invoice,
+              'invoice_number': invoice['invoice_number'] ?? invoice['number'] ?? invoice['sale_id'] ?? invoice['id'],
+              'customer_name': invoice['customer_name'] ?? invoice['name'] ?? invoice['customer'] ?? 'Guest Customer',
+              'customer_phone': phone,
+              'business_date': invoice['business_date'] ?? invoice['invoice_date'] ?? invoice['sale_date'] ?? invoice['date'],
+              'total_amount': total,
+              'paid_amount': paid,
+              'payment_status': invoice['payment_status'] ?? invoice['status'] ?? _deriveStatus(total, paid),
+            };
+          })
           .toList();
 
       // Sort newest first for the list view
       invoices.sort((a, b) {
-        final da = DateTime.tryParse(a['invoice_date']?.toString() ?? a['created_at']?.toString() ?? '') ?? DateTime(2000);
-        final db = DateTime.tryParse(b['invoice_date']?.toString() ?? b['created_at']?.toString() ?? '') ?? DateTime(2000);
+        final da = DateTime.tryParse(a['business_date']?.toString() ?? '') ?? DateTime(1970);
+        final db = DateTime.tryParse(b['business_date']?.toString() ?? '') ?? DateTime(1970);
         return db.compareTo(da);
       });
 
@@ -229,7 +248,7 @@ class _KhataPageState extends State<KhataPage> with SingleTickerProviderStateMix
         double.tryParse(inv['total_amount']?.toString() ?? inv['total']?.toString() ?? '0') ??
         0.0;
     DateTime dateOf(Map<String, dynamic> inv) =>
-        DateTime.tryParse(inv['invoice_date']?.toString() ?? inv['created_at']?.toString() ?? '') ?? DateTime(2000);
+      DateTime.tryParse(inv['business_date']?.toString() ?? '') ?? DateTime(1970);
 
     switch (_invoiceSortOption) {
       case 'DATE_ASC':
@@ -281,11 +300,37 @@ class _KhataPageState extends State<KhataPage> with SingleTickerProviderStateMix
           _pendingCount = (sumData['pending_customers_count'] as num?)?.toInt() ?? 0;
           _overdueCount = (sumData['overdue_customers_count'] as num?)?.toInt() ?? 0;
 
-          final rawList = List<Map<String, dynamic>>.from(listData['customers'] ?? []);
-          _customers = rawList.where((c) {
-            double bal = (c['balance'] as num?)?.toDouble() ?? 0.0;
-            return bal > 0;
-          }).toList();
+          final rawList = List<Map<String, dynamic>>.from(
+            listData['customers'] ?? listData['pending_customers'] ?? listData['data'] ?? const [],
+          );
+          _customers = rawList.map((customer) {
+            final balanceValue = customer['balance'] ??
+                customer['total_balance'] ??
+                customer['pending_amount'] ??
+                customer['outstanding'] ??
+                customer['total_outstanding'] ??
+                0;
+            final balance = balanceValue is num
+                ? balanceValue.toDouble()
+                : double.tryParse(balanceValue.toString()) ?? 0.0;
+            final name = customer['customer_name'] ??
+                customer['name'] ??
+                customer['customer'] ??
+                'Customer';
+            final phone = customer['customer_phone'] ??
+                customer['phone'] ??
+                customer['mobile'] ??
+                '';
+            return {
+              ...customer,
+              'customer_id': customer['customer_id'] ?? customer['id'] ?? phone,
+              'customer_name': name,
+              'customer_phone': phone,
+              'total_balance': balance,
+              'overdue_amount': customer['overdue_amount'] ?? customer['overdue'] ?? 0.0,
+              'invoices': customer['invoices'] ?? customer['invoice_history'] ?? const [],
+            };
+          }).where((customer) => (customer['total_balance'] as double) > 0.01).toList();
           
           if (kDebugMode) debugPrint('✅ Backend khata data loaded successfully');
         } else {
@@ -1449,7 +1494,7 @@ class _KhataPageState extends State<KhataPage> with SingleTickerProviderStateMix
     final status = (inv['payment_status']?.toString() ?? _deriveStatus(total, paidAmt)).toUpperCase();
     final customerName = inv['customer_name']?.toString() ?? 'Guest Customer';
     final invoiceNumber = inv['invoice_number']?.toString() ?? inv['sale_id']?.toString() ?? '—';
-    final dateStr = inv['invoice_date']?.toString() ?? inv['created_at']?.toString() ?? '';
+    final dateStr = inv['business_date']?.toString() ?? '';
 
     Color statusColor;
     switch (status) {
@@ -1527,7 +1572,7 @@ class _KhataPageState extends State<KhataPage> with SingleTickerProviderStateMix
     final customerName = inv['customer_name']?.toString() ?? 'Guest Customer';
     final customerPhone = inv['customer_phone']?.toString() ?? '';
     final invoiceNumber = inv['invoice_number']?.toString() ?? inv['sale_id']?.toString() ?? '—';
-    final dateStr = inv['invoice_date']?.toString() ?? inv['created_at']?.toString() ?? '';
+    final dateStr = inv['business_date']?.toString() ?? '';
     final lineItems = List<Map<String, dynamic>>.from(inv['line_items'] ?? inv['items'] ?? []);
 
     Color statusColor;

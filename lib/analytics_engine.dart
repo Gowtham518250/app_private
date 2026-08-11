@@ -37,6 +37,7 @@ class AnalyticsEngine {
   int filteredUniqueProducts = 0;
   double filteredGrowthPercentage = 0.0;
   int filteredOnlineOrders = 0; // 🔒 NEW: Track filtered online orders
+  final List<String> analyticsIntegrityErrors = [];
   
   double todayRevenue = 0.0;
   double yesterdayRevenue = 0.0;
@@ -55,8 +56,16 @@ class AnalyticsEngine {
   // FIX: Access salesByMonthCache for current month revenue
   double get monthlyRevenue {
     final now = DateTime.now();
-    final currentMon = _months[now.month - 1];
+    final currentMon = '${_months[now.month - 1]} ${now.year.toString().substring(2)}';
     return salesByMonthCache[currentMon] ?? 0.0;
+  }
+
+  String _transactionKey(Map<String, dynamic> sale) {
+    for (final field in const ['invoice_id', 'backend_id', 'sale_id', 'invoice_number', 'id']) {
+      final value = sale[field]?.toString().trim() ?? '';
+      if (value.isNotEmpty && value != 'null') return value;
+    }
+    return '';
   }
 
   // FIX-A: Filter-aware display getters for KPI cards
@@ -87,8 +96,7 @@ class AnalyticsEngine {
   /// Parse sale date with multiple format support and force Indian Time (IST)
   DateTime getLocalDate(Map<String, dynamic> sale) {
     try {
-      // Try multiple date fields in order of preference
-      String? str = (sale['created_at'] ?? sale['sale_date'] ?? sale['invoice_date'] ?? sale['date'] ?? '').toString().trim();
+      final str = (sale['business_date'] ?? sale['sale_date'] ?? sale['invoice_date'] ?? sale['date'] ?? '').toString().trim();
       if (str.isEmpty) return DateTime(1970);
       
       if (kDebugMode) debugPrint('🔍 Date parsing: "$str", is_local: ${sale['is_local']}, available fields: ${sale.keys.join(', ')}');
@@ -106,20 +114,18 @@ class AnalyticsEngine {
         }
       }
       
-      bool isBackend = sale['is_local'] == false;
-      if (isBackend && !str.endsWith('Z') && !str.contains('+')) {
-        str += 'Z'; // Force UTC parsing for backend sales missing timezone
-        if (kDebugMode) debugPrint('🔧 Added Z for backend date: $str');
-      }
-
       DateTime? parsed = DateTime.tryParse(str);
       if (parsed == null) {
         if (kDebugMode) debugPrint('❌ Failed to parse date: $str');
         return DateTime(1970);
       }
       
-      // Force Indian Standard Time (IST = UTC + 5:30)
-      final istTime = parsed.toUtc().add(const Duration(hours: 5, minutes: 30));
+        // Explicit-zone timestamps are converted to IST. Zone-less backend
+        // timestamps are treated as business-local values, never as UTC.
+        final hasExplicitZone = str.endsWith('Z') || RegExp(r'[+-]\d{2}:?\d{2}$').hasMatch(str);
+        final istTime = hasExplicitZone
+          ? parsed.toUtc().add(const Duration(hours: 5, minutes: 30))
+          : DateTime(parsed.year, parsed.month, parsed.day, parsed.hour, parsed.minute, parsed.second, parsed.millisecond, parsed.microsecond);
       
       if (kDebugMode) debugPrint('✅ Date: "$str" → $istTime (IST)');
       
@@ -128,6 +134,13 @@ class AnalyticsEngine {
       if (kDebugMode) debugPrint('❌ Date parsing error: $e');
       return DateTime(1970);
     }
+  }
+
+  DateTime? _tryGetBusinessDate(Map<String, dynamic> sale) {
+    final value = sale['business_date'] ?? sale['sale_date'] ?? sale['invoice_date'] ?? sale['date'];
+    if (value == null || value.toString().trim().isEmpty) return null;
+    final parsed = getLocalDate(sale);
+    return parsed.year == 1970 && parsed.month == 1 && parsed.day == 1 ? null : parsed;
   }
 
   static double _toDouble(dynamic v) {
@@ -185,6 +198,7 @@ class AnalyticsEngine {
 
     // ── Single Pass Processing ──
     final List<Map<String, dynamic>> flattenedSales = [];
+    analyticsIntegrityErrors.clear();
     for (final rawS in newSales) {
       final s = Map<String, dynamic>.from(rawS as Map);
       if (s['items'] is List) {
@@ -198,9 +212,13 @@ class AnalyticsEngine {
           final double lineTotal = _toDouble(item['total_with_tax'] ?? item['total'] ?? item['line_total'] ?? (parsedPrice * parsedQty));
           
           flattenedSales.add({
-            'sale_date': s['sale_date'] ?? s['created_at'] ?? s['date'] ?? s['invoice_date'],
-            'created_at': s['created_at'] ?? s['sale_date'] ?? s['date'] ?? s['invoice_date'],
-            'date': s['date'] ?? s['invoice_date'] ?? s['sale_date'] ?? s['created_at'],
+            'business_date': s['business_date'] ?? s['sale_date'] ?? s['invoice_date'] ?? s['date'],
+            'created_at': s['created_at'],
+            'updated_at': s['updated_at'],
+            'invoice_id': s['invoice_id'] ?? s['id'],
+            'backend_id': s['backend_id'],
+            'sale_id': s['sale_id'] ?? s['invoice_number'],
+            'invoice_number': s['invoice_number'] ?? s['sale_id'],
             'total': lineTotal,
             'product_name': prodName,
             'product_id': bCode,
@@ -227,8 +245,13 @@ class AnalyticsEngine {
 
     for (final s in flattenedSales) {
       try {
-        final dt = getLocalDate(s);
-        final String invoiceKey = (s['created_at'] ?? s['sale_date'] ?? s['date'] ?? '').toString();
+        final dt = _tryGetBusinessDate(s);
+        if (dt == null) {
+          final key = _transactionKey(s);
+          analyticsIntegrityErrors.add('Missing or invalid business date${key.isEmpty ? '' : ' for $key'}');
+          continue;
+        }
+        final String invoiceKey = _transactionKey(s);
         final double itemTotal = _toDouble(s['total_amount'] ?? s['total']);
         final double invoiceTotal = _toDouble(s['invoice_total'] ?? itemTotal);
         final double paidAmount = _toDouble(s['paid_amount'] ?? invoiceTotal);
@@ -244,6 +267,7 @@ class AnalyticsEngine {
           }
         }
         final double val = itemTotal * ratio;
+        s['recognized_revenue'] = val;
         final day = DateTime(dt.year, dt.month, dt.day);
         final String bCode = (s['product_id'] ?? s['barcode'] ?? '').toString().trim();
         final String rawName = s['product_name']?.toString() ?? s['product']?.toString() ?? s['item']?.toString() ?? '';
@@ -315,7 +339,10 @@ class AnalyticsEngine {
             salesByWeekCache[wkLabel] = (salesByWeekCache[wkLabel] ?? 0.0) + val;
           }
         }
-      } catch (_) {}
+      } catch (e) {
+        analyticsIntegrityErrors.add('Malformed sale: $e');
+        if (kDebugMode) debugPrint('⚠️ Skipping malformed sale in analytics: $e');
+      }
     }
 
     // Top Products & Best Hours
@@ -337,11 +364,12 @@ class AnalyticsEngine {
     final allOnlineInvoices = flattenedSales.where((s) {
       final String source = (s['source'] ?? s['order_source'] ?? 'OFFLINE').toString().toUpperCase();
       return source == 'ONLINE' || source == 'WEB' || source == 'APP';
-    }).map((s) => (s['created_at'] ?? s['sale_date'] ?? s['date'] ?? '').toString()).where((s) => s.isNotEmpty).toSet();
+    }).map(_transactionKey).where((s) => s.isNotEmpty).toSet();
     totalOnlineOrders = allOnlineInvoices.isEmpty && flattenedSales.isNotEmpty ? 0 : allOnlineInvoices.length;
 
     filteredSalesCache = flattenedSales.where((sale) {
-      final dt = getLocalDate(sale);
+      final dt = _tryGetBusinessDate(sale);
+      if (dt == null) return false;
       final daysAgo = normalizedNow.difference(DateTime(dt.year, dt.month, dt.day)).inDays;
       if (selectedTimeFilter == 0) return daysAgo == 0;
       if (selectedTimeFilter == 1) return daysAgo < 7;
@@ -350,8 +378,8 @@ class AnalyticsEngine {
       return true;
     }).toList();
 
-    filteredTotalSales = filteredSalesCache.fold(0.0, (sum, s) => sum + _toDouble(s['total_amount'] ?? s['total']));
-    final uniqueInvoices = filteredSalesCache.map((s) => (s['created_at'] ?? s['sale_date'] ?? s['date'] ?? '').toString()).where((s) => s.isNotEmpty).toSet();
+    filteredTotalSales = filteredSalesCache.fold(0.0, (sum, s) => sum + _toDouble(s['recognized_revenue'] ?? s['total_amount'] ?? s['total']));
+    final uniqueInvoices = filteredSalesCache.map(_transactionKey).where((s) => s.isNotEmpty).toSet();
     filteredTotalTransactions = uniqueInvoices.isEmpty && filteredSalesCache.isNotEmpty ? 1 : uniqueInvoices.length;
     filteredAverageSale = filteredTotalTransactions > 0 ? filteredTotalSales / filteredTotalTransactions : 0.0;
     filteredUniqueProducts = filteredSalesCache.map((s) { // FIX R2
@@ -365,12 +393,12 @@ class AnalyticsEngine {
     final filteredOnlineInvoices = filteredSalesCache.where((s) {
       final String source = (s['source'] ?? s['order_source'] ?? 'OFFLINE').toString().toUpperCase();
       return source == 'ONLINE' || source == 'WEB' || source == 'APP';
-    }).map((s) => (s['created_at'] ?? s['sale_date'] ?? s['date'] ?? '').toString()).where((s) => s.isNotEmpty).toSet();
+    }).map(_transactionKey).where((s) => s.isNotEmpty).toSet();
     filteredOnlineOrders = filteredOnlineInvoices.isEmpty && filteredSalesCache.isNotEmpty ? 0 : filteredOnlineInvoices.length;
 
     // 🔒 BUG FIX: Calculate main metrics (not just filtered metrics)
-    totalSales = flattenedSales.fold(0.0, (sum, s) => sum + _toDouble(s['total_amount'] ?? s['total']));
-    final allUniqueInvoices = flattenedSales.map((s) => (s['created_at'] ?? s['sale_date'] ?? s['date'] ?? '').toString()).where((s) => s.isNotEmpty).toSet();
+    totalSales = flattenedSales.fold(0.0, (sum, s) => sum + _toDouble(s['recognized_revenue'] ?? s['total_amount'] ?? s['total']));
+    final allUniqueInvoices = flattenedSales.map(_transactionKey).where((s) => s.isNotEmpty).toSet();
     totalTransactions = allUniqueInvoices.isEmpty && flattenedSales.isNotEmpty ? 1 : allUniqueInvoices.length;
     averageSale = totalTransactions > 0 ? totalSales / totalTransactions : 0.0;
     uniqueProducts = flattenedSales.map((s) {
@@ -412,7 +440,7 @@ class AnalyticsEngine {
         'display_name': displayName // Store formatted name for UI
       });
       
-      final v = _toDouble(s['total_amount'] ?? s['total']);
+      final v = _toDouble(s['recognized_revenue'] ?? s['total_amount'] ?? s['total']);
       final q = _toDouble(s['qty'] ?? s['quantity']);
       productAnalyticsCache[key]!['total'] = (productAnalyticsCache[key]!['total'] as double) + v;
       productAnalyticsCache[key]!['count'] = (productAnalyticsCache[key]!['count'] as int) + 1;
@@ -456,7 +484,7 @@ class AnalyticsEngine {
       for (final s in sales) {
         final sMap = Map<String, dynamic>.from(s as Map);
         final dt = getLocalDate(sMap);
-        final val = _toDouble(sMap['total']);
+        final val = _toDouble(sMap['recognized_revenue'] ?? sMap['total']);
         final saleDay = DateTime(dt.year, dt.month, dt.day);
         
         if (!saleDay.isBefore(thisWeekStart) && saleDay.isBefore(today.add(const Duration(days: 1)))) {
@@ -474,7 +502,7 @@ class AnalyticsEngine {
       for (final s in sales) {
         final sMap = Map<String, dynamic>.from(s as Map);
         final dt = getLocalDate(sMap);
-        final val = _toDouble(sMap['total']);
+        final val = _toDouble(sMap['recognized_revenue'] ?? sMap['total']);
         
         if (!dt.isBefore(thisMonthStart)) {
           current += val; // This month
@@ -489,7 +517,7 @@ class AnalyticsEngine {
       for (final s in sales) {
         final sMap = Map<String, dynamic>.from(s as Map);
         final dt = getLocalDate(sMap);
-        final val = _toDouble(sMap['total']);
+        final val = _toDouble(sMap['recognized_revenue'] ?? sMap['total']);
         
         if (dt.year == thisYear) {
           current += val;

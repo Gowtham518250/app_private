@@ -231,9 +231,32 @@ class SecureTokenStorage {
 
   static Future<bool> isSessionValid() async {
     final token = await getToken();
-    // OFFLINE-FIRST: Session is valid if token exists, regardless of timestamp
-    // User stays logged in indefinitely until manual logout
-    return token != null && token.isNotEmpty;
+    if (token == null || token.isEmpty) return false;
+
+    final scopedTimeKey = await _getScopedKey(_kTime);
+    final combined = await _storage.read(key: scopedTimeKey);
+    if (combined == null) return false;
+
+    try {
+      final parts = combined.split(':');
+      if (parts.length < 2) return false;
+      final key = await _getOrCreateKey();
+      final iv = enc.IV.fromBase64(parts[0]);
+      final encrypter = enc.Encrypter(enc.AES(key));
+      final timestamp = int.tryParse(
+        encrypter.decrypt(enc.Encrypted.fromBase64(parts[1]), iv: iv),
+      );
+      if (timestamp == null) return false;
+
+      const maxSessionAge = Duration(days: 7);
+      return DateTime.now().difference(
+            DateTime.fromMillisecondsSinceEpoch(timestamp),
+          ) <=
+          maxSessionAge;
+    } catch (e) {
+      if (kDebugMode) debugPrint('SecureTokenStorage.isSessionValid: timestamp check failed ($e)');
+      return false;
+    }
   }
 
   static Future<void> saveUser(Map<String, dynamic> userData) async {

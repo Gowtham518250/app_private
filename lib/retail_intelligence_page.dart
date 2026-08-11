@@ -9,6 +9,7 @@ import 'package:flutter/foundation.dart' show kDebugMode;
 import 'api_client.dart';
 import 'smart_reorder_ai.dart';
 import 'local_storage_service.dart';
+import 'scoped_shared_preferences.dart';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // RETAIL INTELLIGENCE PAGE — 100 CRORE STARTUP EDITION
@@ -221,8 +222,7 @@ class _FlashSaleTabState extends State<_FlashSaleTab> with SingleTickerProviderS
   void _loadActiveFlashSale() async {
     try {
       // Load from local storage first for immediate response (offline-first)
-      final prefs = await SharedPreferences.getInstance();
-      final localFlashSaleData = prefs.getString('active_flash_sale');
+      final localFlashSaleData = await ScopedSharedPreferences.getString('active_flash_sale');
       
       if (localFlashSaleData != null && localFlashSaleData.isNotEmpty) {
         try {
@@ -237,7 +237,7 @@ class _FlashSaleTabState extends State<_FlashSaleTab> with SingleTickerProviderS
             if (kDebugMode) debugPrint('✅ Active flash sale loaded from local storage');
           } else {
             // Expired, clear local data
-            await prefs.remove('active_flash_sale');
+            await ScopedSharedPreferences.remove('active_flash_sale');
             if (kDebugMode) debugPrint('⏰ Flash sale expired, cleared local data');
           }
         } catch (e) {
@@ -264,11 +264,11 @@ class _FlashSaleTabState extends State<_FlashSaleTab> with SingleTickerProviderS
               _activeFlashSale = flashSaleData;
             });
             // Save to local storage for offline use
-            await prefs.setString('active_flash_sale', json.encode(flashSaleData));
+            await ScopedSharedPreferences.setString('active_flash_sale', json.encode(flashSaleData));
             if (kDebugMode) debugPrint('✅ Active flash sale synced from backend');
           } else {
             // Backend flash sale expired, clear local data
-            await prefs.remove('active_flash_sale');
+            await ScopedSharedPreferences.remove('active_flash_sale');
             setState(() => _activeFlashSale = null);
             if (kDebugMode) debugPrint('⏰ Backend flash sale expired');
           }
@@ -309,23 +309,27 @@ class _FlashSaleTabState extends State<_FlashSaleTab> with SingleTickerProviderS
         'discount_pct': double.tryParse(_discountController.text) ?? 20.0,
         'hours': int.tryParse(_hoursController.text) ?? 2,
       });
-      if (mounted) {
-        setState(() => _activeFlashSale = {
+      if (res.statusCode < 200 || res.statusCode >= 300) {
+        throw Exception('Flash sale setup failed (${res.statusCode})');
+      }
+      final responseData = jsonDecode(res.body);
+      final flashSale = {
           'category': _categoryController.text,
           'discount': _discountController.text,
           'hours': _hoursController.text,
-          'expiry': DateTime.now().add(Duration(hours: int.tryParse(_hoursController.text) ?? 2)).toIso8601String(),
-        });
+          'expiry': responseData['end_time'] ?? DateTime.now().add(Duration(hours: int.tryParse(_hoursController.text) ?? 2)).toIso8601String(),
+          'status': 'ACTIVE',
+        };
+      await ScopedSharedPreferences.setString('active_flash_sale', jsonEncode(flashSale));
+      if (mounted) {
+        setState(() => _activeFlashSale = flashSale);
         HapticFeedback.heavyImpact();
       }
     } catch (e) {
       if (mounted) {
-        // Even if backend fails, show UI success for demo
-        setState(() => _activeFlashSale = {
-          'category': _categoryController.text,
-          'discount': _discountController.text,
-          'hours': _hoursController.text,
-        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Flash sale was not saved: $e'), backgroundColor: Colors.redAccent),
+        );
       }
     }
     if (mounted) setState(() => _isLoading = false);

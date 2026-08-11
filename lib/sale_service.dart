@@ -557,7 +557,16 @@ try {
         ? customerPhone
         : 'GUEST_${saleId.length >= 6 ? saleId.substring(saleId.length - 6) : saleId.padLeft(6, '0')}';
 
+    final existingSale = existingIndex >= 0
+      ? Map<String, dynamic>.from(history[existingIndex] as Map)
+      : null;
     final String saleTimestamp = DateTime.now().toUtc().toIso8601String();
+    final String businessDate = (existingSale?['business_date'] ??
+        existingSale?['sale_date'] ??
+        existingSale?['invoice_date'] ??
+        existingSale?['date'] ??
+        saleTimestamp)
+      .toString();
 
     final List<Map<String, dynamic>> normalizedItems = items.map((item) {
       final double price = (item['unit_price'] ?? item['price'] ?? 0.0) is num
@@ -605,8 +614,7 @@ try {
       'customer_phone': customerPhone,
       'guest_id': safePhone,
       'items': normalizedItems,
-      'sale_date': saleTimestamp,
-      'date': saleTimestamp,
+      'business_date': businessDate,
       'subtotal': totals['subtotal'].toString(),
       'total': grandTotal.toString(),
       'total_amount': grandTotal,
@@ -617,9 +625,8 @@ try {
     };
 
     if (existingIndex >= 0) {
-      final existingSale = Map<String, dynamic>.from(history[existingIndex] as Map);
       history[existingIndex] = {
-        ...existingSale,
+        ...existingSale!,
         ...saleRecord,
         'updated_at': saleTimestamp,
       };

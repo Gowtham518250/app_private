@@ -356,13 +356,18 @@ class SyncService {
             }
             if (validItems.isEmpty) continue;
             
+            final businessDate = firstItem['business_date'] ??
+                firstItem['sale_date'] ??
+                firstItem['invoice_date'] ??
+                firstItem['date'];
             newItems.add({
               'sale_id': saleId,
               'customer_name': firstItem['customer_name'] ?? 'Cash Customer',
               'customer_phone': firstItem['customer_phone'] ?? '',
               'items': validItems,
-              'sale_date': firstItem['invoice_date'] ?? firstItem['date'] ?? firstItem['created_at'] ?? DateTime.now().toIso8601String(),
-              'date': firstItem['invoice_date'] ?? firstItem['date'] ?? firstItem['created_at'] ?? DateTime.now().toIso8601String(),
+              'business_date': businessDate,
+              'created_at': firstItem['created_at'],
+              'updated_at': firstItem['updated_at'],
               'total': firstItem['total_amount']?.toString() ?? firstItem['total']?.toString() ?? firstItem['totalAmount']?.toString() ?? '0',
               'paid_amount': firstItem['paid_amount']?.toString() ?? '0',
               'payment_status': firstItem['payment_status'] ?? 'PAID',
@@ -416,6 +421,7 @@ class SyncService {
     required String saleId,
     required List<Map<String, dynamic>> lineItems,
     String? token,
+    String? businessDate,
   }) async {
     if (lineItems.isEmpty) return false;
     final String authToken = token?.isNotEmpty == true
@@ -430,7 +436,7 @@ class SyncService {
       );
       return false;
     }
-    final String saleDate = DateTime.now().toIso8601String().split('T')[0];
+    final String? saleDate = businessDate;
     int synced = 0;
     final List<Map<String, dynamic>> lineErrors = [];
     for (int i = 0; i < lineItems.length; i++) {
@@ -449,7 +455,7 @@ class SyncService {
         'quantity': qty.toStringAsFixed(3), // Fix Bug #8: preserve fractional quantities
         'total': lineTotal.toString(),
         'sale_id': saleId,
-        'date': saleDate,
+        if (saleDate != null && saleDate.isNotEmpty) 'date': saleDate,
       };
       try {
         // Fix Bug #13: Use JSON post and decode response body to Map
@@ -714,7 +720,12 @@ class SyncService {
         final rawLines = payload['line_items'];
         if (saleId.isNotEmpty && rawLines is List && rawLines.isNotEmpty) {
           final lineItems = rawLines.map((e) => Map<String, dynamic>.from(e as Map)).toList();
-          if (await syncViaLegacyAuthSales(saleId: saleId, lineItems: lineItems, token: token)) {
+          if (await syncViaLegacyAuthSales(
+            saleId: saleId,
+            lineItems: lineItems,
+            token: token,
+            businessDate: payload['business_date'] ?? payload['invoice_date'] ?? payload['sale_date'] ?? payload['date'],
+          )) {
             return true;
           }
         }
@@ -762,6 +773,10 @@ class SyncService {
         final price = double.tryParse(item['price']?.toString() ?? '0') ?? 0;
         final qty = double.tryParse(item['qty']?.toString() ?? item['quantity']?.toString() ?? '1') ?? 0;
         if (price <= 0 || qty <= 0) continue;
+        final saleDate = data['business_date'] ??
+          data['sale_date'] ??
+          data['invoice_date'] ??
+          data['date'];
 
         final body = {
           'product': item['product_name'] ?? item['product'] ?? 'Item',
@@ -769,7 +784,8 @@ class SyncService {
           'quantity': item['qty']?.toString() ?? item['quantity']?.toString() ?? '1',
           'total': (price * qty).toString(),
           'sale_id': saleId,
-          'date': data['sale_date'] ?? DateTime.now().toIso8601String().split('T')[0],
+          if (saleDate != null && saleDate.toString().isNotEmpty)
+            'date': saleDate,
           'idempotency_key': data['idempotency_key'] ?? '${saleId}_item_$i',
         };
         if (await _syncSaleItem(body)) synced++;

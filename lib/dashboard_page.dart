@@ -66,6 +66,7 @@ import 'package:permission_handler/permission_handler.dart';
 import 'data_export_widget.dart';
 import 'export_service.dart';
 import 'auth_helper.dart';
+import 'session_logout_service.dart';
 import 'validation_helper.dart';
 import 'sync_queue_manager.dart';
 import 'sync_service.dart';
@@ -371,11 +372,11 @@ class _DashboardPageState extends State<DashboardPage>
   StreamSubscription? _syncSubscription;
 
   DateTime _getLocalDate(Map<String, dynamic> sale) {
-    final dateStr = sale['date']?.toString() ?? '';
+    final dateStr = (sale['business_date'] ?? sale['sale_date'] ?? sale['invoice_date'] ?? sale['date'])?.toString() ?? '';
     try {
       return DateTime.parse(dateStr);
     } catch (_) {
-      return DateTime.now();
+      return DateTime(1970);
     }
   }
 
@@ -2106,6 +2107,7 @@ class _DashboardPageState extends State<DashboardPage>
       engine.productAnalyticsCache;
   Map<String, Map<int, double>> get _monthlyProductSales =>
       engine.monthlyProductSales;
+  int get _analyticsIntegrityErrorCount => engine.analyticsIntegrityErrors.length;
 
   // ═══════════════════════════════════════════════════════════════════════
   // KPI CARDS - Show FILTERED PERIOD data (based on selected time filter)
@@ -2450,10 +2452,14 @@ class _DashboardPageState extends State<DashboardPage>
 
     for (var tx in localHistory) {
       final List<dynamic> items = tx['items'] ?? [];
-      final date =
+      final date = tx['business_date'] ??
           tx['sale_date'] ??
-          tx['created_at'] ??
-          DateTime.now().toIso8601String();
+          tx['invoice_date'] ??
+          tx['date'];
+      if (date == null || date.toString().trim().isEmpty) {
+        if (kDebugMode) debugPrint('⚠️ Skipping sale without business_date during dashboard flattening');
+        continue;
+      }
       
       // 🔧 FIX: Use invoice_number as primary deduplication key for invoice-level deduplication
       final invoiceNumber = tx['invoice_number']?.toString() ?? 
@@ -2493,7 +2499,7 @@ class _DashboardPageState extends State<DashboardPage>
           'quantity': q,
           'price': p,
           'total': t,
-          'sale_date': date,
+          'business_date': date,
           'sale_id': invoiceNumber,
           'invoice_number': invoiceNumber,
           'is_local': true,
@@ -2596,7 +2602,7 @@ class _DashboardPageState extends State<DashboardPage>
           'invoice_total': total,
           'paid_amount': paid,
           'payment_status': status,
-          'sale_date': date,
+          'business_date': date,
           'barcode': bCode,
           'is_local': true,
           '_bill_id': invoiceNumber, // ← CORE DEDUPLICATION ANCHOR (invoice_number)
@@ -2617,9 +2623,9 @@ class _DashboardPageState extends State<DashboardPage>
                   'totalAmount': (p['total'] ?? 0.0),
                   'paymentStatus': p['status'] ?? 'UNPAID',
                   'createdDate': p['date'] != null
-                      ? (DateTime.tryParse(p['date'].toString()) ??
-                            DateTime.now())
-                      : DateTime.now(),
+                          ? (DateTime.tryParse(p['date'].toString()) ??
+                            DateTime(1970))
+                          : DateTime(1970),
                 },
               )
               .toList(),
@@ -9671,6 +9677,35 @@ class _DashboardPageState extends State<DashboardPage>
     );
   }
 
+  Widget _buildAnalyticsIntegrityWarning() {
+    final count = _analyticsIntegrityErrorCount;
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF59E0B).withValues(alpha: 0.13),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: const Color(0xFFF59E0B).withValues(alpha: 0.4)),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Icon(Icons.warning_amber_rounded, color: Color(0xFFB45309), size: 22),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              '$count sale${count == 1 ? '' : 's'} need date verification. They are excluded from sales totals until a valid business date is available.',
+              style: GoogleFonts.poppins(
+                fontWeight: FontWeight.w600,
+                fontSize: 12.5,
+                color: const Color(0xFF92400E),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildGreetingHeader() {
     final now = DateTime.now();
     final dateStr = '${now.day} ${_monthShort(now.month)} ${now.year}';
@@ -12448,9 +12483,16 @@ class _DashboardPageState extends State<DashboardPage>
     _showLogoutLoadingDialog(context, 'Logging out...');
 
     // Perform logout
-    if (kDebugMode) debugPrint('🧹 Clearing ALL user data for security...');
-    await UserDataClearService.clearAllUserData();
-    await AuthHelper.clearAuthData();
+    // FIX: This used to call UserDataClearService.clearAllUserData() +
+    // AuthHelper.clearAuthData() directly, which is an incomplete duplicate
+    // of the real logout flow — it skipped closing this user's scoped Hive
+    // boxes, clearing scoped SharedPreferences, secure token storage, master
+    // PIN, payment/sync state, and server-side session invalidation. On a
+    // shared device that left the door open for the next logged-in account
+    // to read leftover state from this one. Route through the single
+    // canonical logout path instead (see session_logout_service.dart).
+    if (kDebugMode) debugPrint('🧹 Logging out via SessionLogoutService...');
+    await SessionLogoutService.performOwnerLogout();
 
     if (!mounted) return;
     Navigator.pop(context); // Close loading dialog
@@ -12802,6 +12844,11 @@ class _DashboardPageState extends State<DashboardPage>
               if (_unsyncedBillsCount > 0) ...[
                 const SizedBox(height: 12),
                 _buildUnsyncedSalesWarning(),
+              ],
+
+              if (_analyticsIntegrityErrorCount > 0) ...[
+                const SizedBox(height: 12),
+                _buildAnalyticsIntegrityWarning(),
               ],
 
 

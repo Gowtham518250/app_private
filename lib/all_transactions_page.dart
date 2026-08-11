@@ -78,10 +78,13 @@ class _AllTransactionsPageState extends State<AllTransactionsPage>
         
         final paymentMethod = sale['payment_method']?.toString() ?? 'Cash';
         final amount = double.tryParse(sale['total']?.toString() ?? '0') ?? 0;
-        final saleDate = sale['sale_date'] ?? sale['created_at'] ?? DateTime.now().toIso8601String();
+        final saleDate = sale['business_date'] ?? sale['sale_date'] ?? sale['invoice_date'] ?? sale['date'];
         final customerName = sale['customer_name'] ?? 'Walk-in Customer';
         final customerPhone = sale['customer_phone'];
-        final saleId = sale['sale_id'] ?? sale['id'] ?? 'sale_${DateTime.now().millisecondsSinceEpoch}';
+        final saleId = sale['sale_id'] ?? sale['invoice_number'] ?? sale['id'];
+        if (saleDate == null || saleDate.toString().trim().isEmpty || saleId == null || saleId.toString().trim().isEmpty) {
+          continue;
+        }
         
         final transaction = {
           'id': saleId,
@@ -123,10 +126,10 @@ class _AllTransactionsPageState extends State<AllTransactionsPage>
             if (data['history'] is List) {
               for (var item in data['history']) {
                 _khataTransactions.add({
-                  'id': item['id'] ?? 'khata_${DateTime.now().millisecondsSinceEpoch}',
+                  'id': item['id'] ?? item['transaction_id'],
                   'type': item['transaction_type'] ?? 'Khata',
                   'amount': double.tryParse(item['amount']?.toString() ?? '0') ?? 0,
-                  'date': item['timestamp'] ?? DateTime.now().toIso8601String(),
+                  'date': item['business_date'] ?? item['timestamp'] ?? item['date'],
                   'customer_phone': item['customer_phone'],
                   'description': item['description'],
                   'raw': item,
@@ -152,11 +155,14 @@ class _AllTransactionsPageState extends State<AllTransactionsPage>
             final data = json.decode(invoicesResp.body);
             if (data['invoices'] is List) {
               for (var invoice in data['invoices']) {
+                final invoiceDate = invoice['business_date'] ?? invoice['invoice_date'] ?? invoice['created_date'];
+                final invoiceId = invoice['number'] ?? invoice['invoice_number'] ?? invoice['id'];
+                if (invoiceDate == null || invoiceId == null) continue;
                 _invoiceTransactions.add({
-                  'id': invoice['number'] ?? 'inv_${DateTime.now().millisecondsSinceEpoch}',
+                  'id': invoiceId,
                   'type': 'Invoice',
                   'amount': double.tryParse(invoice['total_amount']?.toString() ?? '0') ?? 0,
-                  'date': invoice['created_date'] ?? DateTime.now().toIso8601String(),
+                  'date': invoiceDate,
                   'customer': invoice['customer_name'] ?? 'Unknown',
                   'customer_phone': invoice['customer_phone'],
                   'status': invoice['payment_status'] ?? 'Pending',
@@ -181,8 +187,8 @@ class _AllTransactionsPageState extends State<AllTransactionsPage>
 
       // Sort by date
       _allTransactions.sort((a, b) {
-        final dateA = DateTime.tryParse(a['date'].toString()) ?? DateTime.now();
-        final dateB = DateTime.tryParse(b['date'].toString()) ?? DateTime.now();
+        final dateA = DateTime.tryParse(a['date'].toString()) ?? DateTime(1970);
+        final dateB = DateTime.tryParse(b['date'].toString()) ?? DateTime(1970);
         return dateB.compareTo(dateA);
       });
 
@@ -396,7 +402,7 @@ class _AllTransactionsPageState extends State<AllTransactionsPage>
 
   Widget _buildTransactionCard(Map<String, dynamic> txn) {
     final amount = txn['amount'] as double? ?? 0.0;
-    var date = DateTime.tryParse(txn['date'].toString()) ?? DateTime.now();
+    var date = DateTime.tryParse(txn['date'].toString()) ?? DateTime(1970);
     // Convert UTC to local time if the string contains timezone info
     final dateStr = txn['date'].toString();
     if (dateStr.contains('Z') || dateStr.contains('+') || date.isUtc) {

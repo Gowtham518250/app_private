@@ -184,7 +184,7 @@ class SalesRestoreService {
       // re-logging in the pref key is gone so the guard would allow one
       // restore run, then markRestorationComplete() writes the key and
       // subsequent logins are skipped — which is the desired behaviour).
-      final alreadyDone = await isRestorationComplete();
+      final alreadyDone = await wasRestorationCompleted();
       if (alreadyDone) {
         if (kDebugMode) debugPrint('✅ Restoration already complete — skipping to prevent duplicates');
         return {
@@ -233,6 +233,13 @@ class SalesRestoreService {
       
       // Step 5: Update last sync timestamp
       await InventorySyncService.updateLastSyncTimestamp();
+
+      final restorationSucceeded = salesResult['success'] == true &&
+          customersResult['success'] == true &&
+          reconcileResult['success'] == true;
+      if (restorationSucceeded) {
+        await markRestorationComplete();
+      }
       
       if (kDebugMode) {
         debugPrint('✅ Complete restoration finished');
@@ -242,7 +249,7 @@ class SalesRestoreService {
       }
       
       return {
-        'success': true,
+        'success': restorationSucceeded,
         'steps_completed': stepsCompleted,
         'total_steps': stepsCompleted.length,
         'timestamp': DateTime.now().toIso8601String(),
@@ -317,7 +324,11 @@ class SalesRestoreService {
           'status': invoice['status'],
           'payment_status': invoice['payment_status'],
           'is_local': false,
-          'created_at': invoice['created_at'] ?? DateTime.now().toIso8601String(),
+          // Business date and technical timestamps are separate concepts.
+          // Missing business dates remain missing so analytics can surface the
+          // record as unreconciled instead of moving it into today's sales.
+          'business_date': invoice['sale_date'] ?? invoice['invoice_date'] ?? invoice['date'],
+          'created_at': invoice['created_at'],
           'updated_at': invoice['updated_at'],
         };
         
@@ -361,9 +372,15 @@ class SalesRestoreService {
         if (validLineItems.isNotEmpty) {
           final normalizedLineItems = validLineItems.map((item) {
             final desc = item['description']?.toString() ?? 'Custom Product';
-            final qty = (item['quantity'] ?? 1) as num;
-            final price = (item['unit_price'] ?? 0.0) as num;
-            final total = (item['line_total'] ?? (qty * price)) as num;
+            final qty = item['quantity'] is num
+              ? item['quantity'] as num
+              : num.tryParse(item['quantity']?.toString() ?? '') ?? 1;
+            final price = item['unit_price'] is num
+              ? item['unit_price'] as num
+              : num.tryParse(item['unit_price']?.toString() ?? '') ?? 0.0;
+            final total = item['line_total'] is num
+              ? item['line_total'] as num
+              : qty * price;
             return {
               'product_name': desc,
               'product': desc,
@@ -382,8 +399,10 @@ class SalesRestoreService {
           final backendSaleRecord = {
             'sale_id': invoice['invoice_number'],
             'invoice_id': invoice['id'],
-            'created_at': invoice['created_at'] ?? DateTime.now().toUtc().toIso8601String(),
-            'updated_at': invoice['updated_at'] ?? invoice['created_at'] ?? DateTime.now().toUtc().toIso8601String(),
+            // Keep the invoice business date distinct from insert/update time.
+            'business_date': invoice['sale_date'] ?? invoice['invoice_date'] ?? invoice['date'],
+            'created_at': invoice['created_at'],
+            'updated_at': invoice['updated_at'],
             'user_id': null,
             'sync_status': 'synced',
             'sync_attempts': 0,
@@ -393,8 +412,6 @@ class SalesRestoreService {
             'customer_name': invoice['customer_name'] ?? 'Cash Customer',
             'customer_phone': invoice['customer_phone'],
             'items': normalizedLineItems,
-            'sale_date': invoice['invoice_date'],
-            'date': invoice['invoice_date'],
             'subtotal': invoice['subtotal'].toString(),
             'total': invoice['total_amount'].toString(),
             'total_amount': invoice['total_amount'],
@@ -483,8 +500,19 @@ class SalesRestoreService {
         });
       }
       
-      // Save to local storage (assuming there's a method for this)
-      // await LocalStorageService.saveCustomers(customerData);
+      final existingCustomers = await LocalStorageService.loadLocalCustomers();
+      final mergedCustomers = <String, Map<String, dynamic>>{};
+      for (final existing in existingCustomers) {
+        if (existing is Map) {
+          final key = (existing['id'] ?? existing['phone'] ?? '').toString();
+          if (key.isNotEmpty) mergedCustomers[key] = Map<String, dynamic>.from(existing);
+        }
+      }
+      for (final customer in customerData) {
+        final key = (customer['id'] ?? customer['phone'] ?? '').toString();
+        if (key.isNotEmpty) mergedCustomers[key] = customer;
+      }
+      await LocalStorageService.saveLocalCustomers(mergedCustomers.values.toList());
       
       if (kDebugMode) debugPrint('💾 Saved ${customerData.length} restored customers to local storage');
     } catch (e) {

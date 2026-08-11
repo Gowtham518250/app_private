@@ -1,9 +1,8 @@
-import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import 'package:intl/intl.dart';
 import 'visual_widgets.dart';
+import 'local_storage_service.dart';
 
 /// Expense Tracking Page — Record shop expenses and view totals
 class ExpensePage extends StatefulWidget {
@@ -41,13 +40,14 @@ class _ExpensePageState extends State<ExpensePage>
   }
 
   Future<void> _loadExpenses() async {
-    final prefs = await SharedPreferences.getInstance();
-    final raw = prefs.getString('local_expenses') ?? '[]';
     try {
-      final decoded = json.decode(raw) as List;
+      final storedExpenses = await LocalStorageService.loadExpenses();
+      final loadedExpenses = storedExpenses
+          .map((e) => Map<String, dynamic>.from(e as Map))
+          .toList()
+        ..sort((a, b) => (b['date'] ?? '').compareTo(a['date'] ?? ''));
       setState(() {
-        _expenses = decoded.map((e) => Map<String, dynamic>.from(e)).toList()
-          ..sort((a, b) => (b['date'] ?? '').compareTo(a['date'] ?? ''));
+        _expenses = loadedExpenses;
         _loading = false;
       });
     } catch (_) {
@@ -56,8 +56,7 @@ class _ExpensePageState extends State<ExpensePage>
   }
 
   Future<void> _saveExpenses() async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString('local_expenses', json.encode(_expenses));
+    await LocalStorageService.saveExpenses(_expenses);
   }
 
   double get _totalThisMonth {

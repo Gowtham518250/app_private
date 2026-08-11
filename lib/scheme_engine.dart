@@ -1,5 +1,5 @@
 import 'dart:convert';
-import 'package:shared_preferences/shared_preferences.dart';
+import 'scoped_shared_preferences.dart';
 
 /// Scheme/Offer Engine for auto-applying promotional discounts
 /// Supports: PERCENT_OFF, FLAT_OFF, BOGO (Buy One Get One), MIN_QTY_FREE
@@ -13,8 +13,7 @@ class SchemeEngine {
   /// Load all active schemes from local storage
   static Future<List<Map<String, dynamic>>> loadSchemes() async {
     try {
-      final prefs = await SharedPreferences.getInstance();
-      final raw = prefs.getString('active_schemes') ?? '[]';
+      final raw = await ScopedSharedPreferences.getString('active_schemes') ?? '[]';
       final decoded = jsonDecode(raw) as List?;
       return decoded != null 
           ? List<Map<String, dynamic>>.from(decoded.map((e) => Map<String, dynamic>.from(e as Map)))
@@ -34,8 +33,7 @@ class SchemeEngine {
         'active': true,
         'created_at': DateTime.now().toIso8601String(),
       });
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setString('active_schemes', jsonEncode(schemes));
+      await ScopedSharedPreferences.setString('active_schemes', jsonEncode(schemes));
     } catch (e) {
       rethrow;
     }
@@ -46,8 +44,7 @@ class SchemeEngine {
     try {
       final schemes = await loadSchemes();
       schemes.removeWhere((s) => s['id'] == schemeId);
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setString('active_schemes', jsonEncode(schemes));
+      await ScopedSharedPreferences.setString('active_schemes', jsonEncode(schemes));
     } catch (e) {
       rethrow;
     }
