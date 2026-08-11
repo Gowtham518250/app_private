@@ -34,52 +34,6 @@ class _ErrorBoundaryState extends State<ErrorBoundary> {
     _stackTrace = null;
     _errorContext = null;
   }
-  
-  /// Capture comprehensive error context for debugging
-  Future<void> _captureErrorContext(dynamic error, StackTrace? stackTrace) async {
-    try {
-      _errorContext = {
-        'error': error.toString(),
-        'timestamp': DateTime.now().toIso8601String(),
-        'platform': kDebugMode ? 'debug' : 'release',
-        'stackTrace': stackTrace?.toString(),
-      };
-      
-      // Add device information
-      try {
-        if (!kIsWeb) {
-          final deviceInfo = {
-            'operatingSystem': Platform.operatingSystem,
-            'operatingSystemVersion': Platform.operatingSystemVersion,
-            'locale': Platform.localeName,
-          };
-          _errorContext!['device'] = deviceInfo;
-        }
-      } catch (e) {
-        // Device info collection failed, continue without it
-      }
-      
-      // Add app state information
-      try {
-        final prefs = await SharedPreferences.getInstance();
-        final userId = prefs.getInt('user_id');
-        final appVersion = prefs.getString('app_version');
-        
-        _errorContext!['appState'] = {
-          'userId': userId,
-          'appVersion': appVersion,
-        };
-      } catch (e) {
-        // App state collection failed, continue without it
-      }
-      
-      if (kDebugMode) {
-        debugPrint('📊 Error context captured: $_errorContext');
-      }
-    } catch (e) {
-      if (kDebugMode) debugPrint('⚠️ Failed to capture error context: $e');
-    }
-  }
 
   @override
   Widget build(BuildContext context) {
@@ -206,8 +160,8 @@ class ErrorBoundaryProvider extends InheritedWidget {
   const ErrorBoundaryProvider({
     super.key,
     required this.onError,
-    required Widget child,
-  }) : super(child: child);
+    required super.child,
+  });
 
   static ErrorBoundaryProvider of(BuildContext context) {
     return context.dependOnInheritedWidgetOfExactType<ErrorBoundaryProvider>()!;
@@ -221,6 +175,7 @@ class ErrorBoundaryProvider extends InheritedWidget {
 
 /// Mixin for widgets that want to report errors to the error boundary
 mixin ErrorBoundaryMixin<T extends StatefulWidget> on State<T> {
+  Map<String, dynamic>? _lastErrorContext;
   @override
   void initState() {
     super.initState();
@@ -232,6 +187,8 @@ mixin ErrorBoundaryMixin<T extends StatefulWidget> on State<T> {
   }
 
   void reportError(dynamic error, StackTrace? stackTrace) {
+    _captureErrorContext(error, stackTrace);
+
     // Find error boundary and report error
     ErrorBoundaryProvider? boundary;
     
@@ -241,6 +198,27 @@ mixin ErrorBoundaryMixin<T extends StatefulWidget> on State<T> {
     
     if (boundary != null) {
       boundary.onError(error, stackTrace);
+    }
+  }
+  
+  void _captureErrorContext(dynamic error, StackTrace? stackTrace) {
+    try {
+      _lastErrorContext = {
+        'widget': widget.runtimeType.toString(),
+        'state': this.runtimeType.toString(),
+        'error': error?.toString(),
+        'stackTraceSnippet': stackTrace?.toString().split('\n').take(3).join('\n'),
+        'time': DateTime.now().toIso8601String(),
+      };
+      if (kDebugMode) {
+        // ignore: avoid_print
+        print('[ErrorBoundary] Captured context: \\$\{_lastErrorContext}\n');
+      }
+    } catch (e) {
+      if (kDebugMode) {
+        // ignore: avoid_print
+        print('[ErrorBoundary] Failed to capture context: $e');
+      }
     }
   }
 }
