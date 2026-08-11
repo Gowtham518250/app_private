@@ -1,5 +1,6 @@
 plugins {
     id("com.android.application")
+    id("org.jetbrains.kotlin.android")
     // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
     id("dev.flutter.flutter-gradle-plugin")
 }
@@ -47,4 +48,8 @@ flutter {
 
 dependencies {
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.4")
+    implementation("androidx.work:work-runtime-ktx:2.8.1")
+    implementation("androidx.room:room-runtime:2.5.2")
+    implementation("androidx.sqlite:sqlite-framework:2.3.0")
+    implementation("androidx.sqlite:sqlite:2.3.0")
 }

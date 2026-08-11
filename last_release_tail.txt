@@ -1,0 +1,212 @@
+[        ]   Build cache is disabled
+[        ]   Simple merging task
+[        ] Skipping task ':device_info_plus:mergeReleaseConsumerProguardFiles' as it is up-to-date.
+[        ] Resolve mutations for :device_info_plus:mergeReleaseJavaResource (Thread[Execution worker Thread 2,5,main]) started.
+[        ] :device_info_plus:mergeReleaseJavaResource (Thread[Execution worker Thread 2,5,main]) started.
+[        ] > Task :device_info_plus:mergeReleaseJavaResource UP-TO-DATE
+[        ] Caching disabled for task ':device_info_plus:mergeReleaseJavaResource' because:
+[        ]   Build cache is disabled
+[        ]   Caching has been disabled for the task
+[        ] Skipping task ':device_info_plus:mergeReleaseJavaResource' as it is up-to-date.
+[        ] Resolve mutations for :device_info_plus:syncReleaseLibJars (Thread[Execution worker Thread 2,5,main]) started.
+[        ] :device_info_plus:syncReleaseLibJars (Thread[Execution worker Thread 2,5,main]) started.
+[        ] > Task :device_info_plus:syncReleaseLibJars UP-TO-DATE
+[        ] Caching disabled for task ':device_info_plus:syncReleaseLibJars' because:
+[        ]   Build cache is disabled
+[        ] Skipping task ':device_info_plus:syncReleaseLibJars' as it is up-to-date.
+[        ] Resolve mutations for :device_info_plus:bundleReleaseLocalLintAar (Thread[Execution worker Thread 2,5,main]) started.
+[        ] :device_info_plus:bundleReleaseLocalLintAar (Thread[Execution worker Thread 2,5,main]) started.
+[        ] > Task :device_info_plus:bundleReleaseLocalLintAar UP-TO-DATE
+[        ] Caching disabled for task ':device_info_plus:bundleReleaseLocalLintAar' because:
+[        ]   Build cache is disabled
+[        ]   Caching has been disabled for the task
+[        ] Skipping task ':device_info_plus:bundleReleaseLocalLintAar' as it is up-to-date.
+[        ] work action resolve out.aar (project :device_info_plus) (Thread[Execution worker Thread 2,5,main]) started.
+[        ] work action resolve out.aar (project :device_info_plus) (Thread[Execution worker Thread 2,5,main]) started.
+[        ] ExtractAarTransform (Thread[Execution worker Thread 7,5,main]) started.
+[        ] Resolve mutations for :file_picker:checkReleaseAarMetadata (Thread[Execution worker Thread 2,5,main]) started.
+[        ] ExtractAarTransform (Thread[Execution worker Thread 15,5,main]) started.
+[        ] :file_picker:checkReleaseAarMetadata (Thread[Execution worker Thread 2,5,main]) started.
+[  +95 ms] > Task :file_picker:checkReleaseAarMetadata UP-TO-DATE
+[        ] Caching disabled for task ':file_picker:checkReleaseAarMetadata' because:
+[        ]   Build cache is disabled
+[        ]   Caching has been disabled for the task
+[        ] Skipping task ':file_picker:checkReleaseAarMetadata' as it is up-to-date.
+[        ] Resolve mutations for :file_picker:stripReleaseDebugSymbols (Thread[Execution worker Thread 2,5,main]) started.
+[        ] :file_picker:stripReleaseDebugSymbols (Thread[Execution worker Thread 2,5,main]) started.
+[        ] > Task :file_picker:stripReleaseDebugSymbols NO-SOURCE
+[        ] Skipping task ':file_picker:stripReleaseDebugSymbols' as it has no source files and no previous output files.
+[        ] Resolve mutations for :file_picker:copyReleaseJniLibsProjectAndLocalJars (Thread[Execution worker Thread 2,5,main]) started.
+[        ] :file_picker:copyReleaseJniLibsProjectAndLocalJars (Thread[Execution worker Thread 2,5,main]) started.
+[        ] > Task :file_picker:copyReleaseJniLibsProjectAndLocalJars UP-TO-DATE
+[        ] Caching disabled for task ':file_picker:copyReleaseJniLibsProjectAndLocalJars' because:
+[        ]   Build cache is disabled
+[        ]   Caching has been disabled for the task
+[        ] Skipping task ':file_picker:copyReleaseJniLibsProjectAndLocalJars' as it is up-to-date.
+[        ] Resolve mutations for :file_picker:extractDeepLinksForAarRelease (Thread[Execution worker Thread 2,5,main]) started.
+[        ] :file_picker:extractDeepLinksForAarRelease (Thread[Execution worker Thread 2,5,main]) started.
+[        ] > Task :file_picker:extractDeepLinksForAarRelease UP-TO-DATE
+[        ] Caching disabled for task ':file_picker:extractDeepLinksForAarRelease' because:
+[        ]   Build cache is disabled
+[        ] Skipping task ':file_picker:extractDeepLinksForAarRelease' as it is up-to-date.
+[        ] Resolve mutations for :file_picker:extractReleaseAnnotations (Thread[Execution worker Thread 2,5,main]) started.
+[        ] :file_picker:extractReleaseAnnotations (Thread[Execution worker Thread 2,5,main]) started.
+[        ] > Task :file_picker:extractReleaseAnnotations UP-TO-DATE
+[        ] Caching disabled for task ':file_picker:extractReleaseAnnotations' because:
+[        ]   Build cache is disabled
+[        ] Skipping task ':file_picker:extractReleaseAnnotations' as it is up-to-date.
+[        ] Resolve mutations for :file_picker:mergeReleaseConsumerProguardFiles (Thread[Execution worker Thread 2,5,main]) started.
+[        ] :file_picker:mergeReleaseConsumerProguardFiles (Thread[Execution worker Thread 2,5,main]) started.
+[        ] > Task :file_picker:mergeReleaseConsumerProguardFiles UP-TO-DATE
+[        ] Caching disabled for task ':file_picker:mergeReleaseConsumerProguardFiles' because:
+[        ]   Build cache is disabled
+[        ]   Simple merging task
+[        ] Skipping task ':file_picker:mergeReleaseConsumerProguardFiles' as it is up-to-date.
+[        ] Resolve mutations for :file_picker:mergeReleaseJavaResource (Thread[Execution worker Thread 2,5,main]) started.
+[        ] :file_picker:mergeReleaseJavaResource (Thread[Execution worker Thread 2,5,main]) started.
+[        ] > Task :file_picker:mergeReleaseJavaResource UP-TO-DATE
+[        ] Caching disabled for task ':file_picker:mergeReleaseJavaResource' because:
+[        ]   Build cache is disabled
+[        ]   Caching has been disabled for the task
+[        ] Skipping task ':file_picker:mergeReleaseJavaResource' as it is up-to-date.
+[        ] Resolve mutations for :file_picker:syncReleaseLibJars (Thread[Execution worker Thread 2,5,main]) started.
+[        ] :file_picker:syncReleaseLibJars (Thread[Execution worker Thread 2,5,main]) started.
+[        ] > Task :file_picker:syncReleaseLibJars UP-TO-DATE
+[        ] Caching disabled for task ':file_picker:syncReleaseLibJars' because:
+[        ]   Build cache is disabled
+[        ] Skipping task ':file_picker:syncReleaseLibJars' as it is up-to-date.
+[        ] Resolve mutations for :file_picker:bundleReleaseLocalLintAar (Thread[Execution worker Thread 2,5,main]) started.
+[        ] :file_picker:bundleReleaseLocalLintAar (Thread[Execution worker Thread 2,5,main]) started.
+[        ] > Task :file_picker:bundleReleaseLocalLintAar UP-TO-DATE
+[        ] Caching disabled for task ':file_picker:bundleReleaseLocalLintAar' because:
+[        ]   Build cache is disabled
+[        ]   Caching has been disabled for the task
+[        ] Skipping task ':file_picker:bundleReleaseLocalLintAar' as it is up-to-date.
+[        ] work action resolve out.aar (project :file_picker) (Thread[Execution worker Thread 2,5,main]) started.
+[        ] work action resolve out.aar (project :file_picker) (Thread[Execution worker Thread 2,5,main]) started.
+[        ] ExtractAarTransform (Thread[Execution worker Thread 13,5,main]) started.
+[        ] Resolve mutations for :firebase_auth:checkReleaseAarMetadata (Thread[Execution worker Thread 2,5,main]) started.
+[        ] ExtractAarTransform (Thread[Execution worker Thread 6,5,main]) started.
+[        ] :firebase_auth:checkReleaseAarMetadata (Thread[Execution worker Thread 5,5,main]) started.
+[        ] > Task :firebase_auth:checkReleaseAarMetadata UP-TO-DATE
+[        ] Caching disabled for task ':firebase_auth:checkReleaseAarMetadata' because:
+[        ]   Build cache is disabled
+[        ]   Caching has been disabled for the task
+[        ] Skipping task ':firebase_auth:checkReleaseAarMetadata' as it is up-to-date.
+[        ] Resolve mutations for :firebase_auth:stripReleaseDebugSymbols (Thread[Execution worker Thread 5,5,main]) started.
+[        ] :firebase_auth:stripReleaseDebugSymbols (Thread[Execution worker Thread 5,5,main]) started.
+[        ] > Task :firebase_auth:stripReleaseDebugSymbols NO-SOURCE
+[        ] Skipping task ':firebase_auth:stripReleaseDebugSymbols' as it has no source files and no previous output files.
+[        ] Resolve mutations for :firebase_auth:copyReleaseJniLibsProjectAndLocalJars (Thread[Execution worker Thread 5,5,main]) started.
+[        ] :firebase_auth:copyReleaseJniLibsProjectAndLocalJars (Thread[Execution worker Thread 13,5,main]) started.
+[        ] > Task :firebase_auth:copyReleaseJniLibsProjectAndLocalJars UP-TO-DATE
+[        ] Caching disabled for task ':firebase_auth:copyReleaseJniLibsProjectAndLocalJars' because:
+[        ]   Build cache is disabled
+[        ]   Caching has been disabled for the task
+[        ] Skipping task ':firebase_auth:copyReleaseJniLibsProjectAndLocalJars' as it is up-to-date.
+[        ] Resolve mutations for :firebase_auth:extractDeepLinksForAarRelease (Thread[Execution worker Thread 13,5,main]) started.
+[        ] :firebase_auth:extractDeepLinksForAarRelease (Thread[Execution worker Thread 13,5,main]) started.
+[        ] > Task :firebase_auth:extractDeepLinksForAarRelease UP-TO-DATE
+[        ] Caching disabled for task ':firebase_auth:extractDeepLinksForAarRelease' because:
+[        ]   Build cache is disabled
+[        ] Skipping task ':firebase_auth:extractDeepLinksForAarRelease' as it is up-to-date.
+[        ] Resolve mutations for :firebase_auth:extractReleaseAnnotations (Thread[Execution worker Thread 13,5,main]) started.
+[        ] :firebase_auth:extractReleaseAnnotations (Thread[Execution worker Thread 13,5,main]) started.
+[        ] > Task :firebase_auth:extractReleaseAnnotations UP-TO-DATE
+[        ] Caching disabled for task ':firebase_auth:extractReleaseAnnotations' because:
+[        ]   Build cache is disabled
+[        ] Skipping task ':firebase_auth:extractReleaseAnnotations' as it is up-to-date.
+[        ] Resolve mutations for :firebase_auth:mergeReleaseConsumerProguardFiles (Thread[Execution worker Thread 13,5,main]) started.
+[        ] :firebase_auth:mergeReleaseConsumerProguardFiles (Thread[Execution worker Thread 13,5,main]) started.
+[  +86 ms] > Task :firebase_auth:mergeReleaseConsumerProguardFiles UP-TO-DATE
+[        ] Caching disabled for task ':firebase_auth:mergeReleaseConsumerProguardFiles' because:
+[        ]   Build cache is disabled
+[        ]   Simple merging task
+[        ] Skipping task ':firebase_auth:mergeReleaseConsumerProguardFiles' as it is up-to-date.
+[        ] Resolve mutations for :firebase_auth:mergeReleaseJavaResource (Thread[Execution worker Thread 13,5,main]) started.
+[        ] :firebase_auth:mergeReleaseJavaResource (Thread[Execution worker Thread 13,5,main]) started.
+[        ] > Task :firebase_auth:mergeReleaseJavaResource UP-TO-DATE
+[        ] Caching disabled for task ':firebase_auth:mergeReleaseJavaResource' because:
+[        ]   Build cache is disabled
+[        ]   Caching has been disabled for the task
+[        ] Skipping task ':firebase_auth:mergeReleaseJavaResource' as it is up-to-date.
+[        ] Resolve mutations for :firebase_auth:syncReleaseLibJars (Thread[Execution worker Thread 13,5,main]) started.
+[        ] :firebase_auth:syncReleaseLibJars (Thread[Execution worker Thread 13,5,main]) started.
+[        ] > Task :firebase_auth:syncReleaseLibJars UP-TO-DATE
+[        ] Caching disabled for task ':firebase_auth:syncReleaseLibJars' because:
+[        ]   Build cache is disabled
+[        ] Skipping task ':firebase_auth:syncReleaseLibJars' as it is up-to-date.
+[        ] Resolve mutations for :firebase_auth:bundleReleaseLocalLintAar (Thread[Execution worker Thread 13,5,main]) started.
+[        ] :firebase_auth:bundleReleaseLocalLintAar (Thread[Execution worker Thread 13,5,main]) started.
+[        ] > Task :firebase_auth:bundleReleaseLocalLintAar UP-TO-DATE
+[        ] Caching disabled for task ':firebase_auth:bundleReleaseLocalLintAar' because:
+[        ]   Build cache is disabled
+[        ]   Caching has been disabled for the task
+[        ] Skipping task ':firebase_auth:bundleReleaseLocalLintAar' as it is up-to-date.
+[        ] work action resolve out.aar (project :firebase_auth) (Thread[Execution worker Thread 13,5,main]) started.
+[        ] work action resolve out.aar (project :firebase_auth) (Thread[Execution worker Thread 13,5,main]) started.
+[        ] ExtractAarTransform (Thread[Execution worker Thread 7,5,main]) started.
+[        ] Resolve mutations for :firebase_crashlytics:checkReleaseAarMetadata (Thread[Execution worker Thread 13,5,main]) started.
+[        ] ExtractAarTransform (Thread[Execution worker Thread 4,5,main]) started.
+[        ] :firebase_crashlytics:checkReleaseAarMetadata (Thread[Execution worker Thread 13,5,main]) started.
+[        ] > Task :firebase_crashlytics:checkReleaseAarMetadata UP-TO-DATE
+[        ] Caching disabled for task ':firebase_crashlytics:checkReleaseAarMetadata' because:
+[        ]   Build cache is disabled
+[        ]   Caching has been disabled for the task
+[        ] Skipping task ':firebase_crashlytics:checkReleaseAarMetadata' as it is up-to-date.
+[        ] Resolve mutations for :firebase_crashlytics:stripReleaseDebugSymbols (Thread[Execution worker Thread 13,5,main]) started.
+[        ] :firebase_crashlytics:stripReleaseDebugSymbols (Thread[Execution worker Thread 13,5,main]) started.
+[        ] > Task :firebase_crashlytics:stripReleaseDebugSymbols NO-SOURCE
+[        ] Skipping task ':firebase_crashlytics:stripReleaseDebugSymbols' as it has no source files and no previous output files.
+[        ] Resolve mutations for :firebase_crashlytics:copyReleaseJniLibsProjectAndLocalJars (Thread[Execution worker Thread 13,5,main]) started.
+[        ] :firebase_crashlytics:copyReleaseJniLibsProjectAndLocalJars (Thread[Execution worker Thread 13,5,main]) started.
+[        ] > Task :firebase_crashlytics:copyReleaseJniLibsProjectAndLocalJars UP-TO-DATE
+[        ] Caching disabled for task ':firebase_crashlytics:copyReleaseJniLibsProjectAndLocalJars' because:
+[        ]   Build cache is disabled
+[        ]   Caching has been disabled for the task
+[        ] Skipping task ':firebase_crashlytics:copyReleaseJniLibsProjectAndLocalJars' as it is up-to-date.
+[        ] Resolve mutations for :firebase_crashlytics:extractDeepLinksForAarRelease (Thread[Execution worker Thread 13,5,main]) started.
+[        ] :firebase_crashlytics:extractDeepLinksForAarRelease (Thread[Execution worker Thread 13,5,main]) started.
+[        ] > Task :firebase_crashlytics:extractDeepLinksForAarRelease UP-TO-DATE
+[        ] Caching disabled for task ':firebase_crashlytics:extractDeepLinksForAarRelease' because:
+[        ]   Build cache is disabled
+[        ] Skipping task ':firebase_crashlytics:extractDeepLinksForAarRelease' as it is up-to-date.
+[        ] Resolve mutations for :firebase_crashlytics:extractReleaseAnnotations (Thread[Execution worker Thread 13,5,main]) started.
+[        ] :firebase_crashlytics:extractReleaseAnnotations (Thread[Execution worker Thread 13,5,main]) started.
+[        ] > Task :firebase_crashlytics:extractReleaseAnnotations UP-TO-DATE
+[        ] Caching disabled for task ':firebase_crashlytics:extractReleaseAnnotations' because:
+[        ]   Build cache is disabled
+[        ] Skipping task ':firebase_crashlytics:extractReleaseAnnotations' as it is up-to-date.
+[        ] Resolve mutations for :firebase_crashlytics:mergeReleaseConsumerProguardFiles (Thread[Execution worker Thread 13,5,main]) started.
+[        ] :firebase_crashlytics:mergeReleaseConsumerProguardFiles (Thread[Execution worker Thread 13,5,main]) started.
+[        ] > Task :firebase_crashlytics:mergeReleaseConsumerProguardFiles UP-TO-DATE
+[        ] Caching disabled for task ':firebase_crashlytics:mergeReleaseConsumerProguardFiles' because:
+[        ]   Build cache is disabled
+[        ]   Simple merging task
+[        ] Skipping task ':firebase_crashlytics:mergeReleaseConsumerProguardFiles' as it is up-to-date.
+[        ] Resolve mutations for :firebase_crashlytics:mergeReleaseJavaResource (Thread[Execution worker Thread 13,5,main]) started.
+[        ] :firebase_crashlytics:mergeReleaseJavaResource (Thread[Execution worker Thread 13,5,main]) started.
+[        ] > Task :firebase_crashlytics:mergeReleaseJavaResource UP-TO-DATE
+[        ] Caching disabled for task ':firebase_crashlytics:mergeReleaseJavaResource' because:
+[        ]   Build cache is disabled
+[        ]   Caching has been disabled for the task
+[        ] Skipping task ':firebase_crashlytics:mergeReleaseJavaResource' as it is up-to-date.
+[        ] Resolve mutations for :firebase_crashlytics:syncReleaseLibJars (Thread[Execution worker Thread 13,5,main]) started.
+[        ] :firebase_crashlytics:syncReleaseLibJars (Thread[Execution worker Thread 13,5,main]) started.
+[        ] > Task :firebase_crashlytics:syncReleaseLibJars UP-TO-DATE
+[        ] Caching disabled for task ':firebase_crashlytics:syncReleaseLibJars' because:
+[        ]   Build cache is disabled
+[        ] Skipping task ':firebase_crashlytics:syncReleaseLibJars' as it is up-to-date.
+[        ] Resolve mutations for :firebase_crashlytics:bundleReleaseLocalLintAar (Thread[Execution worker Thread 13,5,main]) started.
+[        ] :firebase_crashlytics:bundleReleaseLocalLintAar (Thread[Execution worker Thread 8,5,main]) started.
+[        ] > Task :firebase_crashlytics:bundleReleaseLocalLintAar UP-TO-DATE
+[        ] Caching disabled for task ':firebase_crashlytics:bundleReleaseLocalLintAar' because:
+[        ]   Build cache is disabled
+[        ]   Caching has been disabled for the task
+[        ] Skipping task ':firebase_crashlytics:bundleReleaseLocalLintAar' as it is up-to-date.
+[        ] work action resolve out.aar (project :firebase_crashlytics) (Thread[Execution worker Thread 8,5,main]) started.
+[        ] work action resolve out.aar (project :firebase_crashlytics) (Thread[Execution worker Thread 8,5,main]) started.
+[        ] ExtractAarTransform (Thread[Execution worker Thread 11,5,main]) started.
+[        ] Resolve mutations for :firebase_messaging:checkReleaseAarMetadata (Thread[Execution worker Thread 8,5,main]) started.
+[        ] ExtractAarTransform (Thread[Execution worker Thread 13,5,main]) started.
+[        ] :firebase_messaging:checkReleaseAarMetadata (Thread[Execution worker Thread 8,5,main]) started.
