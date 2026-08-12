@@ -457,6 +457,10 @@ class SyncService {
   /// Internal queue processing implementation
   static Future<void> _processQueueImpl() async {
     try {
+      // Self-healing: recover any quarantined or stuck items from previous sessions
+      await SyncQueueManager.recoverQuarantinedForCurrentUser();
+      await SyncQueueManager.recoverStuckItems();
+
       final dynamic connection = await Connectivity().checkConnectivity();
       final bool isOffline = connection is List 
           ? (connection.isEmpty || (connection.length == 1 && connection.first == ConnectivityResult.none))
@@ -590,30 +594,59 @@ class SyncService {
             }
           }
           if (!success) {
-            // Increment retry count
-            item['retries'] = (item['retries'] ?? 0) + 1;
-            final retryNow = DateTime.now();
-            item['last_attempt'] = retryNow.toIso8601String();
-            item['status'] = 'RETRY_WAIT';
+            final retryCount = ((item['retries'] as num?)?.toInt() ?? 0) + 1;
+            item['retries'] = retryCount;
+            item['last_attempt'] = DateTime.now().toUtc().toIso8601String();
             item['last_error'] = 'SYNC_FAILED';
-            final retryCount = item['retries'] as int;
-            final retryDelay = switch (retryCount) {
+
+            const criticalActions = <String>{
+              'save_sale',
+              'create_sale',
+              'sync_sale',
+              'sync_invoice_batch',
+              'update_payment',
+              'update_invoice_payment',
+              'update_invoice_paid',
+              'update_invoice_unpaid',
+              'record_khata_payment',
+              'decrease_stock',
+              'create_purchase_order',
+              'update_purchase_order_status',
+            };
+
+            final isCritical = criticalActions.contains(action);
+
+            final retryDelaySeconds = switch (retryCount) {
               1 => 2,
               2 => 5,
               3 => 15,
               4 => 30,
               5 => 60,
-              _ => 120,
+              6 => 120,
+              7 => 300,
+              8 => 600,
+              9 => 1800,
+              _ => 3600,
             };
-            item['next_attempt_at'] = retryCount >= _maxQueueRetries
-                ? null
-                : DateTime.now().add(Duration(seconds: retryDelay)).toIso8601String();
-            if (item['retries'] >= _maxQueueRetries) {
-              item['status'] = 'PARKED';
-              if (kDebugMode) debugPrint('🛑 Action $actionId failed repeatedly and has been parked');
+
+            item['next_attempt_at'] = DateTime.now()
+                .toUtc()
+                .add(Duration(seconds: retryDelaySeconds))
+                .toIso8601String();
+
+            if (isCritical) {
+              // Critical operations NEVER become permanently dead.
+              item['status'] = 'RETRY_WAIT';
+              item['needs_attention'] = retryCount >= 8;
+              if (kDebugMode) debugPrint('⚠️ CRITICAL: Action $actionId (retry $retryCount) will retry in ${retryDelaySeconds}s.');
             } else {
-              if (kDebugMode) debugPrint('⚠️ Action $actionId failed, will retry in ${retryDelay}s.');
+              // Non-critical operations may be parked after repeated failure,
+              // but the record remains durable for manual recovery.
+              item['status'] = retryCount >= 12 ? 'PARKED' : 'RETRY_WAIT';
+              item['needs_attention'] = retryCount >= 12;
+              if (kDebugMode) debugPrint('⚠️ Action $actionId (retry $retryCount) will retry in ${retryDelaySeconds}s.');
             }
+
             await SyncQueueManager.update(actionId, item);
             failureCount++;
             consecutiveNetworkFailures++;
@@ -626,28 +659,59 @@ class SyncService {
           failureCount++;
           consecutiveNetworkFailures++;
           
-          // Update retry count using the same durable backoff metadata as normal failures.
-          item['retries'] = (item['retries'] ?? 0) + 1;
-          final retryNow = DateTime.now();
-          item['last_attempt'] = retryNow.toIso8601String();
-          item['status'] = 'RETRY_WAIT';
+          final retryCount = ((item['retries'] as num?)?.toInt() ?? 0) + 1;
+          item['retries'] = retryCount;
+          item['last_attempt'] = DateTime.now().toUtc().toIso8601String();
           item['last_error'] = e.toString();
-          final retryCount = item['retries'] as int;
-          final retryDelay = switch (retryCount) {
+
+          const criticalActions = <String>{
+            'save_sale',
+            'create_sale',
+            'sync_sale',
+            'sync_invoice_batch',
+            'update_payment',
+            'update_invoice_payment',
+            'update_invoice_paid',
+            'update_invoice_unpaid',
+            'record_khata_payment',
+            'decrease_stock',
+            'create_purchase_order',
+            'update_purchase_order_status',
+          };
+
+          final isCritical = criticalActions.contains(action);
+
+          final retryDelaySeconds = switch (retryCount) {
             1 => 2,
             2 => 5,
             3 => 15,
             4 => 30,
             5 => 60,
-            _ => 120,
+            6 => 120,
+            7 => 300,
+            8 => 600,
+            9 => 1800,
+            _ => 3600,
           };
-          item['next_attempt_at'] = retryCount >= _maxQueueRetries
-              ? null
-              : DateTime.now().add(Duration(seconds: retryDelay)).toIso8601String();
-          if (item['retries'] >= _maxQueueRetries) {
-            item['status'] = 'PARKED';
-            if (kDebugMode) debugPrint('🛑 Action $actionId error exceeded retry limit and has been parked');
+
+          item['next_attempt_at'] = DateTime.now()
+              .toUtc()
+              .add(Duration(seconds: retryDelaySeconds))
+              .toIso8601String();
+
+          if (isCritical) {
+            // Critical operations NEVER become permanently dead.
+            item['status'] = 'RETRY_WAIT';
+            item['needs_attention'] = retryCount >= 8;
+            if (kDebugMode) debugPrint('🚨 CRITICAL EXCEPTION: Action $actionId (retry $retryCount) will retry in ${retryDelaySeconds}s. Error: $e');
+          } else {
+            // Non-critical operations may be parked after repeated failure,
+            // but the record remains durable for manual recovery.
+            item['status'] = retryCount >= 12 ? 'PARKED' : 'RETRY_WAIT';
+            item['needs_attention'] = retryCount >= 12;
+            if (kDebugMode) debugPrint('⚠️ Action $actionId (retry $retryCount) will retry in ${retryDelaySeconds}s.');
           }
+
           await SyncQueueManager.update(actionId, item);
         }
       }
