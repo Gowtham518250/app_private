@@ -30,14 +30,26 @@ class SalesDedupHelper {
     return double.tryParse(v.toString()) ?? fallback;
   }
 
+  /// Extracts the microsecond timestamp encoded in a 'SALE_<micros>' id
+  /// (see sales_entry_page.dart: `'SALE_${DateTime.now().microsecondsSinceEpoch}'`).
+  /// Returns null if the id isn't in that format.
+  static int? _saleIdTimestampMicros(String saleId) {
+    if (!saleId.startsWith('SALE_')) return null;
+    return int.tryParse(saleId.substring(5));
+  }
+
   static String _productKey(Map item) {
     final raw = (item['product_name'] ?? item['item'] ?? item['product'] ?? 'unknown').toString();
     return FormatHelper.normalizeName(raw);
   }
 
-  /// Fingerprint for a full bill (matches local SALE_xxx vs cloud row id).
-  static String billFingerprint(Map<String, dynamic> sale) {
-    final saleId = (sale['sale_id'] ?? sale['invoice_number'] ?? '').toString();
+  /// Content-only fingerprint for a full bill — day + normalized items +
+  /// quantities + prices + total. Deliberately does NOT include sale_id:
+  /// identity (sale_id) and content must stay separate concepts, or content
+  /// matching can never actually find a match between two records that
+  /// differ only by ID (which is exactly what a retry/double-submission
+  /// produces — same content, new SALE_<timestamp> id).
+  static String billContentFingerprint(Map<String, dynamic> sale) {
     final day = _dayKey(sale['sale_date'] ?? sale['created_at'] ?? sale['date']);
     final total = _num(sale['total']).toStringAsFixed(2);
     final items = sale['items'] as List? ?? [];
@@ -46,7 +58,7 @@ class SalesDedupHelper {
       final product = FormatHelper.normalizeName((sale['product'] ?? 'unknown').toString());
       final qty = _num(sale['quantity'] ?? sale['qty'], 1).toStringAsFixed(2);
       final price = _num(sale['price']).toStringAsFixed(2);
-      return '${saleId}_${day}_${product}_${qty}_${price}_$total';
+      return '${day}_${product}_${qty}_${price}_$total';
     }
 
     final parts = <String>[];
@@ -59,7 +71,7 @@ class SalesDedupHelper {
       parts.add('${product}_${qty}_$price');
     }
     parts.sort();
-    return '${saleId}_${day}_${parts.join('|')}_$total';
+    return '${day}_${parts.join('|')}_$total';
   }
 
   /// Content-only fingerprint — catches duplicate lines even with different sale_id.
@@ -118,7 +130,7 @@ class SalesDedupHelper {
       }
 
       final saleId = (sale['sale_id'] ?? sale['id'] ?? '').toString();
-      final fp = billFingerprint(sale);
+      final fp = billContentFingerprint(sale);
 
       // Strong ID match takes precedence
       if (saleId.isNotEmpty && saleId.startsWith('SALE_')) {
@@ -127,7 +139,7 @@ class SalesDedupHelper {
           if (_preferIncomingBill(existing, sale)) {
             byId[saleId] = sale;
             // Update fingerprint mapping as well
-            final oldFp = billFingerprint(existing);
+            final oldFp = billContentFingerprint(existing);
             if (byFingerprint[oldFp] == existing) {
               byFingerprint.remove(oldFp);
               byFingerprint[fp] = sale;
@@ -142,8 +154,20 @@ class SalesDedupHelper {
         final existing = byFingerprint[fp]!;
         final eId = (existing['sale_id'] ?? existing['id'] ?? '').toString();
         
-        // Prevent merging two explicitly different local sales
-        bool isDistinctSale = saleId.startsWith('SALE_') && eId.startsWith('SALE_') && saleId != eId;
+        // Prevent merging two explicitly different local sales — but only
+        // when they're far enough apart in time to plausibly be a real
+        // repeat purchase, not a retry/double-tap of the same submission.
+        bool isDistinctSale = false;
+        if (saleId.startsWith('SALE_') && eId.startsWith('SALE_') && saleId != eId) {
+          final tsNew = _saleIdTimestampMicros(saleId);
+          final tsExisting = _saleIdTimestampMicros(eId);
+          if (tsNew != null && tsExisting != null) {
+            final gapSeconds = (tsNew - tsExisting).abs() / 1000000;
+            isDistinctSale = gapSeconds > 30; // >30s apart: treat as a real separate sale
+          } else {
+            isDistinctSale = true; // can't compare timestamps — fall back to old (safe) behavior
+          }
+        }
         
         if (!isDistinctSale) {
           if (_preferIncomingBill(existing, sale)) {
@@ -214,7 +238,7 @@ class SalesDedupHelper {
   /// True when [cloud] bill duplicates an existing [local] bill.
   static bool isDuplicateBill(Map<String, dynamic> cloud, Iterable<Map<String, dynamic>> localBills) {
     final cloudId = (cloud['sale_id'] ?? cloud['id'] ?? '').toString();
-    final cloudFp = billFingerprint(cloud);
+    final cloudFp = billContentFingerprint(cloud);
 
     for (final local in localBills) {
       final localId = (local['sale_id'] ?? local['id'] ?? '').toString();
@@ -222,10 +246,20 @@ class SalesDedupHelper {
       // Strong match
       if (cloudId.isNotEmpty && localId.isNotEmpty && cloudId == localId) return true;
       
-      // Fingerprint match, but only if they don't have conflicting SALE_ ids
-      if (billFingerprint(local) == cloudFp) {
-         bool isDistinctSale = cloudId.startsWith('SALE_') && localId.startsWith('SALE_') && cloudId != localId;
-         if (!isDistinctSale) return true;
+      // Content match, but only if they don't have conflicting SALE_ ids
+      // that are far enough apart in time to be a plausible real repeat sale.
+      if (billContentFingerprint(local) == cloudFp) {
+        bool isDistinctSale = false;
+        if (cloudId.startsWith('SALE_') && localId.startsWith('SALE_') && cloudId != localId) {
+          final tsCloud = _saleIdTimestampMicros(cloudId);
+          final tsLocal = _saleIdTimestampMicros(localId);
+          if (tsCloud != null && tsLocal != null) {
+            isDistinctSale = (tsCloud - tsLocal).abs() / 1000000 > 30;
+          } else {
+            isDistinctSale = true;
+          }
+        }
+        if (!isDistinctSale) return true;
       }
     }
     return false;

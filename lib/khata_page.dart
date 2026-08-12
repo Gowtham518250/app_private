@@ -668,6 +668,7 @@ final name = inv['customer_name']?.toString().trim() ?? '';
                                 'amount': amt,
                                 'payment_method': selectedMethod,
                                 'notes': notesController.text.trim(),
+                                'idempotency_key': '${customer['customer_id'] ?? customer['customer_phone']}_${amt}_${DateTime.now().millisecondsSinceEpoch}',
                               };
 
                               try {

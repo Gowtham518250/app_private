@@ -11,7 +11,6 @@ import 'local_storage_service.dart';
 import 'retail_growth_kit.dart';
 import 'sync_service.dart';
 import 'agent_debug_log.dart';
-import 'error_log_helper.dart';
 import 'crash_recovery_service.dart';
 
 /// PRODUCTION-READY SALE SERVICE: Integrated Idempotency, Encryption, and Error Handling
@@ -206,22 +205,53 @@ try {
   }
 
   bool backendSuccess = false;
+
+  // OFFLINE-FIRST: persist the sale and enqueue it BEFORE attempting any network call.
+  // This guarantees that a sale survives app close/background/crash/network loss.
+  final invoicePayload = {
+    'invoice_number': saleId,
+    'offline_id': offlineId,
+    'customer_name': customerName.isNotEmpty ? customerName : 'Cash Customer',
+    'customer_phone': customerPhone.isNotEmpty ? customerPhone : null,
+    'total_amount': grandTotal,
+    'paid_amount': paidAmount,
+    'tax': withTax ? (totals['tax'] ?? 0.0) : 0.0,
+    'payment_status': paymentStatusFor(paidAmount, grandTotal),
+    'invoice_date': DateTime.now().toIso8601String().split('T')[0],
+    'notes': isBorrow ? 'Payment via $paymentMethod - Borrow Invoice' : 'Payment via $paymentMethod - Regular Sale',
+    'line_items': lineItems,
+  };
+
+  final prefs = await SharedPreferences.getInstance();
+  await _persistToLocalHistory(
+    prefs: prefs,
+    saleId: saleId,
+    customerName: customerName,
+    customerPhone: customerPhone,
+    items: lineItems,
+    grandTotal: grandTotal,
+    paidAmount: paidAmount,
+    withTax: withTax,
+    totals: totals,
+    paymentMethod: paymentMethod,
+    syncStatus: 'pending',
+  );
+
+  await SyncQueueManager.enqueue('save_sale', {
+    'is_borrow': isBorrow,
+    'endpoint': ApiClient.invoicesSync,
+    'payload': invoicePayload,
+    'invoice_payload': invoicePayload,
+    'sale_id': saleId,
+    'retry_priority': 'high',
+  });
+
+  // Local inventory is updated once. Backend inventory is updated only by /invoices/sync.
+  await InventoryManagementService.deductStockLocally(items, saleId: saleId);
+  SyncService.triggerDashboardRefresh();
+
   try {
     final token = await SecureTokenStorage.getToken() ?? '';
-
-    final invoicePayload = {
-      'invoice_number': saleId,
-      'offline_id': offlineId,
-      'customer_name': customerName.isNotEmpty ? customerName : 'Cash Customer',
-      'customer_phone': customerPhone.isNotEmpty ? customerPhone : null,
-      'total_amount': grandTotal,
-      'paid_amount': paidAmount,
-      'tax': withTax ? (totals['tax'] ?? 0.0) : 0.0,
-      'payment_status': paymentStatusFor(paidAmount, grandTotal),
-      'invoice_date': DateTime.now().toIso8601String().split('T')[0],
-      'notes': isBorrow ? 'Payment via $paymentMethod - Borrow Invoice' : 'Payment via $paymentMethod - Regular Sale',
-      'line_items': lineItems,
-    };
 
     AgentDebugLog.log(
       location: 'sale_service.dart:submitSale:pre_post',
@@ -237,7 +267,7 @@ try {
 
     final response = await ApiClient.postJson(ApiClient.invoicesSync, invoicePayload, headers: {
       if (token.isNotEmpty) 'Authorization': 'Bearer $token',
-    }).timeout(const Duration(seconds: 8));
+    }).timeout(const Duration(seconds: 15));
 
     AgentDebugLog.log(
       location: 'sale_service.dart:submitSale:invoice_response',
@@ -254,12 +284,13 @@ try {
       backendSuccess = true;
       await _markSaleAsSynced(saleId);
     } else {
-      throw Exception('${isBorrow ? 'Invoice' : 'Sale'} backend returned status ${response.statusCode}: ${response.body}');
+      if (kDebugMode) debugPrint('⚠️ Sale queued locally; backend returned ${response.statusCode}.');
     }
   } catch (e, st) {
+    if (kDebugMode) debugPrint('⚠️ Sale stored locally and queued; backend sync deferred: $e');
     AgentDebugLog.log(
       location: 'sale_service.dart:submitSale:post_error',
-      message: 'POST FAILED',
+      message: 'POST FAILED - QUEUED',
       hypothesisId: 'H2',
       data: {
         'error': e.toString(),
@@ -267,67 +298,15 @@ try {
         'saleId': saleId,
       },
     );
-    if (kDebugMode) debugPrint('${isBorrow ? 'Invoice' : 'Sale'} backend sync failed, falling back to queue: $e');
-
-    final prefs = await SharedPreferences.getInstance();
-    await _persistToLocalHistory(
-      prefs: prefs,
-      saleId: saleId,
-      customerName: customerName,
-      customerPhone: customerPhone,
-      items: lineItems,
-      grandTotal: grandTotal,
-      paidAmount: paidAmount,
-      withTax: withTax,
-      totals: totals,
-      paymentMethod: paymentMethod,
-      syncStatus: 'pending',
-    );
-
-    final invoicePayload = {
-      'invoice_number': saleId,
-      'offline_id': offlineId,
-      'customer_name': customerName.isNotEmpty ? customerName : 'Cash Customer',
-      'customer_phone': customerPhone.isNotEmpty ? customerPhone : null,
-      'total_amount': grandTotal,
-      'paid_amount': paidAmount,
-      'tax': withTax ? (totals['tax'] ?? 0.0) : 0.0,
-      'payment_status': paymentStatusFor(paidAmount, grandTotal),
-      'invoice_date': DateTime.now().toIso8601String().split('T')[0],
-      'notes': isBorrow ? 'Payment via $paymentMethod - Borrow Invoice' : 'Payment via $paymentMethod - Regular Sale',
-      'line_items': lineItems,
-    };
-
-    try {
-      await SyncQueueManager.enqueue('save_sale', {
-        'is_borrow': isBorrow,
-        'endpoint': ApiClient.invoicesSync,
-        'payload': invoicePayload,
-        'invoice_payload': invoicePayload,
-        'sale_id': saleId,
-        'retry_priority': 'high',
-      });
-    } catch (queueError) {
-      if (kDebugMode) debugPrint('⚠️ Failed to enqueue offline sale: $queueError');
-      await ErrorLogHelper.logException(queueError, StackTrace.current, context: 'SaleService.submitSale:enqueue');
-      rethrow;
-    }
-
-    try {
-      await InventoryManagementService.deductStockLocally(items, saleId: saleId);
-    } catch (e) {
-      if (kDebugMode) debugPrint('⚠️ Local stock deduction after offline queue failed: $e');
-    }
-
-    SyncService.triggerDashboardRefresh();
-    backendSuccess = false;
   } finally {
     _pendingSales.remove(saleId);
     InventoryManagementService.suppressInventoryCallback = false;
   }
 
+  // Kick the durable queue after the foreground attempt. The queue is the source of truth.
+  unawaited(SyncService.processQueueSafe());
+
   if (backendSuccess) {
-    final prefs = await SharedPreferences.getInstance();
     await _persistToLocalHistory(
       prefs: prefs,
       saleId: saleId,
@@ -341,61 +320,33 @@ try {
       paymentMethod: paymentMethod,
       syncStatus: 'synced',
     );
-
     await RetailGrowthKit.recordBillCompleted();
     SyncService.triggerDashboardRefresh();
     unawaited(SyncService.downloadUserDataSafe());
-
-    try {
-      await InventoryManagementService.deductStockLocally(items, saleId: saleId);
-    } catch (e) {
-      if (kDebugMode) debugPrint('Local stock deduction failed, but proceeding: $e');
-    }
-
-    AgentDebugLog.log(
-      location: 'sale_service.dart:submitSale:final_result',
-      message: 'FINAL RESULT',
-      hypothesisId: 'H5',
-      data: {
-        'saleUploadedToBackend': true,
-        'backendSuccess': true,
-        'success': true,
-        'saleId': saleId,
-      },
-    );
-
-    return {
-      'success': true,
-      'syncCount': items.length,
-      'saleId': saleId,
-      'status': 'COMMITTED_LOCALLY',
-    };
   } else {
-    final prefs = await SharedPreferences.getInstance();
-    await _persistToLocalHistory(
-      prefs: prefs,
-      saleId: saleId,
-      customerName: customerName,
-      customerPhone: customerPhone,
-      items: lineItems,
-      grandTotal: grandTotal,
-      paidAmount: paidAmount,
-      withTax: withTax,
-      totals: totals,
-      paymentMethod: paymentMethod,
-      syncStatus: 'pending',
-    );
-
     await RetailGrowthKit.recordBillCompleted();
-    SyncService.triggerDashboardRefresh();
+  }
 
-    return {
+  AgentDebugLog.log(
+    location: 'sale_service.dart:submitSale:final_result',
+    message: 'FINAL RESULT',
+    hypothesisId: 'H5',
+    data: {
+      'saleUploadedToBackend': backendSuccess,
+      'backendSuccess': backendSuccess,
       'success': true,
       'saleId': saleId,
-      'status': 'QUEUED_OFFLINE',
-      'message': 'Sale saved locally and queued for retry when connectivity returns.',
-    };
-  }
+      'syncStatus': backendSuccess ? 'synced' : 'pending',
+    },
+  );
+
+  return {
+    'success': true,
+    'syncCount': items.length,
+    'saleId': saleId,
+    'syncStatus': backendSuccess ? 'synced' : 'pending',
+  };
+
 } catch (e, st) {
   if (kDebugMode) debugPrint('❌ TRANSACTION CRITICAL FAILURE [$context]: $e');
   if (kDebugMode) debugPrint(st.toString());

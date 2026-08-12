@@ -95,8 +95,8 @@ class _WorkerAttendanceDetailPageState
     if (r['working_hours'] != null) {
       return (r['working_hours'] as num).toDouble();
     }
-    final cin = DateTime.tryParse(r['check_in_time'] ?? '');
-    final cout = DateTime.tryParse(r['check_out_time'] ?? '');
+    final cin = _parseServerTime(r['check_in_time']);
+    final cout = _parseServerTime(r['check_out_time']);
     if (cin != null && cout != null) {
       return cout.difference(cin).inMinutes / 60.0;
     }
@@ -148,7 +148,7 @@ class _WorkerAttendanceDetailPageState
 
     double score = 0;
     for (final r in recs) {
-      final st = (r['status'] ?? '').toString();
+      final st = (r['status'] ?? '').toString().trim().toUpperCase();
       if (st == 'PRESENT') {
         score += 1;
       } else if (st == 'HALF_DAY') {
@@ -181,7 +181,7 @@ class _WorkerAttendanceDetailPageState
   List<DateTime> _presentDatesSorted() {
     final dates = _records
         .where((r) {
-          final st = (r['status'] ?? '').toString();
+          final st = (r['status'] ?? '').toString().trim().toUpperCase();
           return st == 'PRESENT' || st == 'HALF_DAY';
         })
         .map((r) => DateTime.tryParse((r['attendance_date'] ?? '').toString().split('T').first))
@@ -453,7 +453,7 @@ class _WorkerAttendanceDetailPageState
       Color color = Colors.grey.shade200;
       Color textColor = Colors.grey.shade500;
       if (rec != null) {
-        final st = (rec['status'] ?? '').toString();
+        final st = (rec['status'] ?? '').toString().trim().toUpperCase();
         if (st == 'PRESENT') {
           color = _present;
           textColor = Colors.white;

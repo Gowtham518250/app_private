@@ -92,6 +92,7 @@ import 'secure_token_storage.dart';
 import 'retail_intelligence_page.dart';
 import 'whatsapp_order_page.dart';
 import 'sync_service.dart';
+import 'sync_queue_manager.dart';
 import 'background_sync_worker.dart';
 import 'automatic_backup_service.dart';
 import 'enhanced_sync_queue.dart';
@@ -840,31 +841,64 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
   }
 
   Future<void> _handleAppResumed() async {
-    if (_lastBackgroundTime == null) return;
-    
-    // Create cancel token for this sync operation
     _syncCancelToken = CancelToken();
-    
     try {
-      final backgroundDuration = DateTime.now().difference(_lastBackgroundTime!);
-      if (kDebugMode) debugPrint('▶️ App resumed after ${backgroundDuration.inMinutes} minutes');
-      
+      final backgroundDuration = _lastBackgroundTime == null
+          ? Duration.zero
+          : DateTime.now().difference(_lastBackgroundTime!);
+
+      if (kDebugMode) {
+        debugPrint('▶️ App resumed after ${backgroundDuration.inSeconds}s');
+      }
+
+      // ALWAYS flush the durable queue on resume, even after a short background
+      // period. This is required for true offline-first behavior.
+      await _migrateLegacyOfflineQueue();
+      await SyncService.processQueueSafe();
+
+      // Expensive full refresh is only needed after a long background period.
       if (backgroundDuration.inMinutes > 5) {
-        if (kDebugMode) debugPrint('🔄 Long background period detected - forcing full sync');
-        
-        try {
-          await _forceFullSync(_syncCancelToken);
-        } catch (e) {
-          if (e is OperationCancelledException) {
-            if (kDebugMode) debugPrint('⚠️ Sync cancelled due to lifecycle change');
-          } else {
-            if (kDebugMode) debugPrint('⚠️ Force sync failed: $e');
-          }
-        }
+        await _forceFullSync(_syncCancelToken);
+      }
+    } catch (e) {
+      if (e is OperationCancelledException) {
+        if (kDebugMode) debugPrint('⚠️ Resume sync cancelled');
+      } else if (kDebugMode) {
+        debugPrint('⚠️ Resume sync failed: $e');
       }
     } finally {
       _lastBackgroundTime = null;
       _syncCancelToken = null;
+    }
+  }
+
+  Future<void> _migrateLegacyOfflineQueue() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString('offline_sync_queue');
+      if (raw == null || raw.isEmpty) return;
+      final decoded = json.decode(raw);
+      if (decoded is! List || decoded.isEmpty) return;
+
+      for (final rawItem in decoded) {
+        if (rawItem is! Map) continue;
+        final item = Map<String, dynamic>.from(rawItem);
+        if (item['synced'] == true) continue;
+        final action = item['action']?.toString();
+        final data = item['data'];
+        if (action == 'save_sale' && data is Map) {
+          await SyncQueueManager.enqueue('save_sale', {
+            'endpoint': ApiClient.invoicesSync,
+            'payload': Map<String, dynamic>.from(data),
+            'invoice_payload': Map<String, dynamic>.from(data),
+            'sale_id': data['sale_id'] ?? data['invoice_number'],
+            'retry_priority': 'high',
+          });
+        }
+      }
+      await prefs.remove('offline_sync_queue');
+    } catch (e) {
+      if (kDebugMode) debugPrint('⚠️ Legacy queue migration failed: $e');
     }
   }
 
@@ -934,99 +968,11 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
   }
 
   Future<void> _processSyncQueue() async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      final queueRaw = prefs.getString('offline_sync_queue') ?? '[]';
-      
-      // Validate JSON before parsing
-      List<dynamic> queue;
-      try {
-        final decoded = json.decode(queueRaw);
-        if (decoded is List) {
-          queue = decoded;
-        } else {
-          if (kDebugMode) debugPrint('❌ Invalid sync queue format, expected List');
-          return;
-        }
-      } catch (e) {
-        if (kDebugMode) debugPrint('❌ JSON parsing error for sync queue: $e');
-        // Reset corrupted queue
-        await prefs.setString('offline_sync_queue', '[]');
-        return;
-      }
-      
-      if (queue.isEmpty) {
-        if (kDebugMode) debugPrint('✅ No pending sync queue items');
-        return;
-      }
-      
-      if (kDebugMode) debugPrint('📋 Processing ${queue.length} queued items');
-      
-      final token = await SecureTokenStorage.getToken();
-      final List<int> syncedIndices = [];
-      final Map<int, int> retryCount = {}; // Track retry count per item
-      
-      for (int i = 0; i < queue.length; i++) {
-        final item = queue[i];
-        if (item['synced'] == true) continue;
-        
-        final currentRetries = retryCount[i] ?? 0;
-        if (currentRetries >= 3) {
-          if (kDebugMode) debugPrint('❌ Item $i exceeded max retries, skipping');
-          continue;
-        }
-        
-        try {
-          bool syncSuccess = false;
-          
-          if (item['action'] == 'save_customer') {
-            final response = await ApiClient.postJson(
-              ApiClient.customersPrefix,
-              item['data'],
-              headers: {'Authorization': 'Bearer $token'},
-            ).timeout(const Duration(seconds: 10));
-            
-            if (response.statusCode == 200 || response.statusCode == 201) {
-              syncSuccess = true;
-              if (kDebugMode) debugPrint('✅ Synced queued: Customer');
-            }
-          } else if (item['action'] == 'save_sale') {
-            final response = await ApiClient.postJson(
-              '/api/invoices/sync',
-              item['data'],
-              headers: {'Authorization': 'Bearer $token'},
-            ).timeout(const Duration(seconds: 10));
-            
-            if (response.statusCode == 200 || response.statusCode == 201) {
-              syncSuccess = true;
-              if (kDebugMode) debugPrint('✅ Synced queued: Sale');
-            }
-          }
-          
-          if (syncSuccess) {
-            syncedIndices.add(i);
-          } else {
-            retryCount[i] = currentRetries + 1;
-            if (kDebugMode) debugPrint('⚠️ Sync failed for item $i, retry ${retryCount[i]}/3');
-          }
-        } catch (e) {
-          retryCount[i] = currentRetries + 1;
-          if (kDebugMode) debugPrint('⚠️ Failed to sync queued item $i: $e (retry ${retryCount[i]}/3)');
-        }
-      }
-      
-      // Only remove successfully synced items
-      for (final idx in syncedIndices.reversed) {
-        queue.removeAt(idx);
-      }
-      
-      await prefs.setString('offline_sync_queue', json.encode(queue));
-      if (syncedIndices.isNotEmpty) {
-        if (kDebugMode) debugPrint('🔄 Synced ${syncedIndices.length} queued actions');
-      }
-    } catch (e) {
-      if (kDebugMode) debugPrint('❌ Sync queue processing error: $e');
-    }
+    // Legacy SharedPreferences queue is no longer processed directly.
+    // Migrate any remaining sale entries into SyncQueueManager, then use the
+    // single durable queue processor.
+    await _migrateLegacyOfflineQueue();
+    await SyncService.processQueueSafe();
   }
 
   Future<void> _syncSalesData() async {
@@ -2100,98 +2046,109 @@ class _LanguageSelector extends StatelessWidget {
     final currentName = currentLang['nativeName'] ?? 'English';
     
     return Container(
-      decoration: BoxDecoration(
-        gradient: LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: [
-            Color(0xFF6366F1).withValues(alpha: 0.32),
-            Color(0xFF8B5CF6).withValues(alpha: 0.18),
+  decoration: BoxDecoration(
+    gradient: LinearGradient(
+      begin: Alignment.topLeft,
+      end: Alignment.bottomRight,
+      colors: [
+        Color(0xFF6366F1).withValues(alpha: 0.32),
+        Color(0xFF8B5CF6).withValues(alpha: 0.18),
+      ],
+    ),
+    borderRadius: BorderRadius.circular(16),
+    border: Border.all(
+      color: const Color(0xFF6366F1),
+      width: 2.2,
+    ),
+    boxShadow: [
+      BoxShadow(
+        color: Color(0xFF6366F1).withValues(alpha: 0.6),
+        blurRadius: 24,
+        spreadRadius: 3,
+      ),
+      BoxShadow(
+        color: Color(0xFF8B5CF6).withValues(alpha: 0.35),
+        blurRadius: 42,
+        spreadRadius: 6,
+      ),
+    ],
+  ),
+  child: PopupMenuButton<String>(
+    onSelected: (String code) {
+      languageProvider.setLanguage(code);
+    },
+    itemBuilder: (BuildContext context) =>
+        LanguageProvider.languages.map((lang) {
+      return PopupMenuItem<String>(
+        value: lang['code']!,
+        child: Row(
+          children: [
+            const Icon(
+              Icons.language,
+              size: 18,
+              color: Colors.blueAccent,
+            ),
+            const SizedBox(width: 12),
+            Text(
+              lang['nativeName']!,
+              style: const TextStyle(
+                fontWeight: FontWeight.w600,
+              ),
+            ),
           ],
         ),
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(
-          color: const Color(0xFF6366F1),
-          width: 2.2,
-        ),
-        boxShadow: [
-          BoxShadow(
-            color: Color(0xFF6366F1).withValues(alpha: 0.6),
-            blurRadius: 24,
-            spreadRadius: 3,
-          ),
-          BoxShadow(
-            color: Color(0xFF8B5CF6).withValues(alpha: 0.35),
-            blurRadius: 42,
-            spreadRadius: 6,
-          ),
-        ],
+      );
+    }).toList(),
+    child: Padding(
+      padding: const EdgeInsets.symmetric(
+        horizontal: 14,
+        vertical: 11,
       ),
-      child: PopupMenuButton<String>(
-        onSelected: (String code) {
-          languageProvider.setLanguage(code);
-        },
-        itemBuilder: (BuildContext context) => LanguageProvider.languages.map((lang) {
-          return PopupMenuItem<String>(
-            value: lang['code']!,
-            child: Row(
-              children: [
-                const Icon(Icons.language, size: 18, color: Colors.blueAccent),
-                const SizedBox(width: 12),
-                Text(
-                  lang['nativeName']!,
-                  style: const TextStyle(fontWeight: FontWeight.w600),
-                ),
-              ],
-            ),
-          );
-        }).toList(),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
-          child: Row(
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(
+            Icons.language_rounded,
+            color: Colors.white,
+            size: 22.5,
+          ),
+          const SizedBox(width: 8),
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
             mainAxisSize: MainAxisSize.min,
             children: [
-              const Icon(
-                Icons.language_rounded,
-                color: Colors.white,
-                size: 22.5,
+              Text(
+                AppLocalizations.of(context).language,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 12.5,
+                  fontWeight: FontWeight.w800,
+                  letterSpacing: 0.4,
+                ),
               ),
-              const SizedBox(width: 8),
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(
-                    AppLocalizations.of(context).language,
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 12.5,
-                      fontWeight: FontWeight.w800,
-                      letterSpacing: 0.4,
-                    ),
-                  ),
-                  const SizedBox(height: 1),
-                  Text(
-                    currentName,
-                    style: TextStyle(
-                      color: Colors.white.withValues(alpha: 0.8),
-                      fontSize: 10.5,
-                      fontWeight: FontWeight.w600,
-                      letterSpacing: 0.2,
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(width: 6),
-              Icon(
-                Icons.arrow_drop_down,
-                color: Colors.white.withValues(alpha: 0.85),
-                size: 22,
+              const SizedBox(height: 1),
+              Text(
+                currentName,
+                style: TextStyle(
+                  color: Colors.white.withValues(alpha: 0.8),
+                  fontSize: 10.5,
+                  fontWeight: FontWeight.w600,
+                  letterSpacing: 0.2,
+                ),
               ),
             ],
           ),
-        ),
+          const SizedBox(width: 6),
+          Icon(
+            Icons.arrow_drop_down,
+            color: Colors.white.withValues(alpha: 0.85),
+            size: 22,
+          ),
+        ],
       ),
-    );
-  }
-}
+    ),
+  ),
+);
+} // closes build()
+
+} // closes _LanguageSelector

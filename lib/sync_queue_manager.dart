@@ -127,38 +127,37 @@ class SyncQueueManager {
     return base64Url.decode(stored);
   }
 
+  // IMPORTANT: callers already hold _queueLock. This method must NEVER acquire
+  // _queueLock itself, otherwise enqueue/get/remove can deadlock recursively.
   static Future<Box> _getBox() async {
-    return await _queueLock.synchronized(() async {
-      final prefs = await SharedPreferences.getInstance();
-      final userId = prefs.getInt('user_id') ?? prefs.getInt('userId');
-      final String scopedName = (userId == null || userId == 0)
-          ? '${_queueBoxName}_unauthenticated'
-          : '${_queueBoxName}_$userId';
+    final prefs = await SharedPreferences.getInstance();
+    final userId = prefs.getInt('user_id') ?? prefs.getInt('userId');
+    final String scopedName = (userId == null || userId == 0)
+        ? '${_queueBoxName}_unauthenticated'
+        : '${_queueBoxName}_$userId';
 
-      if (_box != null && _box!.isOpen && _box!.name == scopedName) return _box!;
+    if (_box != null && _box!.isOpen && _box!.name == scopedName) return _box!;
 
-      final key = await _getHiveKey();
-      _box = await Hive.openBox(scopedName, encryptionCipher: HiveAesCipher(key));
+    final key = await _getHiveKey();
+    _box = await Hive.openBox(scopedName, encryptionCipher: HiveAesCipher(key));
 
-      // Auto-recover any sales saved while app was stuck in unauthenticated state
-      if (userId != null && userId > 0) {
-        try {
-          final unauthName = '${_queueBoxName}_unauthenticated';
-          final unauthBox = await Hive.openBox(unauthName, encryptionCipher: HiveAesCipher(key));
-          if (unauthBox.isNotEmpty) {
-            if (kDebugMode) debugPrint('📦 [SyncQueue] Recovering ${unauthBox.length} items from unauthenticated queue');
-            for (final k in unauthBox.keys) {
-              await _box!.put(k, unauthBox.get(k));
-            }
-            await unauthBox.clear();
+    if (userId != null && userId > 0) {
+      try {
+        final unauthName = '${_queueBoxName}_unauthenticated';
+        final unauthBox = await Hive.openBox(unauthName, encryptionCipher: HiveAesCipher(key));
+        if (unauthBox.isNotEmpty) {
+          if (kDebugMode) debugPrint('📦 [SyncQueue] Recovering ${unauthBox.length} items from unauthenticated queue');
+          for (final k in unauthBox.keys) {
+            await _box!.put(k, unauthBox.get(k));
           }
-        } catch (e) {
-          if (kDebugMode) debugPrint('⚠️ [SyncQueue] Error recovering unauth queue: $e');
+          await unauthBox.clear();
         }
+      } catch (e) {
+        if (kDebugMode) debugPrint('⚠️ [SyncQueue] Error recovering unauth queue: $e');
       }
+    }
 
-      return _box!;
-    });
+    return _box!;
   }
 
   /// Add item to sync queue with data validation
@@ -174,10 +173,10 @@ class SyncQueueManager {
         final box = await _getBox();
 
         // Prevent unbounded queue growth (OOM protection)
-        if (box.length >= 500) {
-          if (kDebugMode) debugPrint('📦 [SyncQueue] Queue limit reached (500). Dropping oldest item.');
+        if (box.length >= 5000) {
+          if (kDebugMode) debugPrint('📦 [SyncQueue] Queue limit reached (5000). Rejecting new item to prevent silent data loss.');
           if (box.isNotEmpty) {
-            await box.delete(box.keys.first);
+            return;
           }
         }
 

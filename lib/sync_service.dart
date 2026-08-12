@@ -417,77 +417,6 @@ class SyncService {
   }
 
 
-  /// Fallback: POST each line to /auth/sales (works when /api/invoices/* returns 500).
-  static Future<bool> syncViaLegacyAuthSales({
-    required String saleId,
-    required List<Map<String, dynamic>> lineItems,
-    String? token,
-    String? businessDate,
-  }) async {
-    if (lineItems.isEmpty) return false;
-    final String authToken = token?.isNotEmpty == true
-        ? token!
-        : (await SecureTokenStorage.getToken() ?? '');
-    if (authToken.isEmpty) {
-      AgentDebugLog.log(
-        location: 'sync_service.dart:syncViaLegacyAuthSales',
-        message: 'LEGACY SYNC ABORTED — no token',
-        hypothesisId: 'H8',
-        data: {'saleId': saleId},
-      );
-      return false;
-    }
-    final String? saleDate = businessDate;
-    int synced = 0;
-    final List<Map<String, dynamic>> lineErrors = [];
-    for (int i = 0; i < lineItems.length; i++) {
-      final item = lineItems[i];
-      final name = (item['product_name'] ?? item['product'] ?? 'Item').toString();
-      final priceVal = (item['unit_price'] ?? item['price'] ?? 0);
-      final price = (priceVal is num ? priceVal.toDouble() : double.tryParse(priceVal.toString()) ?? 0.0);
-      final qtyVal = (item['quantity'] ?? item['qty'] ?? 1);
-      final qty = (qtyVal is num ? qtyVal.toDouble() : double.tryParse(qtyVal.toString()) ?? 1.0);
-      final lineTotalVal = item['line_total'] ?? item['total'] ?? (price * qty);
-      final lineTotal = (lineTotalVal is num ? lineTotalVal.toDouble() : double.tryParse(lineTotalVal.toString()) ?? price * qty);
-      final body = <String, dynamic>{
-        'product_name': name,
-        'product': name,
-        'price': price.toString(),
-        'quantity': qty.toStringAsFixed(3), // Fix Bug #8: preserve fractional quantities
-        'total': lineTotal.toString(),
-        'sale_id': saleId,
-        if (saleDate != null && saleDate.isNotEmpty) 'date': saleDate,
-      };
-      try {
-        // Fix Bug #13: Use JSON post and decode response body to Map
-        final resp = await ApiClient.postJson(
-          ApiClient.salesEndpoint,
-          body,
-          headers: {'Authorization': 'Bearer $authToken'},
-        );
-        final Map<String, dynamic> res = resp.body.isNotEmpty
-            ? (jsonDecode(resp.body) as Map<String, dynamic>)
-            : <String, dynamic>{};
-
-        if (res['status'] == 'success' || res['success'] == true || res['id'] != null) {
-          synced++;
-        } else {
-          lineErrors.add({'index': i, 'error': res['message'] ?? 'Unknown error'});
-        }
-      } catch (e) {
-        lineErrors.add({'index': i, 'error': e.toString()});
-      }
-    }
-    final ok = synced == lineItems.length;
-    AgentDebugLog.log(
-      location: 'sync_service.dart:syncViaLegacyAuthSales',
-      message: 'LEGACY /auth/sales sync',
-      hypothesisId: 'H7',
-      data: {'saleId': saleId, 'synced': synced, 'total': lineItems.length, 'success': ok, 'errors': lineErrors},
-    );
-    return ok;
-  }
-
   /// High-reliability sale sync (Queued by default for offline-first)
   static Future<void> syncSale(Map<String, dynamic> sale) async {
     try {
@@ -729,92 +658,42 @@ class SyncService {
 
   /// Sync one or many line items for a single bill (idempotent).
   static Future<bool> _syncSaleBatchItem(Map<String, dynamic> data) async {
-    // NEW LOGIC: Use the endpoint and payload structure if it exists
-    if (data.containsKey('endpoint') && data.containsKey('payload')) {
-      try {
-        final token = await SecureTokenStorage.getToken() ?? '';
-        final payload = Map<String, dynamic>.from(data['payload'] as Map);
-        final saleId = data['sale_id']?.toString() ?? payload['invoice_number']?.toString() ?? '';
-        final rawLines = payload['line_items'];
-        if (saleId.isNotEmpty && rawLines is List && rawLines.isNotEmpty) {
-          final lineItems = rawLines.map((e) => Map<String, dynamic>.from(e as Map)).toList();
-          if (await syncViaLegacyAuthSales(
-            saleId: saleId,
-            lineItems: lineItems,
-            token: token,
-            businessDate: payload['business_date'] ?? payload['invoice_date'] ?? payload['sale_date'] ?? payload['date'],
-          )) {
-            return true;
-          }
-        }
+    // ONE sale sync path: /api/invoices/sync. It is the authoritative atomic
+    // transaction for invoice + lines + backend inventory deduction.
+    Map<String, dynamic>? payload;
+    String endpoint = ApiClient.invoicesSync;
 
-        final res = await ApiClient.postJson(
-          data['endpoint'],
-          data['payload'],
-          headers: {
-            if (token.isNotEmpty) 'Authorization': 'Bearer $token',
-          }
-        ).timeout(const Duration(seconds: 15));
-        
-        return res.statusCode == 200 || res.statusCode == 201;
-      } catch (e) {
-        if (kDebugMode) debugPrint('⚠️ Offline Sale/Invoice Sync failed: $e');
-        return false;
-      }
-    }
-    // LEGACY: Use the full invoice payload if it exists
-    if (data.containsKey('invoice_payload')) {
-      try {
-        final token = await SecureTokenStorage.getToken() ?? '';
-        final res = await ApiClient.postJson(
-          ApiClient.invoicesSync,
-          data['invoice_payload'],
-          headers: {
-            if (token.isNotEmpty) 'Authorization': 'Bearer $token',
-          }
-        ).timeout(const Duration(seconds: 15));
-        
-        return res.statusCode == 200 || res.statusCode == 201;
-      } catch (e) {
-        if (kDebugMode) debugPrint('⚠️ Offline Sale Sync failed: $e');
-        return false;
-      }
+    if (data['payload'] is Map) {
+      payload = Map<String, dynamic>.from(data['payload'] as Map);
+      endpoint = data['endpoint']?.toString() ?? ApiClient.invoicesSync;
+    } else if (data['invoice_payload'] is Map) {
+      payload = Map<String, dynamic>.from(data['invoice_payload'] as Map);
     }
 
-    // LEGACY FALLBACK: If old queue items still exist without invoice_payload
-    final saleId = data['sale_id']?.toString() ?? '';
-    final rawItems = data['items'];
-    if (rawItems is List && rawItems.isNotEmpty) {
-      int synced = 0;
-      for (int i = 0; i < rawItems.length; i++) {
-        final item = Map<String, dynamic>.from(rawItems[i] as Map);
-        final price = double.tryParse(item['price']?.toString() ?? '0') ?? 0;
-        final qty = double.tryParse(item['qty']?.toString() ?? item['quantity']?.toString() ?? '1') ?? 0;
-        if (price <= 0 || qty <= 0) continue;
-        final saleDate = data['business_date'] ??
-          data['sale_date'] ??
-          data['invoice_date'] ??
-          data['date'];
-
-        final body = {
-          'product': item['product_name'] ?? item['product'] ?? 'Item',
-          'price': item['price']?.toString() ?? '0',
-          'quantity': item['qty']?.toString() ?? item['quantity']?.toString() ?? '1',
-          'total': (price * qty).toString(),
-          'sale_id': saleId,
-          if (saleDate != null && saleDate.toString().isNotEmpty)
-            'date': saleDate,
-          'idempotency_key': data['idempotency_key'] ?? '${saleId}_item_$i',
-        };
-        if (await _syncSaleItem(body)) synced++;
-      }
-      return synced == rawItems.length;
+    if (payload == null || payload.isEmpty) {
+      if (kDebugMode) debugPrint('⚠️ Invalid queued sale payload; parking it instead of using legacy /auth/sales.');
+      return false;
     }
-    return await _syncSaleItem(data);
+
+    try {
+      final token = await SecureTokenStorage.getToken() ?? '';
+      final res = await ApiClient.postJson(
+        endpoint,
+        payload,
+        headers: {
+          if (token.isNotEmpty) 'Authorization': 'Bearer $token',
+        },
+      ).timeout(const Duration(seconds: 15));
+
+      // 201 = created; 200 = already exists/idempotent duplicate.
+      return res.statusCode == 200 || res.statusCode == 201;
+    } catch (e) {
+      if (kDebugMode) debugPrint('⚠️ Offline Sale/Invoice Sync failed: $e');
+      return false;
+    }
   }
 
-  /// Sync a single sale line
-  static Future<bool> _syncSaleItem(Map<String, dynamic> data) async {
+static Future<bool> _syncSaleItem(Map<String, dynamic> data) async {
     try {
       final prefs = await SharedPreferences.getInstance();
       final userId = prefs?.getInt('user_id') ?? prefs?.getInt('userId');
@@ -835,8 +714,8 @@ class SyncService {
     }
   }
 
-  /// Update a single payment
-  static Future<bool> _updatePaymentItem(Map<String, dynamic> data) async {
+
+static Future<bool> _updatePaymentItem(Map<String, dynamic> data) async {
     try {
       final token = await SecureTokenStorage.getToken() ?? '';
       if (token.isEmpty) return false;
@@ -852,8 +731,8 @@ class SyncService {
     }
   }
 
-  /// Update invoice status
-  static Future<bool> _updateInvoiceItem(Map<String, dynamic> data, String action) async {
+
+static Future<bool> _updateInvoiceItem(Map<String, dynamic> data, String action) async {
     try {
       final token = await SecureTokenStorage.getToken() ?? '';
       if (token.isEmpty) return false;
@@ -884,8 +763,8 @@ class SyncService {
     }
   }
 
-  /// Send daily email
-  static Future<bool> _sendEmailItem(Map<String, dynamic> data) async {
+
+static Future<bool> _sendEmailItem(Map<String, dynamic> data) async {
     try {
       final token = await SecureTokenStorage.getToken() ?? '';
       if (token.isEmpty) return false;
@@ -907,8 +786,8 @@ class SyncService {
     }
   }
 
-  /// Decrease stock on backend
-  static Future<bool> _decreaseStockItem(Map<String, dynamic> data) async {
+
+static Future<bool> _decreaseStockItem(Map<String, dynamic> data) async {
     try {
       final token = await SecureTokenStorage.getToken() ?? '';
       if (token.isEmpty) return false;
@@ -932,8 +811,8 @@ class SyncService {
     }
   }
 
-  /// Update un-synced local product
-  static Future<bool> _updateLocalProductItem(Map<String, dynamic> data) async {
+
+static Future<bool> _updateLocalProductItem(Map<String, dynamic> data) async {
     try {
       final token = await SecureTokenStorage.getToken() ?? '';
       if (token.isEmpty) return false;
@@ -955,10 +834,8 @@ class SyncService {
     }
   }
 
-  /// Push a product that was created while offline (or during a transient
-  /// backend failure) to the backend. Mirrors _updateLocalProductItem's
-  /// {user_id, payload} shape.
-  static Future<bool> _createLocalProductItem(Map<String, dynamic> data) async {
+
+static Future<bool> _createLocalProductItem(Map<String, dynamic> data) async {
     try {
       final token = await SecureTokenStorage.getToken() ?? '';
       if (token.isEmpty) return false;
@@ -991,8 +868,8 @@ class SyncService {
     }
   }
 
-  /// Create a purchase order on the backend (queued for offline safety)
-  static Future<bool> _createPurchaseOrderItem(Map<String, dynamic> data) async {
+
+static Future<bool> _createPurchaseOrderItem(Map<String, dynamic> data) async {
     try {
       final token = await SecureTokenStorage.getToken() ?? '';
       if (token.isEmpty) return false;
@@ -1010,8 +887,8 @@ class SyncService {
     }
   }
 
-  /// Update a purchase order's status (mark-delivered / cancel) on the backend
-  static Future<bool> _updatePurchaseOrderStatusItem(Map<String, dynamic> data) async {
+
+static Future<bool> _updatePurchaseOrderStatusItem(Map<String, dynamic> data) async {
     try {
       final token = await SecureTokenStorage.getToken() ?? '';
       if (token.isEmpty) return false;
@@ -1032,15 +909,8 @@ class SyncService {
     }
   }
 
-  /// 🔧 FIX (data loss): khata_page.dart's "Record Payment" flow previously
-  /// had NO offline handling at all — on any network failure it just
-  /// showed an error toast and the payment was gone, with no retry and
-  /// nothing saved locally. For a money-recording feature in an
-  /// offline-first app, that's a direct path to a shop owner believing
-  /// they recorded a customer's payment when the backend never received
-  /// it. This mirrors the same durable-retry pattern already used for
-  /// sales and purchase orders.
-  static Future<bool> _recordKhataPaymentItem(Map<String, dynamic> data) async {
+
+static Future<bool> _recordKhataPaymentItem(Map<String, dynamic> data) async {
     try {
       final token = await SecureTokenStorage.getToken() ?? '';
       if (token.isEmpty) return false;
@@ -1058,8 +928,8 @@ class SyncService {
     }
   }
 
-  /// Fix Bug #5: Save offline customer to backend
-  static Future<bool> _saveCustomerItem(Map<String, dynamic> data) async {
+
+static Future<bool> _saveCustomerItem(Map<String, dynamic> data) async {
     try {
       final token = await SecureTokenStorage.getToken() ?? '';
       if (token.isEmpty) return false;
@@ -1084,9 +954,8 @@ class SyncService {
     }
   }
 
-  /// Fetch authoritative server time to prevent device time manipulation fraud
-  /// This ensures date-based records can't be corrupted by changing device clock
-  static Future<DateTime> getAuthoritativeTime() async {
+
+static Future<DateTime> getAuthoritativeTime() async {
     try {
       // Try to get server time from backend
       // Format: GET /api/time -> {"timestamp": "2026-04-09T15:30:00Z"}
@@ -1120,12 +989,10 @@ class SyncService {
     return DateTime.now();
   }
 
-  /// Use authoritative time for date boundaries to prevent fraud
-  /// Call this when calculating daily totals, reconciliation dates, etc.
+
   static Future<DateTime> getDateBoundaryTime() => getAuthoritativeTime();
 
-  /// Validate that device time hasn't drifted >5 minutes from server
-  static Future<bool> isDeviceTimeValid() async {
+static Future<bool> isDeviceTimeValid() async {
     try {
       final serverTime = await getAuthoritativeTime();
       final deviceTime = DateTime.now();
@@ -1141,122 +1008,261 @@ class SyncService {
     }
   }
 
-  // ── NEW: Enterprise Grade Invoice Syncer ──
-  static Future<bool> _syncInvoiceBatchItem(Map<String, dynamic> data) async {
-    try {
-      final token = await SecureTokenStorage.getToken() ?? '';
-      final res = await ApiClient.postJson(
-        ApiClient.invoicesSync, 
-        data, 
-        headers: {
-          if (token.isNotEmpty) 'Authorization': 'Bearer $token',
-        }
-      ).timeout(const Duration(seconds: 15));
-      
-      return res.statusCode == 200 || res.statusCode == 201;
-    } catch (e) {
-      if (kDebugMode) debugPrint('⚠️ Offline Invoice Batch Sync failed: $e');
-      return false;
-    }
-  }
 
   /// Verify synchronization state: backend + pending = local
-  static Future<Map<String, dynamic>> verifySyncState() async {
-    try {
-      // 1. Get local sales count
-      final localSales = await LocalStorageService.loadSales();
-      final localCount = localSales.length;
-      
-      // 2. Get pending sync count
-      final pendingQueue = await SyncQueueManager.getAll();
-      final pendingCount = pendingQueue.length;
-      
-      // 3. Try to get backend count (if online)
-      int backendCount = 0;
-      final token = await SecureTokenStorage.getToken() ?? '';
-      bool online = false;
-      try {
-        final connection = await Connectivity().checkConnectivity();
-        online = connection != ConnectivityResult.none;
-      } catch (_) {}
-      
-      if (online && token.isNotEmpty) {
-        try {
-          // Try to fetch backend sales count
-          final salesResponse = await ApiClient.getJson(ApiClient.salesEndpoint, headers: {
-            'Authorization': 'Bearer $token',
-          });
-          if (salesResponse.statusCode == 200) {
-            final salesData = jsonDecode(salesResponse.body);
-            if (salesData is List) {
-              backendCount = salesData.length;
-            } else if (salesData is Map) {
-              backendCount = (salesData['count'] as num?)?.toInt() ?? 0;
-            }
-          }
-          
-          // Also fetch invoices count
-          final invoicesResponse = await ApiClient.getJson(ApiClient.invoicesList, headers: {
-            'Authorization': 'Bearer $token',
-          });
-          if (invoicesResponse.statusCode == 200) {
-            final invoicesData = jsonDecode(invoicesResponse.body);
-            List<dynamic> invoiceList = [];
-            if (invoicesData is List) {
-              invoiceList = invoicesData;
-            } else if (invoicesData is Map) {
-              if (invoicesData.containsKey('invoices') && invoicesData['invoices'] is List) {
-                invoiceList = invoicesData['invoices'] as List<dynamic>;
-              } else if (invoicesData.containsKey('results') && invoicesData['results'] is List) {
-                invoiceList = invoicesData['results'] as List<dynamic>;
-              }
-            }
-            backendCount += invoiceList.length;
-          }
-        } catch (e) {
-          if (kDebugMode) debugPrint('⚠️ Could not get backend count for verification: $e');
-        }
-      }
-      
-      // 4. Verification logic
-      bool verified = true;
-      String verificationMessage = '';
-      
-      if (online && backendCount > 0) {
-        // We have backend data - verify
-        final expectedTotal = backendCount + pendingCount;
-        if (localCount >= expectedTotal - 10 && localCount <= expectedTotal + 10) { // Allow small buffer
-          verificationMessage = '✅ Sync verified: backend ($backendCount) + pending ($pendingCount) ≈ local ($localCount)';
-        } else {
-          verified = false;
-          verificationMessage = '❌ Sync mismatch: backend ($backendCount) + pending ($pendingCount) != local ($localCount)';
-        }
-      } else {
-        // Offline or no backend data - can't fully verify
-        verificationMessage = 'ℹ️ Offline mode: local ($localCount) sales stored, $pendingCount pending';
-      }
-      
-      if (kDebugMode) debugPrint(verificationMessage);
-      
-      return {
-        'verified': verified,
-        'message': verificationMessage,
-        'local_count': localCount,
-        'pending_count': pendingCount,
-        'backend_count': backendCount,
-        'online': online,
-      };
-    } catch (e) {
-      if (kDebugMode) debugPrint('❌ Sync verification failed: $e');
-      return {
-        'verified': false,
-        'message': 'Verification failed: $e',
-        'local_count': 0,
-        'pending_count': 0,
-        'backend_count': 0,
-        'online': false,
-      };
-    }
-  }
+  /// Sync one or many line items for a single bill (idempotent).
+static Future<bool> _syncInvoiceBatchItem(
+  Map<String, dynamic> data,
+) async {
+  try {
+    final token = await SecureTokenStorage.getToken() ?? '';
 
+    final response = await ApiClient.postJson(
+      ApiClient.invoicesSync,
+      data,
+      headers: {
+        if (token.isNotEmpty)
+          'Authorization': 'Bearer $token',
+      },
+    ).timeout(
+      const Duration(seconds: 15),
+    );
+
+    return response.statusCode == 200 ||
+        response.statusCode == 201;
+  } catch (e) {
+    if (kDebugMode) {
+      debugPrint(
+        '⚠️ Offline Invoice Batch Sync failed: $e',
+      );
+    }
+    return false;
+  }
+}
+
+/// Verify synchronization state.
+///
+/// Diagnostic only. This method must NOT decide whether
+/// a sale is saved, synced, or retried.
+static Future<Map<String, dynamic>> verifySyncState() async {
+  try {
+    // -------------------------------------------------------
+    // 1. Local sales
+    // -------------------------------------------------------
+    final localSales =
+        await LocalStorageService.loadSales();
+
+    final localCount = localSales.length;
+
+    // -------------------------------------------------------
+    // 2. Pending durable queue
+    // -------------------------------------------------------
+    final pendingQueue =
+        await SyncQueueManager.getAll();
+
+    final pendingCount = pendingQueue.length;
+
+    // -------------------------------------------------------
+    // 3. Connectivity
+    // -------------------------------------------------------
+    bool online = false;
+
+    try {
+      final connection =
+          await Connectivity().checkConnectivity();
+
+      online = connection != ConnectivityResult.none;
+    } catch (_) {
+      online = false;
+    }
+
+    // -------------------------------------------------------
+    // 4. Backend counts
+    // -------------------------------------------------------
+    int backendSalesCount = 0;
+    int backendInvoiceCount = 0;
+
+    final token =
+        await SecureTokenStorage.getToken() ?? '';
+
+    if (online && token.isNotEmpty) {
+      // -----------------------------
+      // Backend sales
+      // -----------------------------
+      try {
+        final salesResponse = await ApiClient.getJson(
+          ApiClient.salesEndpoint,
+          headers: {
+            'Authorization': 'Bearer $token',
+          },
+        );
+
+        if (salesResponse.statusCode == 200) {
+          final decoded =
+              jsonDecode(salesResponse.body);
+
+          if (decoded is List) {
+            backendSalesCount = decoded.length;
+          } else if (decoded is Map) {
+            final count = decoded['count'];
+
+            if (count is num) {
+              backendSalesCount = count.toInt();
+            } else if (decoded['sales'] is List) {
+              backendSalesCount =
+                  (decoded['sales'] as List).length;
+            } else if (decoded['results'] is List) {
+              backendSalesCount =
+                  (decoded['results'] as List).length;
+            }
+          }
+        }
+      } catch (e) {
+        if (kDebugMode) {
+          debugPrint(
+            '⚠️ Could not fetch backend sales count: $e',
+          );
+        }
+      }
+
+      // -----------------------------
+      // Backend invoices
+      // -----------------------------
+      try {
+        final invoiceResponse = await ApiClient.getJson(
+          ApiClient.invoicesList,
+          headers: {
+            'Authorization': 'Bearer $token',
+          },
+        );
+
+        if (invoiceResponse.statusCode == 200) {
+          final decoded =
+              jsonDecode(invoiceResponse.body);
+
+          if (decoded is List) {
+            backendInvoiceCount = decoded.length;
+          } else if (decoded is Map) {
+            if (decoded['invoices'] is List) {
+              backendInvoiceCount =
+                  (decoded['invoices'] as List).length;
+            } else if (decoded['results'] is List) {
+              backendInvoiceCount =
+                  (decoded['results'] as List).length;
+            } else if (decoded['count'] is num) {
+              backendInvoiceCount =
+                  (decoded['count'] as num).toInt();
+            }
+          }
+        }
+      } catch (e) {
+        if (kDebugMode) {
+          debugPrint(
+            '⚠️ Could not fetch backend invoice count: $e',
+          );
+        }
+      }
+    }
+
+    // -------------------------------------------------------
+    // IMPORTANT:
+    // Do NOT simply add backend sales + invoices.
+    //
+    // A sale may already exist as an invoice, which would
+    // double-count the same business transaction.
+    //
+    // Therefore this verification is intentionally
+    // conservative.
+    // -------------------------------------------------------
+
+    final backendCount =
+        backendInvoiceCount > 0
+            ? backendInvoiceCount
+            : backendSalesCount;
+
+    bool verified = true;
+    String verificationMessage;
+
+    if (!online) {
+      verificationMessage =
+          'ℹ️ Offline: local=$localCount, '
+          'pending=$pendingCount';
+
+      verified = true;
+    } else if (token.isEmpty) {
+      verificationMessage =
+          'ℹ️ Online but authentication token unavailable: '
+          'local=$localCount, pending=$pendingCount';
+
+      verified = true;
+    } else if (backendCount == 0) {
+      verificationMessage =
+          'ℹ️ Backend returned no countable records: '
+          'local=$localCount, pending=$pendingCount';
+
+      verified = true;
+    } else {
+      // Approximate consistency check only.
+      //
+      // Pending items are expected to already exist locally,
+      // so we compare local against backend + a reasonable
+      // pending range rather than requiring exact equality.
+      final lowerBound =
+          backendCount;
+
+      final upperBound =
+          backendCount + pendingCount + 10;
+
+      if (localCount >= lowerBound &&
+          localCount <= upperBound) {
+        verificationMessage =
+            '✅ Sync approximately verified: '
+            'backend=$backendCount, '
+            'pending=$pendingCount, '
+            'local=$localCount';
+      } else {
+        verified = false;
+
+        verificationMessage =
+            '❌ Possible sync mismatch: '
+            'backend=$backendCount, '
+            'pending=$pendingCount, '
+            'local=$localCount';
+      }
+    }
+
+    if (kDebugMode) {
+      debugPrint(verificationMessage);
+    }
+
+    return {
+      'verified': verified,
+      'message': verificationMessage,
+      'local_count': localCount,
+      'pending_count': pendingCount,
+      'backend_count': backendCount,
+      'backend_sales_count': backendSalesCount,
+      'backend_invoice_count': backendInvoiceCount,
+      'online': online,
+    };
+  } catch (e, stackTrace) {
+    if (kDebugMode) {
+      debugPrint(
+        '❌ Sync verification failed: $e',
+      );
+      debugPrint(stackTrace.toString());
+    }
+
+    return {
+      'verified': false,
+      'message': 'Verification failed: $e',
+      'local_count': 0,
+      'pending_count': 0,
+      'backend_count': 0,
+      'backend_sales_count': 0,
+      'backend_invoice_count': 0,
+      'online': false,
+    };
+  }
+}
 }

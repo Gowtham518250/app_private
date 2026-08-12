@@ -151,21 +151,28 @@ class _AttendancePageState extends State<AttendancePage>
       }
       
       // Fetch attendance for all workers
-      for (var worker in _staff) {
+      // 🔧 PARTIAL FIX (#15): this was previously N sequential awaited
+      // calls (50 workers = 50 round-trips run one after another). Running
+      // them in parallel doesn't reduce the request count, but cuts real
+      // wall-clock wait time from ~N*latency to ~1*latency. The correct
+      // long-term fix is still a backend bulk attendance endpoint.
+      final workerResults = await Future.wait(_staff.map((worker) async {
         try {
           final workerUrl = '${ApiClient.attendancePrefix}/employee/${worker.id}';
           final workerRes = await ApiClient.getJson(workerUrl);
           if (workerRes.statusCode == 200) {
             final workerData = json.decode(workerRes.body);
             if (workerData is Map && workerData['records'] is List) {
-              final workerRecords = List<dynamic>.from(workerData['records'] as List);
-              // Keep all worker attendance records so payroll can compute monthly totals
-              allRecords.addAll(workerRecords);
+              return List<dynamic>.from(workerData['records'] as List);
             }
           }
         } catch (e) {
           if (kDebugMode) debugPrint('Error fetching attendance for worker ${worker.id}: $e');
         }
+        return <dynamic>[];
+      }));
+      for (final records in workerResults) {
+        allRecords.addAll(records);
       }
       
       if (mounted) {
@@ -749,7 +756,7 @@ class _AttendancePageState extends State<AttendancePage>
       itemCount: _records.length,
       itemBuilder: (_, i) {
         final r = _records[i];
-        final st = r['status'] as String? ?? 'N/A';
+        final st = (r['status'] as String? ?? 'N/A').trim().toUpperCase();
         final color = st == 'PRESENT' ? _present
             : (st == 'HALF_DAY' ? Colors.orange : _absent);
         return Container(
@@ -773,7 +780,7 @@ class _AttendancePageState extends State<AttendancePage>
               Text(r['attendance_date'] ?? '', style: GoogleFonts.poppins(
                   fontWeight: FontWeight.w600, fontSize: 13)),
               if (r['check_in_time'] != null)
-                Text('In: ${DateFormat.jm().format(DateTime.tryParse(r['check_in_time']) ?? DateTime.now())}',
+                Text('In: ${DateFormat.jm().format(_parseServerTime(r['check_in_time']) ?? DateTime.now())}',
                     style: GoogleFonts.poppins(
                         fontSize: 11, color: Colors.grey.shade500)),
             ])),
