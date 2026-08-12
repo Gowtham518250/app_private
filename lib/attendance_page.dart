@@ -198,7 +198,7 @@ class _AttendancePageState extends State<AttendancePage>
       final recDate = (r['attendance_date'] ?? '').toString().split('T').first.trim();
       final empId = r['employee_id'];
       // Handle both int and string employee_id from backend JSON
-      final empIdMatch = empId != null && _userId != null && empId.toString().trim() == _userId.toString().trim();
+      final empIdMatch = empId == _userId || empId.toString() == _userId.toString();
       return empIdMatch && recDate == today;
     }).firstOrNull;
 
@@ -255,7 +255,7 @@ class _AttendancePageState extends State<AttendancePage>
       // Use worker_id if available, otherwise fall back to employee_id for backward compatibility
       final recordWorkerId = r['worker_id'] ?? r['employee_id'];
       if (recordWorkerId == null) continue;
-      if (recordWorkerId.toString().trim() != workerId.toString().trim()) continue;
+      if (recordWorkerId.toString() != workerId.toString()) continue;
       
       final attDateStr = (r['attendance_date'] ?? '').toString().split('T').first.trim();
       final attDate = DateTime.tryParse(attDateStr);
@@ -523,7 +523,7 @@ class _AttendancePageState extends State<AttendancePage>
       if (recordWorkerId == null) return false;
       
       final recDate = (r['attendance_date'] ?? '').toString().split('T').first.trim();
-      return recordWorkerId.toString().trim() == worker.id.toString().trim() && recDate == today;
+      return recordWorkerId.toString() == worker.id.toString() && recDate == today;
     }).firstOrNull;
     
     bool isIn = workerRecord != null && 

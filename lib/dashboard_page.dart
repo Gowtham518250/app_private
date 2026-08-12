@@ -1369,8 +1369,37 @@ class _DashboardPageState extends State<DashboardPage>
         if (!existingIds.contains(id)) {
           final firstItem = items.first;
           // Get line items (handle both line_items and items keys)
-          final rawLineItems = firstItem['line_items'] ?? firstItem['items'] ?? items;
-          final processedItems = (rawLineItems as List).map((s) {
+          // 🔧 FIX: previously this fell back to `items` (the raw grouped
+          // invoice-level records for this id) when neither firstItem
+          // ['line_items'] nor firstItem['items'] existed — e.g. for borrow
+          // invoices, which store a flat 'product' string, not a nested
+          // line-items array. That fallback then ran the invoice records
+          // themselves through the line-item mapper below, which has no
+          // 'product_name'/'price' keys to read, so every default fired:
+          // product_name -> 'Product', price -> 0, and this phantom record
+          // got permanently saved as a duplicate "sale". Only treat a real
+          // line-items array as line items; otherwise synthesize a single
+          // line item from the invoice's own total/product fields.
+          final rawLineItemsField = firstItem['line_items'] ?? firstItem['items'];
+          final List rawLineItems;
+          if (rawLineItemsField is List && rawLineItemsField.isNotEmpty) {
+            rawLineItems = rawLineItemsField;
+          } else {
+            final fallbackTotal = firstItem['total_amount'] ??
+                firstItem['total'] ??
+                firstItem['grand_total'] ??
+                firstItem['invoice_total'] ??
+                0;
+            rawLineItems = [
+              {
+                'product_name': (firstItem['product'] ?? firstItem['product_name'] ?? 'Invoice').toString(),
+                'price': fallbackTotal,
+                'quantity': 1,
+                'total': fallbackTotal,
+              }
+            ];
+          }
+          final processedItems = rawLineItems.map((s) {
             return {
               'product_name': s['product_name'] ?? s['product'] ?? s['name'] ?? 'Product',
               'product': s['product_name'] ?? s['product'] ?? s['name'] ?? 'Product',

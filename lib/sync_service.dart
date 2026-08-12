@@ -644,6 +644,10 @@ class SyncService {
               success = await _updateLocalProductItem(data);
               break;
 
+            case 'create_local_product':
+              success = await _createLocalProductItem(data);
+              break;
+
             case 'create_purchase_order':
               success = await _createPurchaseOrderItem(data);
               break;
@@ -947,6 +951,42 @@ class SyncService {
       return res.statusCode == 200 || res.statusCode == 201;
     } catch (e) {
       if (kDebugMode) debugPrint('❌ Error syncing local product update: $e');
+      return false;
+    }
+  }
+
+  /// Push a product that was created while offline (or during a transient
+  /// backend failure) to the backend. Mirrors _updateLocalProductItem's
+  /// {user_id, payload} shape.
+  static Future<bool> _createLocalProductItem(Map<String, dynamic> data) async {
+    try {
+      final token = await SecureTokenStorage.getToken() ?? '';
+      if (token.isEmpty) return false;
+
+      final userId = data['user_id'];
+      final payload = data['payload'];
+      if (payload is! Map) return false;
+
+      final res = await ApiClient.postJson(
+        '${ApiClient.inventoryPrefix}/products?user_id=$userId',
+        Map<String, dynamic>.from(payload),
+        headers: {'Authorization': 'Bearer $token'},
+      ).timeout(const Duration(seconds: 15));
+
+      if (res.statusCode == 200 || res.statusCode == 201) {
+        // Mirror into the backend-products cache so it shows as synced
+        // without waiting for the next full inventory fetch.
+        try {
+          final saved = jsonDecode(res.body);
+          final cached = await LocalStorageService.loadBackendProducts();
+          cached.add(saved);
+          await LocalStorageService.saveBackendProducts(cached);
+        } catch (_) {}
+        return true;
+      }
+      return false;
+    } catch (e) {
+      if (kDebugMode) debugPrint('❌ Error syncing local product create: $e');
       return false;
     }
   }

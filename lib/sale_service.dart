@@ -171,6 +171,15 @@ try {
     orElse: () => {},
   );
   if (invalidItem.isNotEmpty) {
+    // 🔧 FIX: saleId was added to _pendingSales above, before this
+    // validation ran. Returning here without removing it left the id in
+    // the set forever — a leak on every rejected sale, and since
+    // _pendingSales gating is checked by saleId at the top of this
+    // function, it also meant a corrected retry with a *different* new
+    // saleId would work, but anything that ever reused this exact id
+    // would incorrectly report itself as already-processing forever.
+    _pendingSales.remove(saleId);
+    InventoryManagementService.suppressInventoryCallback = false;
     return {
       'success': false,
       'error': 'INVALID_SALE_ITEM',

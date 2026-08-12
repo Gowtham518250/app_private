@@ -213,7 +213,20 @@ class _InventoryPageState extends State<InventoryPage> {
       _products[idx] = updated;
       setState(() {}); // Update UI first
       _saveLocal(p['id'].toString(), updated); // Then save async (outside setState)
-      SyncQueueManager.enqueue('update_local_product', updated);
+      // 🔧 FIX: _updateLocalProductItem (sync_service.dart) reads
+      // data['id'] / data['user_id'] / data['payload'] — passing `updated`
+      // directly here meant every field it read was null, so the PUT it
+      // issued on retry was always '/products/null?user_id=null' with a
+      // null body and permanently failed. Wrap it in the shape the
+      // processor actually expects, matching the working call site in
+      // inventory_management_service.dart.
+      if (_userId != null) {
+        SyncQueueManager.enqueue('update_local_product', {
+          'id': p['id'],
+          'user_id': _userId,
+          'payload': updated,
+        });
+      }
     }
   }
 
@@ -299,6 +312,19 @@ class _InventoryPageState extends State<InventoryPage> {
       local[sku] = productData;
       
       await LocalStorageService.saveLocalProducts(local);
+
+      // 🔧 FIX: saveLocalProducts() alone was a dead end — nothing reads
+      // from it for the main inventory list, and nothing ever retried
+      // pushing it to the backend, so a product created while offline (or
+      // during any transient backend failure/timeout) was silently never
+      // synced. Queue it the same way product updates already are.
+      if (_userId != null) {
+        SyncQueueManager.enqueue('create_local_product', {
+          'user_id': _userId,
+          'payload': productData,
+        });
+      }
+
       if (!mounted) return; // FIX R1 — mounted guard before context use
       Navigator.pop(context);
       _nameC.clear(); _barcodeC.clear(); _priceC.clear(); _mrpC.clear();
@@ -1063,7 +1089,15 @@ class _InventoryPageState extends State<InventoryPage> {
                     }
                   } catch (e) {
                     debugPrint('Backend sync error - will sync later: $e');
-                    SyncQueueManager.enqueue('update_local_product', updated);
+                    // 🔧 FIX: same shape mismatch as _updateStock above —
+                    // _updateLocalProductItem needs {id, user_id, payload}.
+                    if (_userId != null) {
+                      SyncQueueManager.enqueue('update_local_product', {
+                        'id': p['id'],
+                        'user_id': _userId,
+                        'payload': updated,
+                      });
+                    }
                   }
 
                   if (mounted) Navigator.pop(context);

@@ -107,7 +107,43 @@ class _KhataPageState extends State<KhataPage> with SingleTickerProviderStateMix
     setState(() => _invoicesLoading = true);
 
     try {
-      final raw = await LocalStorageService.loadLocalInvoices();
+      final rawInvoices = await LocalStorageService.loadLocalInvoices();
+
+      // 🔧 FIX: loadLocalInvoices() only ever contains borrow/credit sales —
+      // submitAllSales() only writes a local invoice mirror inside its
+      // `if (isBorrow)` branch. Regular cash/online sales never produce a
+      // record here, so a shop doing mostly cash sales always saw invoiced
+      // totals of 0 even though they had plenty of real sales/bills. Pull
+      // in regular sales too, shaped like an invoice, and dedupe against
+      // real invoices by id so a borrow sale's existing invoice mirror
+      // isn't double-counted against its own underlying sale record.
+      final rawSales = await LocalStorageService.loadSales();
+      final Set<String> invoiceIds = rawInvoices
+          .map((e) => (e is Map
+                  ? (e['invoice_number'] ?? e['sale_id'] ?? e['id'])
+                  : null)
+              ?.toString())
+          .whereType<String>()
+          .toSet();
+      final salesAsInvoices = rawSales.where((s) {
+        if (s is! Map) return false;
+        final id = (s['sale_id'] ?? s['invoice_number'] ?? s['_bill_id'])?.toString();
+        return id != null && !invoiceIds.contains(id);
+      }).map((s) {
+        final sale = Map<String, dynamic>.from(s as Map);
+        final total = sale['total'] ?? sale['total_amount'] ?? sale['grand_total'];
+        final status = (sale['payment_status']?.toString().toUpperCase()) ??
+            ((sale['paid_amount'] ?? total) == total ? 'PAID' : 'PARTIAL');
+        return {
+          ...sale,
+          'invoice_number': sale['sale_id'] ?? sale['invoice_number'],
+          'total_amount': total,
+          'paid_amount': sale['paid_amount'] ?? total, // cash sales are paid in full unless flagged otherwise
+          'payment_status': status,
+        };
+      });
+
+      final raw = [...rawInvoices, ...salesAsInvoices];
       double parseAmount(dynamic value) {
         if (value is num) return value.toDouble();
         return double.tryParse(value?.toString() ?? '') ?? 0.0;

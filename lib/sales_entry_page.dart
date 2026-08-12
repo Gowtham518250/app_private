@@ -173,19 +173,12 @@ class _SalesEntryPageState extends State<SalesEntryPage>
   }
 
   void _onVoiceOrderParsed(List<Map<String, dynamic>> items) {
-    final skippedItems = <String>[];
     setState(() {
       for (var item in items) {
         final String name = item['name'] ?? item['product_name'] ?? '';
         final double qty = ((item['qty'] ?? item['quantity']) as num?)?.toDouble() ?? 1.0;
         final double price = (item['price'] as num?)?.toDouble() ?? 0.0;
-        final trimmedName = name.trim();
-
-        if (trimmedName.isEmpty || price <= 0) {
-          if (trimmedName.isNotEmpty) skippedItems.add(trimmedName);
-          continue;
-        }
-
+        
         // Null safety check: ensure entries list and controllers exist
         if (entries.isEmpty) {
           addEntry();
@@ -228,18 +221,6 @@ class _SalesEntryPageState extends State<SalesEntryPage>
       _isVoiceAssistantOpen = false;
       calculateTotal();
     });
-
-    if (skippedItems.isNotEmpty && mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            '⚠️ ${skippedItems.length} voice item(s) were skipped because price could not be detected: ${skippedItems.join(', ')}',
-          ),
-          backgroundColor: const Color(0xFFEF4444),
-          behavior: SnackBarBehavior.floating,
-        ),
-      );
-    }
   }
 
   Future<void> _shareOnWhatsApp() async {
@@ -869,11 +850,13 @@ class _SalesEntryPageState extends State<SalesEntryPage>
       caseSensitive: false,
     );
     if (borrowCommands.hasMatch(command)) {
-      // Avoid auto-creating a borrow invoice from a voice keyword match.
-      // Require the user to explicitly tap the Borrow button or confirm on screen.
+      // Show borrow dialog
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        borrowSale();
+      });
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('🎯 Borrow keyword detected. Please confirm by tapping Borrow.'),
+          content: Text('🎯 Borrow mode activated!'),
           backgroundColor: const Color(0xFF4338CA),
           behavior: SnackBarBehavior.floating,
         ),
@@ -1011,19 +994,7 @@ class _SalesEntryPageState extends State<SalesEntryPage>
     final finalPrice = (price > 0) ? price : double.tryParse(bestMatch?['price']?.toString() ?? '0') ?? 0.0;
     final finalGst = double.tryParse(bestMatch?['gst_percent']?.toString() ?? '18') ?? 18.0;
 
-    if (bestMatch != null && bestScore > 0.75) {
-      if (finalPrice <= 0) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text('⚠️ Unable to auto-add "${bestMatch['product_name'] ?? itemName}" because price could not be detected.'),
-              backgroundColor: const Color(0xFFEF4444),
-              behavior: SnackBarBehavior.floating,
-            ),
-          );
-        }
-        return;
-      }
+    if (bestMatch != null && bestScore > 0.75) { 
       // HIGH CONFIDENCE: Add immediately
       _addVoiceItem(
         bestMatch['product_name']?.toString() ?? itemName,
@@ -1033,18 +1004,6 @@ class _SalesEntryPageState extends State<SalesEntryPage>
         providedBarcode: bestMatch['barcode']?.toString() ?? bestMatch['id']?.toString() ?? ''
       );
     } else if (bestMatch != null && bestScore > 0.35) {
-      if (finalPrice <= 0) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text('⚠️ ${bestMatch['product_name'] ?? itemName} was not added because the detected price is missing.'),
-              backgroundColor: const Color(0xFFEF4444),
-              behavior: SnackBarBehavior.floating,
-            ),
-          );
-        }
-        return;
-      }
       // MEDIUM CONFIDENCE: Ask user
       if (!mounted) return;
       showDialog(
@@ -1085,23 +1044,13 @@ class _SalesEntryPageState extends State<SalesEntryPage>
             TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('NO, TRY AGAIN')),
             ElevatedButton(
               onPressed: () {
-                if (finalPrice > 0) {
-                  _addVoiceItem(
-                    bestMatch?['product_name'] ?? itemName,
-                    qty,
-                    providedPrice: finalPrice,
-                    providedGst: finalGst,
-                    providedBarcode: bestMatch?['barcode']?.toString() ?? bestMatch?['id']?.toString() ?? ''
-                  );
-                } else if (mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(
-                      content: Text('⚠️ Price could not be detected for "${bestMatch?['product_name'] ?? itemName}".'),
-                      backgroundColor: const Color(0xFFEF4444),
-                      behavior: SnackBarBehavior.floating,
-                    ),
-                  );
-                }
+                _addVoiceItem(
+                  bestMatch?['product_name'] ?? itemName,
+                  qty,
+                  providedPrice: finalPrice,
+                  providedGst: finalGst,
+                  providedBarcode: bestMatch?['barcode']?.toString() ?? bestMatch?['id']?.toString() ?? ''
+                );
                 Navigator.pop(ctx);
               },
               style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF6366F1), foregroundColor: Colors.white),
@@ -1112,42 +1061,12 @@ class _SalesEntryPageState extends State<SalesEntryPage>
       );
     } else {
       // LOW CONFIDENCE: Manual add
-      if (finalPrice <= 0) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text('⚠️ "$itemName" was not added because the price could not be detected.'),
-              backgroundColor: const Color(0xFFEF4444),
-              behavior: SnackBarBehavior.floating,
-            ),
-          );
-        }
-        return;
-      }
-      _addVoiceItem(itemName, qty, providedPrice: finalPrice);
+       _addVoiceItem(itemName, qty, providedPrice: finalPrice);
     }
   }
 
-  void _addVoiceItem(String name, double qty, {double? providedPrice, double? providedGst, String? providedBarcode, bool allowWithoutPrice = false}) {
+  void _addVoiceItem(String name, double qty, {double? providedPrice, double? providedGst, String? providedBarcode}) {
     if (!mounted) return;
-    final trimmedName = name.trim();
-    final bool hasPrice = providedPrice != null && providedPrice > 0;
-
-    if (trimmedName.isEmpty || (!hasPrice && !allowWithoutPrice)) {
-      if (trimmedName.isNotEmpty && mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              '⚠️ Voice item "$trimmedName" was not added because the price could not be detected.',
-            ),
-            backgroundColor: const Color(0xFFEF4444),
-            behavior: SnackBarBehavior.floating,
-          ),
-        );
-      }
-      return;
-    }
-
     setState(() {
       _isVoiceProcessing = true;
 
@@ -2814,15 +2733,11 @@ class _SalesEntryPageState extends State<SalesEntryPage>
           : DateFormat('yyyy-MM-dd').format(DateTime.now().add(const Duration(days: 7)));
         
         // Create invoice object
-        final customerName = customerNameController.text.trim();
-        final customerPhone = customerPhoneController.text.trim();
         final newInvoice = {
           'invoice_number': invoiceNumber,
           'product': productList,
-          'customer_name': customerName.isNotEmpty
-              ? customerName
-              : (customerPhone.isNotEmpty ? 'Customer' : 'Guest Customer'),
-          'customer_phone': customerPhone,
+          'customer_name': customerNameController.text.trim(),
+          'customer_phone': customerPhoneController.text.trim(),
           'total_amount': grandTotal,
           'paid_amount': 0.0,
           'due_date': dueDate,

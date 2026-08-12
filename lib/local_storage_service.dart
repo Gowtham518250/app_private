@@ -916,11 +916,9 @@ class LocalStorageService {
       if (phone.isEmpty || phone == 'Unknown') continue;
 
       if (!unified.containsKey(phone)) {
-        final rawSaleName = sale['customer_name'] ?? sale['name'] ?? sale['customer'] ?? '';
-        final saleName = rawSaleName.toString().trim().isNotEmpty ? rawSaleName.toString().trim() : 'Unknown Customer';
         unified[phone] = {
           'phone': phone,
-          'name': saleName,
+          'name': sale['customer_name'] ?? 'Unknown Customer',
           'address': '',
           'gstin': '',
           'unified_balance': 0.0,
@@ -957,17 +955,13 @@ class LocalStorageService {
     // Assuming khata_balance only reflects manual payments/credit sales.
     // If an invoice is UNPAID or PARTIAL, add only the outstanding amount.
     for (var inv in invoices) {
-      final phone = inv['customer_phone']?.toString().trim() ?? '';
-      final rawInvName = inv['customer_name'] ?? inv['name'] ?? inv['customer'] ?? '';
-      final invName = rawInvName.toString().trim();
-      if (phone.isEmpty && invName.isEmpty) continue;
+      final phone = inv['customer_phone']?.toString() ?? '';
+      if (phone.isEmpty) continue;
       
-      final normalizedName = invName.isNotEmpty ? invName : 'Unknown Customer';
-      final unifiedKey = phone.isNotEmpty ? phone : '__guest';
-      if (!unified.containsKey(unifiedKey)) {
-        unified[unifiedKey] = {
+      if (!unified.containsKey(phone)) {
+        unified[phone] = {
           'phone': phone,
-          'name': normalizedName,
+          'name': inv['customer_name'] ?? 'Unknown Customer',
           'address': '',
           'gstin': '',
           'unified_balance': 0.0,
@@ -982,7 +976,7 @@ class LocalStorageService {
       final outstanding = (total - paid).clamp(0.0, double.infinity);
 
       if (status != 'PAID' && outstanding > 0.0) {
-        unified[unifiedKey]!['unified_balance'] = (unified[unifiedKey]!['unified_balance'] as double) + outstanding;
+        unified[phone]!['unified_balance'] = (unified[phone]!['unified_balance'] as double) + outstanding;
       }
     }
 

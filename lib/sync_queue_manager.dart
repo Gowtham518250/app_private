@@ -22,7 +22,6 @@ class SyncQueueManager {
   static DateTime? _syncStartTime;
   static const Duration _syncTimeout = Duration(minutes: 5); // 5 minute sync timeout
   static Timer? _syncTimeoutTimer;
-  static const int _maxQueueRetries = 8;
 
   /// Set sync lock with timeout protection
   static Future<bool> _setSyncLock() async {
@@ -232,7 +231,6 @@ class SyncQueueManager {
           'data': data,
           'timestamp': DateTime.now().millisecondsSinceEpoch,
           'retries': 0,
-          'status': 'PENDING',
         };
 
         await box.put(actionId, item);
