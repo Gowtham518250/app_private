@@ -3402,7 +3402,11 @@ class _SalesEntryPageState extends State<SalesEntryPage>
                           icon: Icons.assignment_late_rounded,
                           color: const Color(0xFF8B5CF6),
                           isEnabled: !isLoading,
-                          isLoading: false,
+                          // 🔧 FIX: was hardcoded to false, so the Borrow
+                          // button never showed a spinner while
+                          // submitAllSales(isBorrow: true) was in flight —
+                          // it looked unresponsive during the network call.
+                          isLoading: isLoading,
                           onTap: isLoading ? null : borrowSale,
                         ),
                       ],

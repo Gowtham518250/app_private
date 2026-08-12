@@ -4,6 +4,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'visual_widgets.dart';
 import 'session_logout_service.dart';
 import 'sync_queue_manager.dart';
+import 'simple_loader.dart';
 
 /// Modern SaaS bottom navigation bar
 /// 5 tabs: Home, Analytics, Add Sale (center), Store, AI
@@ -156,7 +157,19 @@ class _AppBottomNavState extends State<AppBottomNav> {
             style: ElevatedButton.styleFrom(backgroundColor: AppColors.danger, foregroundColor: Colors.white),
             onPressed: () async {
               Navigator.pop(ctx);
-              await SessionLogoutService.performOwnerLogout();
+              // 🔧 FIX: previously awaited performOwnerLogout() with no
+              // loader and no error handling — if any internal cleanup step
+              // threw, the exception stopped execution right there and the
+              // Navigator call below never ran, so the button appeared to
+              // do nothing. Now shows a simple loader and guarantees
+              // navigation to /login regardless of what fails inside.
+              try {
+                await SimpleLoader.run(context, 'Logging out...', () {
+                  return SessionLogoutService.performOwnerLogout();
+                });
+              } catch (e) {
+                // Best-effort: still navigate away even if logout errored.
+              }
               if (context.mounted) {
                 Navigator.pushNamedAndRemoveUntil(context, '/login', (route) => false);
               }
@@ -275,5 +288,3 @@ class _CenterActionButton extends StatelessWidget {
     );
   }
 }
-
-

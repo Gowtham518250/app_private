@@ -18,6 +18,7 @@ import 'inventory_stock_helper.dart';
 import 'sync_queue_manager.dart';
 import 'secure_token_storage.dart';
 import 'ai_negotiation_service.dart';
+import 'simple_loader.dart';
 import 'package:share_plus/share_plus.dart';
 import 'visual_widgets.dart';
 
@@ -352,7 +353,10 @@ class _InventoryPageState extends State<InventoryPage> {
     }
   }
 
+  bool _isAddingProduct = false;
+
   void _showAddDialog() {
+    _isAddingProduct = false; // reset in case a previous sheet left it stuck
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -516,10 +520,46 @@ class _InventoryPageState extends State<InventoryPage> {
                     shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(12)),
                   ),
-                  onPressed: _addProduct,
-                  child: Text('Add Product',
-                      style: GoogleFonts.poppins(
-                          fontSize: 16, fontWeight: FontWeight.w600)),
+                  // 🔧 FIX: this button previously had no loading state at
+                  // all — tapping it while the backend POST (up to a 10s
+                  // timeout) was in flight gave no feedback and allowed a
+                  // double-tap to fire two create requests. Now disables
+                  // itself and shows a simple spinner for the duration of
+                  // _addProduct(), using the bottom sheet's own
+                  // StatefulBuilder so it doesn't interfere with the
+                  // Navigator.pop() calls _addProduct() already does.
+                  onPressed: _isAddingProduct
+                      ? null
+                      : () async {
+                          ss(() => _isAddingProduct = true);
+                          try {
+                            await _addProduct();
+                          } finally {
+                            // _addProduct() closes this sheet itself on
+                            // success/offline-fallback, but returns early
+                            // (without closing it) on validation failure —
+                            // in that case we still need to re-enable the
+                            // button. Guard with try/catch since calling ss()
+                            // after the sheet has already been popped would
+                            // throw ("setState called after dispose").
+                            _isAddingProduct = false;
+                            try {
+                              ss(() {});
+                            } catch (_) {}
+                          }
+                        },
+                  child: _isAddingProduct
+                      ? const SizedBox(
+                          width: 20,
+                          height: 20,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2.2,
+                            color: Colors.white,
+                          ),
+                        )
+                      : Text('Add Product',
+                          style: GoogleFonts.poppins(
+                              fontSize: 16, fontWeight: FontWeight.w600)),
                 ),
               ),
               const SizedBox(height: 12),
@@ -966,7 +1006,12 @@ class _InventoryPageState extends State<InventoryPage> {
                 shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10))),
             onPressed: () async {
               Navigator.pop(context);
-              await _deleteProduct(p);
+              // 🔧 FIX: give the user feedback while the delete request
+              // (backend call + local cache update) is in flight instead of
+              // no visual response at all.
+              await SimpleLoader.run(context, 'Deleting product...', () {
+                return _deleteProduct(p);
+              });
             },
             child: Text('Delete', style: GoogleFonts.poppins(fontWeight: FontWeight.w600)),
           ),
@@ -1019,6 +1064,8 @@ class _InventoryPageState extends State<InventoryPage> {
     final minC = TextEditingController(text: p['min_stock']?.toString() ?? '10');
     final catC = TextEditingController(text: p['category']?.toString() ?? '');
 
+    bool isSaving = false;
+
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -1053,7 +1100,11 @@ class _InventoryPageState extends State<InventoryPage> {
                   padding: const EdgeInsets.symmetric(vertical: 16),
                   shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                 ),
-                onPressed: () async {
+                onPressed: isSaving
+                    ? null
+                    : () async {
+                  ss(() => isSaving = true);
+                  try {
                   final updated = Map<String, dynamic>.from(p);
                   updated['product_name'] = nameC.text.trim();
                   updated['unit_price'] = double.tryParse(priceC.text) ?? updated['unit_price'];
@@ -1109,8 +1160,20 @@ class _InventoryPageState extends State<InventoryPage> {
                         content: const Text('\u2705 Product updated!'),
                         backgroundColor: _success));
                   }
+                  } finally {
+                    // Only matters if we returned before the Navigator.pop
+                    // above (there isn't currently an early-return path here,
+                    // but this keeps the button safe if one is added later).
+                    isSaving = false;
+                    try { ss(() {}); } catch (_) {}
+                  }
                 },
-                child: Text('Save Changes', style: GoogleFonts.poppins(fontSize: 16, fontWeight: FontWeight.w600)),
+                child: isSaving
+                    ? const SizedBox(
+                        width: 20, height: 20,
+                        child: CircularProgressIndicator(strokeWidth: 2.2, color: Colors.white),
+                      )
+                    : Text('Save Changes', style: GoogleFonts.poppins(fontSize: 16, fontWeight: FontWeight.w600)),
               ),
             ),
             const SizedBox(height: 12),

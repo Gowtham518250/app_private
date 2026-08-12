@@ -12587,12 +12587,24 @@ class _DashboardPageState extends State<DashboardPage>
     // shared device that left the door open for the next logged-in account
     // to read leftover state from this one. Route through the single
     // canonical logout path instead (see session_logout_service.dart).
+    //
+    // 🔧 FIX: performOwnerLogout() was awaited with no try/catch. If any
+    // internal cleanup step threw, the exception propagated straight out of
+    // this handler — the loading dialog above was never popped and the
+    // Navigator call below never ran, leaving the user stuck behind an
+    // infinite "Logging out..." spinner ("logout button not working").
+    // Session logout's internal steps are now individually best-effort too,
+    // but this try/finally is the backstop: navigation to login must always
+    // happen once the user has confirmed logout, regardless of what fails.
     if (kDebugMode) debugPrint('🧹 Logging out via SessionLogoutService...');
-    await SessionLogoutService.performOwnerLogout();
+    try {
+      await SessionLogoutService.performOwnerLogout();
+    } catch (e) {
+      if (kDebugMode) debugPrint('⚠️ Logout encountered an error but continuing: $e');
+    } finally {
+      if (mounted) Navigator.pop(context); // Close loading dialog
+    }
 
-    if (!mounted) return;
-    Navigator.pop(context); // Close loading dialog
-    
     // Navigate to login
     if (!mounted) return;
     Navigator.pushNamedAndRemoveUntil(

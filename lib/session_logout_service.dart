@@ -24,17 +24,32 @@ import 'scoped_shared_preferences.dart';
 class SessionLogoutService {
   static bool _inProgress = false;
 
+  /// Runs a single logout cleanup step without letting a failure there
+  /// abort the rest of the chain. Before this fix, _clearCore() ran ~15
+  /// sequential awaited steps with no error handling on all but the first
+  /// (server logout) — if ANY step threw (e.g. a plugin channel error,
+  /// Google Sign-In not configured, a locked Hive box), the exception
+  /// propagated straight out of performOwnerLogout() to the button's
+  /// onPressed handler, which never reached the Navigator call after it.
+  /// Net effect: tap "Logout", confirmation dialog closes, nothing happens —
+  /// the user is stuck on the same screen (or behind a loading dialog that
+  /// never dismisses). Each step is now isolated so logout always completes
+  /// and the caller can always navigate to the login screen.
+  static Future<void> _step(String label, Future<void> Function() action) async {
+    try {
+      await action();
+    } catch (e) {
+      if (kDebugMode) debugPrint('⚠️ Logout step failed ($label): $e');
+    }
+  }
+
   static Future<void> _clearCore({bool notifyServer = true}) async {
     if (notifyServer) {
-      try {
-        await SessionManagementService.logout();
-      } catch (e) {
-        if (kDebugMode) debugPrint('⚠️ Server logout: $e');
-      }
+      await _step('server logout', () => SessionManagementService.logout());
     }
 
-    await OnlineOrdersListener.instance.stop();
-    
+    await _step('stop online orders listener', () => OnlineOrdersListener.instance.stop());
+
     // 🔒 FIRST: Close all current user's Hive boxes to ensure data isolation.
     // Box names are already scoped per user (e.g. "sales_v2_$userId"), so
     // closing the current user's boxes is sufficient — the next user who
@@ -45,29 +60,29 @@ class SessionLogoutService {
     // yet. On a shared device (e.g. owner + cashier on one tablet), every
     // logout or "enter customer mode" was silently wiping the other
     // account's unsynced business data. Isolation does not require deletion.
-    await LocalStorageService.closeUserBoxes();
+    await _step('close user boxes', () => LocalStorageService.closeUserBoxes());
     // Reset sync queue box reference to ensure new user gets their own queue
-    await SyncQueueManager.resetBoxReference();
-    
+    await _step('reset sync queue box', () => SyncQueueManager.resetBoxReference());
+
     // 🔒 SECURITY: Clear all scoped SharedPreferences data for current user
-    await ScopedSharedPreferences.clearCurrentUserScopedData();
-    await ScopedSharedPreferences.clearLegacyUnscopedKeys();
-    
+    await _step('clear scoped prefs', () => ScopedSharedPreferences.clearCurrentUserScopedData());
+    await _step('clear legacy unscoped keys', () => ScopedSharedPreferences.clearLegacyUnscopedKeys());
+
     // Use UserDataClearService which now preserves all business data in scoped boxes
-    await UserDataClearService.clearAllUserData();
-    await SecureTokenStorage.clearAll();
-    await SecurePreferencesService.clearAllPaymentData();
-    await SessionManagementService.clearTokens();
+    await _step('clear user data', () => UserDataClearService.clearAllUserData());
+    await _step('clear secure token storage', () => SecureTokenStorage.clearAll());
+    await _step('clear payment data', () => SecurePreferencesService.clearAllPaymentData());
+    await _step('clear session tokens', () => SessionManagementService.clearTokens());
     // DO NOT clear sync queue! (it's user-scoped and will be reloaded for new user)
     // await SyncQueueManager.clearQueue();
-    await AccountDataSyncService.clearAllCache();
-    await GoogleAuthService.signOut();
-    await SecurityService.clearMasterPinOnLogout();
-    await PdsStateStore.clearAll();
-    SaleService.clearInFlight();
-    PaymentDetectionSystem.clearOnLogout();
-    CustomerAPIClient.reset();
-    AppStateReset.resetAll();
+    await _step('clear account data cache', () => AccountDataSyncService.clearAllCache());
+    await _step('google sign-out', () => GoogleAuthService.signOut());
+    await _step('clear master pin', () => SecurityService.clearMasterPinOnLogout());
+    await _step('clear pds state', () => PdsStateStore.clearAll());
+    await _step('clear sale in-flight', () async => SaleService.clearInFlight());
+    await _step('clear payment detection', () async => PaymentDetectionSystem.clearOnLogout());
+    await _step('reset customer api client', () async => CustomerAPIClient.reset());
+    await _step('reset app state', () async => AppStateReset.resetAll());
     // DO NOT clear sales boxes! (they're scoped per user)
     // await LocalStorageService.clearOrphanSalesBoxes();
     // await LocalStorageService.purgeLegacyUnscopedHiveBoxes();

@@ -182,8 +182,13 @@ class SalesDedupHelper {
       final line = lines[i];
       final saleId = (line['sale_id'] ?? line['invoice_number'] ?? '').toString();
       final fp = lineContentFingerprint(line);
-      final compositeKey = saleId.isNotEmpty ? '${saleId}_${fp}_$i' : '${fp}_$i';
-      
+      // 🔧 FIX: Do NOT include the loop index `i` in the key — every index is
+      // unique by construction, so a key ending in `_$i` can never repeat and
+      // this function was a no-op (it never removed anything). The key must
+      // be based only on sale identity + content so two genuinely identical
+      // lines (same sale, same fingerprint) collapse to one.
+      final compositeKey = saleId.isNotEmpty ? '${saleId}_$fp' : fp;
+
       if (seen.contains(compositeKey)) continue;
       seen.add(compositeKey);
       out.add(line);
