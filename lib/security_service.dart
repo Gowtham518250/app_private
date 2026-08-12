@@ -55,10 +55,20 @@ class SecurityService {
   /// Check if the device hardware supports biometrics
   static Future<bool> isBiometricHardwareAvailable() async {
     try {
-      final bool canAuthenticateWithBiometrics = await _localAuth.canCheckBiometrics;
-      final bool isDeviceSupported = await _localAuth.isDeviceSupported();
-      return canAuthenticateWithBiometrics && isDeviceSupported;
+      if (kIsWeb) return false;
+
+      final canCheck = await _localAuth.canCheckBiometrics;
+      final supported = await _localAuth.isDeviceSupported();
+
+      // Hardware capability alone is not enough for a useful biometric flow.
+      // If the device has no enrolled biometric, authenticate() will fail and
+      // the caller can fall back to the owner PIN flow.
+      if (!canCheck || !supported) return false;
+
+      final available = await _localAuth.getAvailableBiometrics();
+      return available.isNotEmpty;
     } catch (e) {
+      if (kDebugMode) debugPrint('Biometric capability check failed: $e');
       return false;
     }
   }
@@ -133,19 +143,39 @@ class SecurityService {
   }
 
   /// Perform physical biometric authentication
-  static Future<bool> authenticateBiometrically({String reason = 'Authenticate to access sensitive data'}) async {
+  static Future<bool> authenticateBiometrically({
+    String reason = 'Authenticate to access sensitive data',
+  }) async {
     try {
-      final bool didAuthenticate = await _localAuth.authenticate(
+      if (kIsWeb) return false;
+
+      final supported = await _localAuth.isDeviceSupported();
+      final canCheck = await _localAuth.canCheckBiometrics;
+      if (!supported || !canCheck) {
+        if (kDebugMode) debugPrint('Biometric authentication is not supported.');
+        return false;
+      }
+
+      final available = await _localAuth.getAvailableBiometrics();
+      if (available.isEmpty) {
+        if (kDebugMode) {
+          debugPrint('No enrolled biometric is available on this device.');
+        }
+        return false;
+      }
+
+      return await _localAuth.authenticate(
         localizedReason: reason,
+        biometricOnly: true,
+        persistAcrossBackgrounding: true,
         authMessages: const <AuthMessages>[
           AndroidAuthMessages(
             signInTitle: 'Biometric Authentication',
           ),
         ],
       );
-      return didAuthenticate;
     } catch (e) {
-      if (kDebugMode) debugPrint('Biometric Error: $e');
+      if (kDebugMode) debugPrint('Biometric authentication error: $e');
       return false;
     }
   }
@@ -569,9 +599,8 @@ class SecurityService {
   /// Check for SQL injection patterns via backend
   static Future<Map<String, dynamic>> checkSqlInjection(String input) async {
     try {
-      final response = await ApiClient.postJson(
-        ApiClient.securityCheckSqlInjection,
-        {'input': input},
+      final response = await ApiClient.getJson(
+        '${ApiClient.securityCheckSqlInjection}?query=$input',
       ).timeout(const Duration(seconds: 3));
       
       if (response.statusCode == 200) {

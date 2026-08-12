@@ -887,97 +887,89 @@ class LocalStorageService {
 
   
   // =========== UNIFIED LEDGER ===========
+  // Customer identity is keyed by stable customer_id when present and only
+  // falls back to normalized phone when an ID is unavailable.
   static Future<List<Map<String, dynamic>>> loadUnifiedCustomersLedger() async {
     final sales = await loadSales();
     final invoices = await loadLocalInvoices();
     final customers = await loadLocalCustomers();
     final khataBalances = await loadKhataBalances();
 
-    Map<String, Map<String, dynamic>> unified = {};
+    final Map<String, Map<String, dynamic>> unified = {};
+    String keyFor({dynamic customerId, dynamic phone}) {
+      final id = customerId?.toString().trim() ?? '';
+      if (id.isNotEmpty && id != '0' && id.toLowerCase() != 'null') return 'id:$id';
+      final p = phone?.toString().trim() ?? '';
+      if (p.isNotEmpty) return 'phone:$p';
+      return '';
+    }
 
-    // Initialize from explicitly created customers
-    for (var c in customers) {
-      final phone = c['phone']?.toString() ?? '';
-      if (phone.isEmpty) continue;
-      unified[phone] = {
-        'phone': phone,
-        'name': c['name'] ?? 'Unknown',
-        'address': c['address'] ?? '',
-        'gstin': c['gstin'] ?? '',
+    Map<String, dynamic> ensure({dynamic customerId, dynamic phone, dynamic name}) {
+      final key = keyFor(customerId: customerId, phone: phone);
+      if (key.isEmpty) return {};
+      return unified.putIfAbsent(key, () => {
+        'customer_id': customerId,
+        'phone': phone?.toString() ?? '',
+        'name': (name?.toString().trim().isNotEmpty ?? false) ? name : 'Customer',
         'unified_balance': 0.0,
         'last_transaction': DateTime.now().toIso8601String(),
-        'history': [],
-      };
+        'history': <dynamic>[],
+      });
     }
 
-    // Add sales data
-    for (var sale in sales) {
-      final phone = sale['customer_phone']?.toString() ?? sale['phone']?.toString() ?? '';
-      if (phone.isEmpty || phone == 'Unknown') continue;
+    for (final c in customers) {
+      ensure(customerId: c['id'] ?? c['customer_id'], phone: c['phone'], name: c['name'] ?? c['customer_name']);
+    }
 
-      if (!unified.containsKey(phone)) {
-        unified[phone] = {
-          'phone': phone,
-          'name': sale['customer_name'] ?? 'Unknown Customer',
-          'address': '',
-          'gstin': '',
-          'unified_balance': 0.0,
-          'last_transaction': sale['date'] ?? sale['sale_date'] ?? DateTime.now().toIso8601String(),
-          'history': [],
-        };
-      }
-      
-      unified[phone]!['history'].add(sale);
-      final saleDateStr = sale['date'] ?? sale['sale_date'];
-      if (saleDateStr != null) {
-          unified[phone]!['last_transaction'] = saleDateStr;
+    for (final sale in sales) {
+      final row = Map<String, dynamic>.from(sale as Map);
+      final entry = ensure(
+        customerId: row['customer_id'],
+        phone: row['customer_phone'] ?? row['phone'],
+        name: row['customer_name'] ?? row['name'],
+      );
+      if (entry.isEmpty) continue;
+      final history = entry['history'] as List<dynamic>;
+      history.add(row);
+      entry['last_transaction'] = row['business_date'] ?? row['sale_date'] ?? row['date'] ?? entry['last_transaction'];
+      if ((entry['name'] ?? 'Customer') == 'Customer' && row['customer_name'] != null) {
+        entry['name'] = row['customer_name'];
       }
     }
 
-    // Add explicit khata balances (source of truth for manual adjustments and payments)
-    khataBalances.forEach((phone, balance) {
-      if (!unified.containsKey(phone)) {
-        unified[phone] = {
-          'phone': phone,
-          'name': 'Unknown Customer',
-          'address': '',
-          'gstin': '',
-          'unified_balance': balance,
-          'last_transaction': DateTime.now().toIso8601String(),
-          'history': [],
-        };
-      } else {
-        unified[phone]!['unified_balance'] = balance;
-      }
-    });
+    for (final inv in invoices) {
+      final row = Map<String, dynamic>.from(inv as Map);
+      final entry = ensure(
+        customerId: row['customer_id'],
+        phone: row['customer_phone'] ?? row['phone'],
+        name: row['customer_name'] ?? row['name'],
+      );
+      if (entry.isEmpty) continue;
+      final history = entry['history'] as List<dynamic>;
+      history.add(row);
+      entry['last_transaction'] = row['invoice_date'] ?? row['date'] ?? entry['last_transaction'];
 
-    // Add unpaid invoices debt that is NOT already accounted for
-    // Assuming khata_balance only reflects manual payments/credit sales.
-    // If an invoice is UNPAID or PARTIAL, add only the outstanding amount.
-    for (var inv in invoices) {
-      final phone = inv['customer_phone']?.toString() ?? '';
-      if (phone.isEmpty) continue;
-      
-      if (!unified.containsKey(phone)) {
-        unified[phone] = {
-          'phone': phone,
-          'name': inv['customer_name'] ?? 'Unknown Customer',
-          'address': '',
-          'gstin': '',
-          'unified_balance': 0.0,
-          'last_transaction': inv['date'] ?? DateTime.now().toIso8601String(),
-          'history': [],
-        };
-      }
-
-      final total = double.tryParse(inv['total_amount']?.toString() ?? inv['total']?.toString() ?? '0') ?? 0.0;
-      final paid = double.tryParse(inv['paid_amount']?.toString() ?? '0') ?? 0.0;
-      final status = inv['payment_status']?.toString().toUpperCase() ?? _deriveInvoiceStatus(total, paid);
+      final total = double.tryParse((row['total_amount'] ?? row['total'] ?? 0).toString()) ?? 0.0;
+      final paid = double.tryParse((row['paid_amount'] ?? 0).toString()) ?? 0.0;
       final outstanding = (total - paid).clamp(0.0, double.infinity);
-
-      if (status != 'PAID' && outstanding > 0.0) {
-        unified[phone]!['unified_balance'] = (unified[phone]!['unified_balance'] as double) + outstanding;
+      if (outstanding > 0.0) {
+        entry['unified_balance'] = (entry['unified_balance'] as double) + outstanding;
       }
+    }
+
+    // Manual Khata adjustments/payments remain additive on top of invoices.
+    for (final pair in khataBalances.entries) {
+      final key = keyFor(phone: pair.key);
+      if (key.isEmpty) continue;
+      final entry = unified.putIfAbsent(key, () => {
+        'customer_id': null,
+        'phone': pair.key,
+        'name': 'Customer',
+        'unified_balance': 0.0,
+        'last_transaction': DateTime.now().toIso8601String(),
+        'history': <dynamic>[],
+      });
+      entry['unified_balance'] = (entry['unified_balance'] as double) + pair.value;
     }
 
     return unified.values.toList();

@@ -20,6 +20,7 @@ import 'utils/free_translator_service.dart';
 
 import 'package:speech_to_text/speech_to_text.dart' as stt;
 import 'package:google_fonts/google_fonts.dart';
+import 'package:permission_handler/permission_handler.dart';
 
 import 'phonetic_normalizer.dart';
 import 'voice_nlp_engine.dart';
@@ -884,6 +885,24 @@ class _VoiceBillingAssistantState extends State<VoiceBillingAssistant>
 
   Future<void> _toggleListening() async {
     if (_isProcessing) return; // BUG-V1 lock
+
+    if (!_isListening) {
+      final status = await Permission.microphone.status;
+      if (!status.isGranted) {
+        final requested = await Permission.microphone.request();
+        if (!requested.isGranted) {
+          if (mounted) {
+            _showSnack(
+              requested.isPermanentlyDenied
+                  ? 'Microphone permission is blocked. Enable it in Android Settings.'
+                  : 'Microphone permission is required for voice billing.',
+              isError: true,
+            );
+          }
+          return;
+        }
+      }
+    }
     if (_isListening) {
       _shouldRestartListening = false;
       _speech.stop();

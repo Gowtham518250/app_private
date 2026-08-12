@@ -3,9 +3,12 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'local_storage_service.dart';
+import 'sync_queue_manager.dart';
 import 'api_client.dart';
 import 'secure_token_storage.dart';
 import 'background_sync_worker.dart';
+import 'sync_queue_manager.dart';
+import 'inventory_management_service.dart';
 
 /// Crash Recovery Service
 /// Handles startup recovery and cleanup of incomplete transactions
@@ -144,37 +147,69 @@ class CrashRecoveryService {
     }
   }
   
-  /// Recover sale transaction
+  /// Recover sale transaction using the same durable outbox as normal sales.
+  /// Recovery is idempotent: restoring a sale that already exists is harmless,
+  /// and local inventory deduction itself is guarded by sale-level idempotency.
   Future<void> _recoverSale(Map<String, dynamic> data) async {
     try {
-      // Check if sale was already saved
       final sales = await LocalStorageService.loadSales();
-      final saleId = data['sale_id'] as String?;
-      
-      if (saleId != null && sales.any((s) => s['sale_id'] == saleId)) {
-        if (kDebugMode) debugPrint('✅ Sale already exists, skipping recovery');
-        return;
+      final saleId = data['sale_id']?.toString();
+      if (saleId == null || saleId.isEmpty) {
+        throw StateError('Recovered sale is missing sale_id');
       }
-      
-      // Re-save the sale to local storage
-      sales.add(data);
-      await LocalStorageService.saveSales(sales);
-      
-      // Queue for backend sync
-      final prefs = await SharedPreferences.getInstance();
-      final queueJson = prefs.getString('offline_sync_queue') ?? '[]';
-      final List<dynamic> queue = json.decode(queueJson);
-      
-      queue.add({
-        'action': 'save_sale',
-        'data': data,
-        'synced': false,
+
+      final exists = sales.any((s) =>
+          (s is Map && (s['sale_id'] ?? s['invoice_number']).toString() == saleId));
+
+      if (!exists) {
+        await LocalStorageService.saveSales([...sales, data]);
+      }
+
+      final items = (data['items'] is List)
+          ? (data['items'] as List)
+          : <dynamic>[];
+
+      if (items.isNotEmpty) {
+        // This method is idempotent by saleId, so it repairs a crash that
+        // happened after sale persistence but before local inventory update.
+        await InventoryManagementService.deductStockLocally(
+          items,
+          saleId: saleId,
+        );
+      }
+
+      final invoicePayload = <String, dynamic>{
+        'invoice_number': saleId,
+        'offline_id': saleId,
+        'customer_name': data['customer_name'] ?? 'Cash Customer',
+        'customer_phone': data['customer_phone'],
+        'total_amount': data['total_amount'] ?? data['total'] ?? 0,
+        'paid_amount': data['paid_amount'] ?? 0,
+        'tax': data['tax'] ?? 0,
+        'payment_status': data['payment_status'] ?? 'UNPAID',
+        'invoice_date': data['invoice_date'] ??
+            data['business_date'] ??
+            data['sale_date'] ??
+            DateTime.now().toIso8601String().split('T').first,
+        'line_items': items,
+        'notes': data['notes'] ?? 'Recovered offline sale',
+      };
+
+      final queued = await SyncQueueManager.enqueue('save_sale', {
+        'endpoint': ApiClient.invoicesSync,
+        'payload': invoicePayload,
+        'invoice_payload': invoicePayload,
+        'sale_id': saleId,
+        'retry_priority': 'critical',
       });
-      
-      await prefs.setString('offline_sync_queue', json.encode(queue));
-      
-      if (kDebugMode) debugPrint('✅ Sale recovered and queued for sync');
-      
+
+      if (!queued) {
+        throw StateError('Failed to restore sale into durable outbox: $saleId');
+      }
+
+      if (kDebugMode) {
+        debugPrint('✅ Sale recovery complete: $saleId');
+      }
     } catch (e) {
       if (kDebugMode) debugPrint('❌ Error recovering sale: $e');
     }

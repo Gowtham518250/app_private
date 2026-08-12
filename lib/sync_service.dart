@@ -290,18 +290,9 @@ class SyncService {
             if (kDebugMode) debugPrint('⚠️ Failed to fetch invoices from /api/invoices: $e');
           }
           
-          // Fetch sales from /auth/sales
-          try {
-            final salesRes = await ApiClient.getJson('/auth/sales', headers: {
-              'Authorization': 'Bearer $token',
-            });
-            if (salesRes.statusCode == 200) {
-              final sales = jsonDecode(salesRes.body);
-              if (sales is List) allApiItems.addAll(sales);
-            }
-          } catch (e) {
-            if (kDebugMode) debugPrint('⚠️ Failed to fetch sales from /auth/sales: $e');
-          }
+          // Canonical source: /api/invoices. The legacy /auth/sales feed is line-item based
+          // and is intentionally NOT merged into the canonical invoice dataset because doing so
+          // can double-count the same business transaction. Legacy recovery is handled separately.
           
           final currentLocal = await LocalStorageService.loadSales();
           final localBills = currentLocal
@@ -484,52 +475,26 @@ class SyncService {
       int consecutiveNetworkFailures = 0;
 
       for (var item in pending) {
-        if (consecutiveNetworkFailures >= 3) {
-          if (kDebugMode) debugPrint('🛑 Circuit Breaker triggered. API seems down.');
-          break; // Stop processing the queue
-        }
-
         final actionId = item['action_id'];
         final action = item['action'];
         final status = item['status'];
         
         if (status == 'PARKED') continue; // Skip permanently failed items
-        
-        // Exponential backoff check
-        final retries = item['retries'] ?? 0;
-        if (retries >= _maxQueueRetries) {
-          if (kDebugMode) debugPrint('🛑 Action $actionId exceeded retry limit and is being parked');
-          item['status'] = 'PARKED';
-          await SyncQueueManager.update(actionId, item);
-          continue;
-        }
-        final lastAttemptStr = item['last_attempt'];
-        if (retries > 0 && lastAttemptStr != null) {
-          final lastAttempt = DateTime.tryParse(lastAttemptStr);
-          if (lastAttempt != null) {
-            // 🛡️ FIX: previously this jumped straight to a 2-minute mandatory
-            // wait after just the FIRST failure (1 << 1 minutes), then 4, then
-            // 8... A single transient blip (a 5G handoff, one dropped packet)
-            // would lock a sale out of retrying for 2+ minutes even though the
-            // very next attempt would likely succeed instantly, which is what
-            // produced sales that looked "stuck" for a long time on a
-            // perfectly fine network. Give the first couple of retries a
-            // short, second-scale wait, and only escalate to minutes-scale
-            // backoff once several consecutive failures actually suggest a
-            // real outage rather than one bad packet.
-            final backoffSeconds = switch (retries) {
-              1 => 15,
-              2 => 45,
-              3 => 120,
-              _ => 60 * (1 << (retries - 3 > 3 ? 3 : retries - 3)), // caps at 8 min
-            };
-            if (DateTime.now().difference(lastAttempt).inSeconds < backoffSeconds) {
-              continue; // Wait for backoff period
-            }
+
+        final nextAttemptRaw = item['next_attempt_at']?.toString();
+        if (nextAttemptRaw != null && nextAttemptRaw.isNotEmpty) {
+          final nextAttemptAt = DateTime.tryParse(nextAttemptRaw);
+          if (nextAttemptAt != null && DateTime.now().isBefore(nextAttemptAt)) {
+            continue;
           }
         }
+        
+        // Retry timing is controlled by next_attempt_at written below after failures.
 
         final data = Map<String, dynamic>.from(item['data'] ?? {});
+        item['status'] = 'SYNCING';
+        item['updated_at'] = DateTime.now().toIso8601String();
+        await SyncQueueManager.update(actionId, item);
         bool success = false;
 
         try {
@@ -600,28 +565,54 @@ class SyncService {
           }
 
           if (success) {
-            await SyncQueueManager.remove(actionId);
-            successCount++;
-            consecutiveNetworkFailures = 0; // Reset circuit breaker
+            // ACK protocol: persist local SYNCED state first. Only then can the
+            // durable outbox item be removed. If local marking fails, the queue
+            // stays intact and the operation is retried safely.
             if (action == 'save_sale' || action == 'sync_sale') {
               final saleId = data['sale_id']?.toString() ?? data['invoice_number']?.toString() ?? '';
               if (saleId.isNotEmpty) {
-                await SaleService.markSaleAsSynced(saleId);
+                final marked = await SaleService.markSaleAsSynced(saleId);
+                if (!marked) {
+                  success = false;
+                  throw StateError('LOCAL_SYNC_ACK_FAILED:$saleId');
+                }
                 SyncService.triggerDashboardRefresh();
               }
             }
-            if (action == 'create_purchase_order' || action == 'update_purchase_order_status') {
-              SyncService.triggerDashboardRefresh();
+
+            if (success) {
+              await SyncQueueManager.remove(actionId);
+              successCount++;
+              consecutiveNetworkFailures = 0;
+              if (action == 'create_purchase_order' || action == 'update_purchase_order_status') {
+                SyncService.triggerDashboardRefresh();
+              }
             }
-          } else {
+          }
+          if (!success) {
             // Increment retry count
             item['retries'] = (item['retries'] ?? 0) + 1;
-            item['last_attempt'] = DateTime.now().toIso8601String();
+            final retryNow = DateTime.now();
+            item['last_attempt'] = retryNow.toIso8601String();
+            item['status'] = 'RETRY_WAIT';
+            item['last_error'] = 'SYNC_FAILED';
+            final retryCount = item['retries'] as int;
+            final retryDelay = switch (retryCount) {
+              1 => 2,
+              2 => 5,
+              3 => 15,
+              4 => 30,
+              5 => 60,
+              _ => 120,
+            };
+            item['next_attempt_at'] = retryCount >= _maxQueueRetries
+                ? null
+                : DateTime.now().add(Duration(seconds: retryDelay)).toIso8601String();
             if (item['retries'] >= _maxQueueRetries) {
               item['status'] = 'PARKED';
               if (kDebugMode) debugPrint('🛑 Action $actionId failed repeatedly and has been parked');
             } else {
-              if (kDebugMode) debugPrint('⚠️ Action $actionId failed, will retry later.');
+              if (kDebugMode) debugPrint('⚠️ Action $actionId failed, will retry in ${retryDelay}s.');
             }
             await SyncQueueManager.update(actionId, item);
             failureCount++;
@@ -635,9 +626,24 @@ class SyncService {
           failureCount++;
           consecutiveNetworkFailures++;
           
-          // Update retry count
+          // Update retry count using the same durable backoff metadata as normal failures.
           item['retries'] = (item['retries'] ?? 0) + 1;
-          item['last_attempt'] = DateTime.now().toIso8601String();
+          final retryNow = DateTime.now();
+          item['last_attempt'] = retryNow.toIso8601String();
+          item['status'] = 'RETRY_WAIT';
+          item['last_error'] = e.toString();
+          final retryCount = item['retries'] as int;
+          final retryDelay = switch (retryCount) {
+            1 => 2,
+            2 => 5,
+            3 => 15,
+            4 => 30,
+            5 => 60,
+            _ => 120,
+          };
+          item['next_attempt_at'] = retryCount >= _maxQueueRetries
+              ? null
+              : DateTime.now().add(Duration(seconds: retryDelay)).toIso8601String();
           if (item['retries'] >= _maxQueueRetries) {
             item['status'] = 'PARKED';
             if (kDebugMode) debugPrint('🛑 Action $actionId error exceeded retry limit and has been parked');
@@ -910,20 +916,88 @@ static Future<bool> _updatePurchaseOrderStatusItem(Map<String, dynamic> data) as
   }
 
 
-static Future<bool> _recordKhataPaymentItem(Map<String, dynamic> data) async {
+static Future<bool> _recordKhataPaymentItem(
+    Map<String, dynamic> data,
+  ) async {
     try {
       final token = await SecureTokenStorage.getToken() ?? '';
       if (token.isEmpty) return false;
 
+      // Repair old queued records created by previous builds that could contain
+      // customer_id: "" or a phone number in the integer field.
+      final payload = Map<String, dynamic>.from(data);
+
+      final rawCustomerId = payload['customer_id'];
+      int? customerId;
+
+      if (rawCustomerId is int && rawCustomerId > 0) {
+        customerId = rawCustomerId;
+      } else if (rawCustomerId is num && rawCustomerId.toInt() > 0) {
+        customerId = rawCustomerId.toInt();
+      } else {
+        final parsed = int.tryParse(
+          rawCustomerId?.toString().trim() ?? '',
+        );
+        if (parsed != null && parsed > 0) {
+          customerId = parsed;
+        }
+      }
+
+      final customerPhone =
+          (payload['customer_phone'] ?? payload['phone'] ?? '')
+              .toString()
+              .trim();
+
+      // Never send an empty/string customer_id to a FastAPI integer field.
+      if (customerId != null) {
+        payload['customer_id'] = customerId;
+      } else {
+        payload.remove('customer_id');
+      }
+
+      if (customerPhone.isNotEmpty) {
+        payload['customer_phone'] = customerPhone;
+      } else {
+        payload.remove('customer_phone');
+      }
+
+      if (customerId == null && customerPhone.isEmpty) {
+        if (kDebugMode) {
+          debugPrint(
+            '❌ Khata payment has no valid customer identity; keeping it queued.',
+          );
+        }
+        return false;
+      }
+
       final res = await ApiClient.postJson(
         '/api/khata/record-payment',
-        data,
+        payload,
         headers: {'Authorization': 'Bearer $token'},
-      ).timeout(const Duration(seconds: 20));
+      ).timeout(const Duration(seconds: 15));
 
-      return res.statusCode == 200 || res.statusCode == 201;
+      // 200/201 = created or idempotent success.
+      // 409 is also treated as success when the backend reports a duplicate
+      // idempotency key, because the payment already exists server-side.
+      if (res.statusCode == 200 || res.statusCode == 201) {
+        return true;
+      }
+
+      if (res.statusCode == 409) {
+        return true;
+      }
+
+      if (kDebugMode) {
+        debugPrint(
+          '❌ Khata payment sync rejected: '
+          '${res.statusCode} ${res.body}',
+        );
+      }
+      return false;
     } catch (e) {
-      if (kDebugMode) debugPrint('❌ Error syncing khata payment: $e');
+      if (kDebugMode) {
+        debugPrint('❌ Error syncing khata payment: $e');
+      }
       return false;
     }
   }

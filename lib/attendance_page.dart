@@ -13,6 +13,7 @@ import 'models.dart';
 import 'package:flutter/foundation.dart' show kDebugMode;
 import 'worker_local_storage.dart';
 import 'worker_attendance_detail_page.dart';
+import 'attendance_offline_service.dart';
 
 class AttendancePage extends StatefulWidget {
   const AttendancePage({super.key});
@@ -129,6 +130,12 @@ class _AttendancePageState extends State<AttendancePage>
   Future<void> _fetch() async {
     setState(() => _loading = true);
     try {
+      // Local-first: render persisted attendance immediately, even offline.
+      final localRecords = await OfflineAttendanceService.loadLocalRecords();
+      if (mounted && localRecords.isNotEmpty) {
+        setState(() => _records = localRecords);
+      }
+
       final today = _df.format(DateTime.now());
       
       // Fetch shopkeeper's attendance
@@ -151,28 +158,21 @@ class _AttendancePageState extends State<AttendancePage>
       }
       
       // Fetch attendance for all workers
-      // 🔧 PARTIAL FIX (#15): this was previously N sequential awaited
-      // calls (50 workers = 50 round-trips run one after another). Running
-      // them in parallel doesn't reduce the request count, but cuts real
-      // wall-clock wait time from ~N*latency to ~1*latency. The correct
-      // long-term fix is still a backend bulk attendance endpoint.
-      final workerResults = await Future.wait(_staff.map((worker) async {
+      for (var worker in _staff) {
         try {
           final workerUrl = '${ApiClient.attendancePrefix}/employee/${worker.id}';
           final workerRes = await ApiClient.getJson(workerUrl);
           if (workerRes.statusCode == 200) {
             final workerData = json.decode(workerRes.body);
             if (workerData is Map && workerData['records'] is List) {
-              return List<dynamic>.from(workerData['records'] as List);
+              final workerRecords = List<dynamic>.from(workerData['records'] as List);
+              // Keep all worker attendance records so payroll can compute monthly totals
+              allRecords.addAll(workerRecords);
             }
           }
         } catch (e) {
           if (kDebugMode) debugPrint('Error fetching attendance for worker ${worker.id}: $e');
         }
-        return <dynamic>[];
-      }));
-      for (final records in workerResults) {
-        allRecords.addAll(records);
       }
       
       if (mounted) {
@@ -290,59 +290,34 @@ class _AttendancePageState extends State<AttendancePage>
     }
     setState(() => _marking = true);
 
-    // Find if already checked in today — normalize date comparison
-    final today = _df.format(DateTime.now());
-    final myRecord = _records.where((r) {
-      final recDate = (r['attendance_date'] ?? '').toString().split('T').first.trim();
-      final empId = r['employee_id'];
-      final empIdMatch = empId == _userId || empId.toString() == _userId.toString();
-      return empIdMatch && recDate == today;
-    }).firstOrNull;
-
     try {
+      final today = _df.format(DateTime.now());
+      Map<String, dynamic>? myRecord;
+      for (final r in _records) {
+        final recDate = (r['attendance_date'] ?? '').toString().split('T').first.trim();
+        final empId = r['employee_id'];
+        if ((empId == _userId || empId.toString() == _userId.toString()) && recDate == today) {
+          myRecord = Map<String, dynamic>.from(r as Map);
+          break;
+        }
+      }
+
       if (myRecord == null || myRecord['check_in_time'] == null) {
-        // ✅ FIX: Backend check-in uses Query parameter, NOT JSON body
-        // employee_id must be in URL query string: /check-in?employee_id=X
-        final res = await ApiClient.postJson(
-            '${ApiClient.attendancePrefix}/check-in?employee_id=$_userId',
-            {});
-        if (res.statusCode == 200 || res.statusCode == 201) {
-          _showSnack('✅ Checked In Successfully!', _present);
-          await _fetch();
-        } else if (res.statusCode == 400) {
-          // Already checked in — refresh state
-          _showSnack('⚠️ Already checked in today', Colors.orange);
-          await _fetch();
-        } else {
-          final errorMsg = res.statusCode == 404
-              ? 'Employee record not found. Contact support.'
-              : 'Check-in failed (Status: ${res.statusCode})';
-          _showSnack('❌ $errorMsg', _absent);
-        }
+        await OfflineAttendanceService.checkIn(employeeId: _userId!);
+        _showSnack('✅ Checked In — saved offline and queued for sync', _present);
       } else if (myRecord['check_out_time'] == null) {
-        // ✅ FIX: Backend check-out uses Query parameter, NOT JSON body
-        final res = await ApiClient.postJson(
-            '${ApiClient.attendancePrefix}/check-out?employee_id=$_userId',
-            {});
-        if (res.statusCode == 200 || res.statusCode == 201) {
-          _showSnack('👋 Checked Out Successfully!', _primary);
-          await _fetch();
-        } else if (res.statusCode == 400) {
-          _showSnack('⚠️ Already checked out today', Colors.orange);
-          await _fetch();
-        } else {
-          final errorMsg = res.statusCode == 404
-              ? 'Employee record not found. Contact support.'
-              : 'Check-out failed (Status: ${res.statusCode})';
-          _showSnack('❌ $errorMsg', _absent);
-        }
+        await OfflineAttendanceService.checkOut(employeeId: _userId!);
+        _showSnack('👋 Checked Out — saved offline and queued for sync', _primary);
       } else {
         _showSnack('✅ Already checked in and out today', Colors.orange);
       }
+
+      await _fetch();
     } catch (e) {
-      _showSnack('❌ Error: $e', _absent);
+      _showSnack('❌ Attendance could not be saved safely: $e', _absent);
+    } finally {
+      if (mounted) setState(() => _marking = false);
     }
-    setState(() => _marking = false);
   }
 
   void _showSnack(String msg, Color color) {
@@ -756,7 +731,7 @@ class _AttendancePageState extends State<AttendancePage>
       itemCount: _records.length,
       itemBuilder: (_, i) {
         final r = _records[i];
-        final st = (r['status'] as String? ?? 'N/A').trim().toUpperCase();
+        final st = r['status'] as String? ?? 'N/A';
         final color = st == 'PRESENT' ? _present
             : (st == 'HALF_DAY' ? Colors.orange : _absent);
         return Container(
@@ -780,7 +755,7 @@ class _AttendancePageState extends State<AttendancePage>
               Text(r['attendance_date'] ?? '', style: GoogleFonts.poppins(
                   fontWeight: FontWeight.w600, fontSize: 13)),
               if (r['check_in_time'] != null)
-                Text('In: ${DateFormat.jm().format(_parseServerTime(r['check_in_time']) ?? DateTime.now())}',
+                Text('In: ${DateFormat.jm().format(DateTime.tryParse(r['check_in_time']) ?? DateTime.now())}',
                     style: GoogleFonts.poppins(
                         fontSize: 11, color: Colors.grey.shade500)),
             ])),
@@ -895,30 +870,29 @@ class _AttendancePageState extends State<AttendancePage>
   Future<void> _markWorkerAttendance(Worker worker, bool isCurrentlyIn) async {
     try {
       if (isCurrentlyIn) {
-        // Check-out
-        final res = await ApiClient.postJson(
-            '${ApiClient.attendancePrefix}/check-out?employee_id=${worker.id}',
-            {});
-        if (res.statusCode == 200 || res.statusCode == 201) {
-          _showSnack('✅ ${worker.name} checked out successfully', _primary);
-          await _fetch();
-        } else {
-          _showSnack('❌ Check-out failed for ${worker.name}', _absent);
+        final workerId = int.tryParse(worker.id.toString());
+        if (workerId == null || workerId <= 0) {
+          throw StateError('Invalid worker ID: ${worker.id}');
         }
+        await OfflineAttendanceService.checkOut(
+          employeeId: workerId,
+          workerId: workerId,
+        );
+        _showSnack('✅ ${worker.name} checked out — saved offline and queued', _primary);
       } else {
-        // Check-in
-        final res = await ApiClient.postJson(
-            '${ApiClient.attendancePrefix}/check-in?employee_id=${worker.id}',
-            {});
-        if (res.statusCode == 200 || res.statusCode == 201) {
-          _showSnack('✅ ${worker.name} checked in successfully', _present);
-          await _fetch();
-        } else {
-          _showSnack('❌ Check-in failed for ${worker.name}', _absent);
+        final workerId = int.tryParse(worker.id.toString());
+        if (workerId == null || workerId <= 0) {
+          throw StateError('Invalid worker ID: ${worker.id}');
         }
+        await OfflineAttendanceService.checkIn(
+          employeeId: workerId,
+          workerId: workerId,
+        );
+        _showSnack('✅ ${worker.name} checked in — saved offline and queued', _present);
       }
+      await _fetch();
     } catch (e) {
-      _showSnack('❌ Error: $e', _absent);
+      _showSnack('❌ Attendance could not be saved: $e', _absent);
     }
   }
 

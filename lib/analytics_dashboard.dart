@@ -70,9 +70,9 @@ class _AnalyticsDashboardState extends State<AnalyticsDashboard> {
     try {
       final rawSales = await LocalStorageService.loadSales();
 
-      // Revenue / transactions / avg order / growth all come from the
-      // shared engine now — IST-corrected dates, payment-ratio scaling,
-      // and inclusive period boundaries all match the rest of the app.
+      // The engine canonicalizes local/cloud duplicates first. All secondary
+      // analytics must consume the same canonical transaction set, otherwise
+      // cost/profit/hourly charts can disagree with the KPI totals.
       _engine.recalculateAnalytics(rawSales, _selectedFilter);
 
       double totalCost = 0;
@@ -80,7 +80,7 @@ class _AnalyticsDashboardState extends State<AnalyticsDashboard> {
       final Map<String, double> hourlyDistribution = {};
       final now = DateTime.now();
 
-      for (final rawSale in rawSales) {
+      for (final rawSale in _engine.sales) {
         final s = Map<String, dynamic>.from(rawSale as Map);
         final dt = _engine.getLocalDate(s); // same IST-forced parsing as the engine
         final day = DateTime(dt.year, dt.month, dt.day);
@@ -95,23 +95,17 @@ class _AnalyticsDashboardState extends State<AnalyticsDashboard> {
         };
         if (!inRange) continue;
 
-        // Same partial-payment scaling the engine uses for revenue, so
-        // cost/profit isn't compared against a differently-scaled figure.
-        final amount = _toDouble(s['total_amount'] ?? s['total']);
-        final invoiceTotal = _toDouble(s['invoice_total'] ?? s['total_amount'] ?? amount);
-        final paidAmount = _toDouble(s['paid_amount'] ?? invoiceTotal);
-        final status = (s['payment_status'] ?? s['status'] ?? '').toString().toUpperCase();
-        double ratio = 1.0;
-        if (invoiceTotal > 0 && paidAmount < invoiceTotal && status != 'PAID') {
-          ratio = paidAmount / invoiceTotal;
-        }
+        // Sales/profit are gross-business metrics. A customer owing money
+        // does not make the sale itself equal to ₹0. Collected cash is shown
+        // separately by the engine.
+        final amount = _toDouble(s['gross_revenue'] ?? s['total_amount'] ?? s['total']);
 
         if (s['items'] is List) {
           for (final rawItem in s['items'] as List) {
             final item = Map<String, dynamic>.from(rawItem as Map);
             final qty = _toDouble(item['quantity'] ?? item['qty'] ?? 1);
             final itemCost = _toDouble(item['cost_price']);
-            totalCost += itemCost * qty * ratio;
+            totalCost += itemCost * qty;
 
             final itemName = (item['product_name'] ?? item['product'] ?? item['item'] ?? 'Unknown').toString();
             itemsSold[itemName] = (itemsSold[itemName] ?? 0) + qty.round();
@@ -119,7 +113,7 @@ class _AnalyticsDashboardState extends State<AnalyticsDashboard> {
         }
 
         final hkey = dt.hour.toString().padLeft(2, '0');
-        hourlyDistribution[hkey] = (hourlyDistribution[hkey] ?? 0) + amount * ratio;
+        hourlyDistribution[hkey] = (hourlyDistribution[hkey] ?? 0) + amount;
       }
 
       if (!mounted) return;
@@ -150,12 +144,16 @@ class _AnalyticsDashboardState extends State<AnalyticsDashboard> {
     }
 
     final revenue = _engine.displayRevenue;
+    final collected = _engine.displayCollected;
+    final outstanding = _engine.displayOutstanding;
     final transactions = _engine.displayTransactions;
     final avgOrder = transactions > 0 ? revenue / transactions : 0.0;
     final growth = _engine.filteredGrowthPercentage;
 
     final nf = NumberFormat.currency(locale: 'en_IN', symbol: '₹', decimalDigits: 2);
     final revenueLabel = nf.format(revenue);
+    final collectedLabel = nf.format(collected);
+    final outstandingLabel = nf.format(outstanding);
     final profitLabel = nf.format(_totalProfit);
     final costLabel = nf.format(_totalCost);
     final avgOrderLabel = nf.format(avgOrder);
@@ -222,7 +220,9 @@ class _AnalyticsDashboardState extends State<AnalyticsDashboard> {
                 shrinkWrap: true,
                 physics: const NeverScrollableScrollPhysics(),
                 children: [
-                  _buildKPICard('Revenue', revenueLabel, Colors.green, Icons.trending_up),
+                  _buildKPICard('Invoiced', revenueLabel, Colors.green, Icons.receipt_long),
+                  _buildKPICard('Collected', collectedLabel, Colors.teal, Icons.payments),
+                  _buildKPICard('Pending', outstandingLabel, Colors.orange, Icons.account_balance_wallet),
                   _buildKPICard('Profit', profitLabel, Colors.blue, Icons.wallet),
                   _buildKPICard('Margin', '${_profitMargin.toStringAsFixed(1)}%', Colors.orange, Icons.percent),
                   _buildKPICard('Transactions', '$transactions', Colors.purple, Icons.receipt),

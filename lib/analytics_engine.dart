@@ -90,6 +90,19 @@ class AnalyticsEngine {
     return filteredTotalTransactions;  // Week/Month/Year
   }
 
+  /// Gross invoiced value for the current filter.
+  double get displayInvoiced => displayRevenue;
+
+  /// Cash/UPI/etc. actually collected for the current filter.
+  double get displayCollected {
+    return filteredSalesCache.fold(0.0, (sum, t) => sum + _toDouble(t['collected_revenue']));
+  }
+
+  /// Outstanding amount for the current filter.
+  double get displayOutstanding {
+    return filteredSalesCache.fold(0.0, (sum, t) => sum + _toDouble(t['outstanding_amount']));
+  }
+
   List<Map<String, dynamic>> recentSales = [];
 
   static const List<String> _months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
@@ -157,39 +170,160 @@ class AnalyticsEngine {
     }
   }
 
-  /// 🚀 PRODUCTION-GRADE ANALYTICS (Single Pass O(N))
+  /// Canonical transaction key. Prefer the offline/business identity so a
+  /// locally-created sale and its cloud invoice collapse into one transaction.
+  String _canonicalTransactionKey(Map<String, dynamic> sale) {
+    const fields = [
+      'offline_id',
+      'sale_id',
+      'invoice_number',
+      'invoice_id',
+      'backend_id',
+      'id',
+    ];
+    for (final field in fields) {
+      final value = sale[field]?.toString().trim().toLowerCase() ?? '';
+      if (value.isNotEmpty && value != 'null' && value != '0') return value;
+    }
+
+    final date = (sale['business_date'] ?? sale['invoice_date'] ?? sale['sale_date'] ?? '').toString();
+    final phone = (sale['customer_phone'] ?? sale['phone'] ?? '').toString().trim();
+    final total = _toDouble(sale['total_amount'] ?? sale['total']);
+    return 'fallback|$date|$phone|${total.toStringAsFixed(2)}';
+  }
+
+  Map<String, dynamic> _mergeCanonicalTransaction(
+    Map<String, dynamic> current,
+    Map<String, dynamic> incoming,
+  ) {
+    final currentUpdated = DateTime.tryParse(current['updated_at']?.toString() ?? '');
+    final incomingUpdated = DateTime.tryParse(incoming['updated_at']?.toString() ?? '');
+    final incomingIsNewer = incomingUpdated != null &&
+        (currentUpdated == null || incomingUpdated.isAfter(currentUpdated));
+
+    Map<String, dynamic> merged = {
+      ...current,
+      if (incomingIsNewer) ...incoming,
+    };
+
+    // Prefer real customer data over generic placeholders.
+    final currentName = (current['customer_name'] ?? '').toString().trim();
+    final incomingName = (incoming['customer_name'] ?? '').toString().trim();
+    if ((currentName.isEmpty || currentName == 'Guest Customer' || currentName == 'Cash Customer') &&
+        incomingName.isNotEmpty && incomingName != 'Guest Customer' && incomingName != 'Cash Customer') {
+      merged['customer_name'] = incomingName;
+    }
+    final currentPhone = (current['customer_phone'] ?? '').toString().trim();
+    final incomingPhone = (incoming['customer_phone'] ?? '').toString().trim();
+    if (currentPhone.isEmpty && incomingPhone.isNotEmpty) {
+      merged['customer_phone'] = incomingPhone;
+    }
+
+    // Merge line items without duplicating the same line from local + cloud copies.
+    final lines = <Map<String, dynamic>>[];
+    void addLines(dynamic raw) {
+      if (raw is! List) return;
+      for (final value in raw) {
+        if (value is! Map) continue;
+        final line = Map<String, dynamic>.from(value);
+        final productId = (line['product_id'] ?? line['id'] ?? '').toString().trim();
+        final name = (line['product_name'] ?? line['product'] ?? line['item'] ?? line['description'] ?? '').toString().trim().toLowerCase();
+        final qty = _toDouble(line['quantity'] ?? line['qty']);
+        final price = _toDouble(line['unit_price'] ?? line['price']);
+        final key = '$productId|$name|${qty.toStringAsFixed(3)}|${price.toStringAsFixed(2)}';
+        if (!lines.any((existing) {
+          final eProductId = (existing['product_id'] ?? existing['id'] ?? '').toString().trim();
+          final eName = (existing['product_name'] ?? existing['product'] ?? existing['item'] ?? existing['description'] ?? '').toString().trim().toLowerCase();
+          final eQty = _toDouble(existing['quantity'] ?? existing['qty']);
+          final ePrice = _toDouble(existing['unit_price'] ?? existing['price']);
+          return '$eProductId|$eName|${eQty.toStringAsFixed(3)}|${ePrice.toStringAsFixed(2)}' == key;
+        })) {
+          lines.add(line);
+        }
+      }
+    }
+    addLines(current['items'] ?? current['line_items']);
+    addLines(incoming['items'] ?? incoming['line_items']);
+    if (lines.isNotEmpty) merged['items'] = lines;
+
+    // Keep the strongest monetary values. Paid amount is monotonic for normal
+    // retail payments and therefore using the larger value prevents a cloud
+    // copy with stale paid_amount=0 from erasing a locally recorded payment.
+    final currentTotal = _toDouble(current['total_amount'] ?? current['total']);
+    final incomingTotal = _toDouble(incoming['total_amount'] ?? incoming['total']);
+    if (incomingTotal > 0 || currentTotal == 0) merged['total_amount'] = incomingTotal > 0 ? incomingTotal : currentTotal;
+    final currentPaid = _toDouble(current['paid_amount']);
+    final incomingPaid = _toDouble(incoming['paid_amount']);
+    merged['paid_amount'] = currentPaid > incomingPaid ? currentPaid : incomingPaid;
+
+    if (current['sync_status']?.toString().toLowerCase() == 'synced' ||
+        incoming['sync_status']?.toString().toLowerCase() == 'synced' ||
+        incoming['is_synced'] == true) {
+      merged['sync_status'] = 'synced';
+      merged['is_synced'] = true;
+    }
+    merged['transaction_key'] = _canonicalTransactionKey(merged);
+    return merged;
+  }
+
+  /// Build one canonical transaction per business sale/invoice.
+  /// Analytics must never count a local sale and its cloud invoice twice.
+  List<Map<String, dynamic>> _canonicalizeTransactions(List<dynamic> rawSales) {
+    final Map<String, Map<String, dynamic>> byKey = {};
+    for (final raw in rawSales) {
+      if (raw is! Map) continue;
+      final record = Map<String, dynamic>.from(raw);
+      final key = _canonicalTransactionKey(record);
+      if (!byKey.containsKey(key)) {
+        record['transaction_key'] = key;
+        byKey[key] = record;
+      } else {
+        byKey[key] = _mergeCanonicalTransaction(byKey[key]!, record);
+      }
+    }
+    return byKey.values.toList();
+  }
+
+  /// 🚀 Production analytics: one canonical transaction pass.
+  /// Revenue is gross invoice/sale value. Collected cash is tracked separately.
   void recalculateAnalytics(List<dynamic> newSales, int timeFilter) {
-    sales = newSales;
     selectedTimeFilter = timeFilter;
-    
+
     final now = DateTime.now();
     final todayDate = DateTime(now.year, now.month, now.day);
     final yesterdayDate = todayDate.subtract(const Duration(days: 1));
     final prevDayDate = todayDate.subtract(const Duration(days: 2));
-    final normalizedNow = DateTime(now.year, now.month, now.day);
+    final normalizedNow = todayDate;
 
-    if (kDebugMode) {
-      debugPrint('🔍 Analytics Recalculation:');
-      debugPrint('  - Total sales: ${newSales.length}');
-      debugPrint('  - Today: $todayDate');
-      debugPrint('  - Yesterday: $yesterdayDate');
-      debugPrint('  - Filter: $timeFilter');
-    }
+    final canonicalTransactions = _canonicalizeTransactions(newSales);
+    sales = canonicalTransactions;
 
-    // Reset Metrics
-    todayRevenue = 0.0; yesterdayRevenue = 0.0; previousDayRevenue = 0.0;
-    todayTransactionsCount = 0; yesterdayTransactionsCount = 0;
+    todayRevenue = 0.0;
+    yesterdayRevenue = 0.0;
+    previousDayRevenue = 0.0;
+    todayTransactionsCount = 0;
+    yesterdayTransactionsCount = 0;
     todayOnlineOrders = 0;
-    totalOnlineOrders = 0; // 🔒 NEW: Reset online orders counter
-    filteredOnlineOrders = 0; // 🔒 NEW: Reset filtered online orders counter
-    
-    final Map<String, double> todayProductRevenue = {};
-    final Map<String, double> yesterdayProductRevenue = {};
-    final Map<int, double> todayHourRevenue = {};
-    final Map<int, double> yesterdayHourRevenue = {};
-    final Set<String> todayOnlineInvoices = {};
-    final Set<String> yesterdayOnlineInvoices = {};
-    
+    totalOnlineOrders = 0;
+    filteredOnlineOrders = 0;
+    totalSales = 0.0;
+    filteredTotalSales = 0.0;
+    totalTransactions = 0;
+    filteredTotalTransactions = 0;
+    averageSale = 0.0;
+    filteredAverageSale = 0.0;
+    uniqueProducts = 0;
+    filteredUniqueProducts = 0;
+    analyticsIntegrityErrors.clear();
+
+    final todayProductRevenue = <String, double>{};
+    final yesterdayProductRevenue = <String, double>{};
+    final todayHourRevenue = <int, double>{};
+    final yesterdayHourRevenue = <int, double>{};
+    final todayKeys = <String>{};
+    final yesterdayKeys = <String>{};
+    final onlineKeys = <String>{};
+
     salesByMonthCache = {};
     for (int i = 11; i >= 0; i--) {
       final d = DateTime(now.year, now.month - i, 1);
@@ -197,278 +331,204 @@ class AnalyticsEngine {
       salesByMonthCache[mon] = 0.0;
     }
     salesByWeekCache = {for (int i = 1; i <= 8; i++) 'w$i': 0.0};
-    salesByYearCache = {}; // DYNAMIC: Will grow based on encountered years
+    salesByYearCache = {};
     monthlyProductSales = {};
 
-    // ── Single Pass Processing ──
-    final List<Map<String, dynamic>> flattenedSales = [];
-    analyticsIntegrityErrors.clear();
-    for (final rawS in newSales) {
-      final s = Map<String, dynamic>.from(rawS as Map);
-      if (s['items'] is List) {
-        final items = s['items'] as List;
-        for (int i = 0; i < items.length; i++) {
-          final item = Map<String, dynamic>.from(items[i] as Map);
-          final String prodName = (item['product_name'] ?? item['product'] ?? item['item'] ?? item['description'] ?? 'Unknown').toString();
-          final String bCode = (item['product_id'] ?? item['barcode'] ?? '').toString();
-          final double parsedPrice = _toDouble(item['price'] ?? item['unit_price']);
-          final double parsedQty = _toDouble(item['qty'] ?? item['quantity'] ?? 1);
-          final double lineTotal = _toDouble(item['total_with_tax'] ?? item['total'] ?? item['line_total'] ?? (parsedPrice * parsedQty));
-          
-          flattenedSales.add({
-            'business_date': s['business_date'] ?? s['sale_date'] ?? s['invoice_date'] ?? s['date'],
-            'created_at': s['created_at'],
-            'updated_at': s['updated_at'],
-            'invoice_id': s['invoice_id'] ?? s['id'],
-            'backend_id': s['backend_id'],
-            'sale_id': s['sale_id'] ?? s['invoice_number'],
-            'invoice_number': s['invoice_number'] ?? s['sale_id'],
-            'total': lineTotal,
-            'product_name': prodName,
-            'product_id': bCode,
-            'barcode': bCode,
-            'qty': parsedQty,
-            'quantity': parsedQty,
-            'price': parsedPrice,
-            'payment_status': s['payment_status'] ?? s['status'],
-            'paid_amount': s['paid_amount'],
-            'invoice_total': s['total_amount'] ?? s['total'] ?? s['totalAmount'],
-            'source': s['source'] ?? s['order_source'] ?? 'OFFLINE', // 🔒 NEW: Track order source
-          });
-        }
-      } else {
-        flattenedSales.add(s);
-      }
+    String lineKey(Map<String, dynamic> item) {
+      final id = (item['product_id'] ?? item['id'] ?? '').toString().trim();
+      final name = (item['product_name'] ?? item['product'] ?? item['item'] ?? item['description'] ?? '').toString().trim().toLowerCase();
+      final qty = _toDouble(item['quantity'] ?? item['qty']);
+      final price = _toDouble(item['unit_price'] ?? item['price']);
+      return '$id|$name|${qty.toStringAsFixed(3)}|${price.toStringAsFixed(2)}';
     }
 
-    sales = flattenedSales;
+    final transactionsWithDates = <Map<String, dynamic>>[];
+    for (final transaction in canonicalTransactions) {
+      final dt = _tryGetBusinessDate(transaction);
+      if (dt == null) {
+        analyticsIntegrityErrors.add('Missing or invalid business date for ${transaction['transaction_key'] ?? _canonicalTransactionKey(transaction)}');
+        continue;
+      }
 
-    final Set<String> todayUniqueInvoices = {};
-    final Set<String> yesterdayUniqueInvoices = {};
-    final Set<String> onlineOrderInvoices = {}; // 🔒 NEW: Track online order invoices
+      final gross = _toDouble(transaction['total_amount'] ?? transaction['total']);
+      final paid = _toDouble(transaction['paid_amount']);
+      final double outstanding = (gross - paid).clamp(0.0, double.infinity).toDouble();
+      final status = (transaction['payment_status'] ?? transaction['status'] ?? '').toString().toUpperCase();
+      final double collected = paid > gross && gross > 0 ? gross : paid.clamp(0.0, gross).toDouble();
 
-    for (final s in flattenedSales) {
-      try {
-        final dt = _tryGetBusinessDate(s);
-        if (dt == null) {
-          final key = _transactionKey(s);
-          analyticsIntegrityErrors.add('Missing or invalid business date${key.isEmpty ? '' : ' for $key'}');
-          continue;
-        }
-        final String invoiceKey = _transactionKey(s);
-        final double itemTotal = _toDouble(s['total_amount'] ?? s['total']);
-        final double invoiceTotal = _toDouble(s['invoice_total'] ?? itemTotal);
-        final double paidAmount = _toDouble(s['paid_amount'] ?? invoiceTotal);
-        
-        // Feature: Proportional revenue scaling based on paid amount vs total
-        double ratio = 1.0;
-        final String status = (s['payment_status'] ?? '').toString().toUpperCase();
-        if (invoiceTotal > 0) {
-          if (status == 'UNPAID' || status == 'PENDING' || status == 'PARTIAL') {
-            ratio = paidAmount / invoiceTotal;
-          } else if (s.containsKey('paid_amount') && s['paid_amount'] != null && paidAmount >= 0 && paidAmount < invoiceTotal && status != 'PAID') {
-            ratio = paidAmount / invoiceTotal;
-          }
-        }
-        final double val = itemTotal * ratio;
-        s['recognized_revenue'] = val;
-        final day = DateTime(dt.year, dt.month, dt.day);
-        final String bCode = (s['product_id'] ?? s['barcode'] ?? '').toString().trim();
-        final String rawName = s['product_name']?.toString() ?? s['product']?.toString() ?? s['item']?.toString() ?? '';
-        final String formattedName = formatProductName(rawName);
+      transaction['gross_revenue'] = gross;
+      transaction['collected_revenue'] = collected;
+      transaction['outstanding_amount'] = outstanding;
+      // Keep this key for compatibility with existing widgets, but make it
+      // gross revenue so unpaid Udhaar does not incorrectly make sales = ₹0.
+      transaction['recognized_revenue'] = gross;
+      transaction['payment_status_normalized'] = status.isEmpty
+          ? (collected >= gross && gross > 0 ? 'PAID' : collected > 0 ? 'PARTIAL' : 'UNPAID')
+          : status;
+      transaction['transaction_key'] = _canonicalTransactionKey(transaction);
+      transactionsWithDates.add(transaction);
 
-        // Monthly trends for products (Current Year)
-        if (dt.year == now.year && rawName.isNotEmpty) {
-          monthlyProductSales.putIfAbsent(formattedName, () => {});
-          monthlyProductSales[formattedName]![dt.month] = (monthlyProductSales[formattedName]![dt.month] ?? 0.0) + val;
-        }
-
-        // Today / Yesterday
-        if (day == todayDate) {
-          todayRevenue += val;
-          if (invoiceKey.isNotEmpty) todayUniqueInvoices.add(invoiceKey);
-          todayHourRevenue[dt.hour] = (todayHourRevenue[dt.hour] ?? 0.0) + val;
-          if (rawName.isNotEmpty && formattedName != 'Unknown') todayProductRevenue[formattedName] = (todayProductRevenue[formattedName] ?? 0.0) + val;
-          
-          // 🔒 NEW: Track today online orders
-          final String source = (s['source'] ?? s['order_source'] ?? 'OFFLINE').toString().toUpperCase();
-          if ((source == 'ONLINE' || source == 'WEB' || source == 'APP') && invoiceKey.isNotEmpty) {
-            todayOnlineInvoices.add(invoiceKey);
-          }
-          
-          if (kDebugMode && todayRevenue > 0) {
-            debugPrint('✅ Today sale found: $formattedName, amount: ₹$val, date: $day, time: ${dt.hour}:00');
-          }
-        } else if (day == yesterdayDate) {
-          yesterdayRevenue += val;
-          if (invoiceKey.isNotEmpty) yesterdayUniqueInvoices.add(invoiceKey);
-          yesterdayHourRevenue[dt.hour] = (yesterdayHourRevenue[dt.hour] ?? 0.0) + val;
-          if (rawName.isNotEmpty && formattedName != 'Unknown') yesterdayProductRevenue[formattedName] = (yesterdayProductRevenue[formattedName] ?? 0.0) + val;
-          
-          if ((s['source'] ?? s['order_source'] ?? 'OFFLINE').toString().toUpperCase() == 'ONLINE' ||
-              (s['source'] ?? s['order_source'] ?? 'OFFLINE').toString().toUpperCase() == 'WEB' ||
-              (s['source'] ?? s['order_source'] ?? 'OFFLINE').toString().toUpperCase() == 'APP') {
-            if (invoiceKey.isNotEmpty) {
-              yesterdayOnlineInvoices.add(invoiceKey);
-            }
-          }
-          
-          if (kDebugMode && yesterdayRevenue > 0) {
-            debugPrint('✅ Yesterday sale found: $formattedName, amount: ₹$val, date: $day');
-          }
-        } else if (day == prevDayDate) {
-          previousDayRevenue += val;
-          
-          final String source = (s['source'] ?? s['order_source'] ?? 'OFFLINE').toString().toUpperCase();
-          if ((source == 'ONLINE' || source == 'WEB' || source == 'APP') && invoiceKey.isNotEmpty) {
-            onlineOrderInvoices.add(invoiceKey);
-          }
-        }
-
-        // Monthly (Year-aware for clashing prevention)
+      final key = transaction['transaction_key'].toString();
+      if (dt.year == now.year) {
         final mon = '${_months[dt.month - 1]} ${dt.year.toString().substring(2)}';
-        if (salesByMonthCache.containsKey(mon)) {
-          salesByMonthCache[mon] = (salesByMonthCache[mon] ?? 0.0) + val;
+        salesByMonthCache[mon] = (salesByMonthCache[mon] ?? 0.0) + gross;
+      }
+      salesByYearCache['${dt.year}'] = (salesByYearCache['${dt.year}'] ?? 0.0) + gross;
+      final day = DateTime(dt.year, dt.month, dt.day);
+      final daysDiff = normalizedNow.difference(day).inDays;
+      if (daysDiff >= 0 && daysDiff < 56) {
+        final wk = 8 - (daysDiff ~/ 7);
+        final wkLabel = 'w$wk';
+        if (salesByWeekCache.containsKey(wkLabel)) {
+          salesByWeekCache[wkLabel] = (salesByWeekCache[wkLabel] ?? 0.0) + gross;
         }
+      }
 
-        // Yearly
-        final yrStr = dt.year.toString();
-        salesByYearCache[yrStr] = (salesByYearCache[yrStr] ?? 0.0) + val;
+      if (day == todayDate) {
+        todayRevenue += gross;
+        todayKeys.add(key);
+        todayHourRevenue[dt.hour] = (todayHourRevenue[dt.hour] ?? 0.0) + gross;
+      } else if (day == yesterdayDate) {
+        yesterdayRevenue += gross;
+        yesterdayKeys.add(key);
+        yesterdayHourRevenue[dt.hour] = (yesterdayHourRevenue[dt.hour] ?? 0.0) + gross;
+      } else if (day == prevDayDate) {
+        previousDayRevenue += gross;
+      }
 
-        // Weekly (Sliding 8 weeks)
-        final daysDiff = normalizedNow.difference(day).inDays;
-        if (daysDiff >= 0 && daysDiff < 56) {
-          final wk = 8 - (daysDiff ~/ 7); // FIX: w8 is current week, w1 is oldest
-          final wkLabel = 'w$wk';
-          if (salesByWeekCache.containsKey(wkLabel)) {
-            salesByWeekCache[wkLabel] = (salesByWeekCache[wkLabel] ?? 0.0) + val;
+      final source = (transaction['source'] ?? transaction['order_source'] ?? 'OFFLINE').toString().toUpperCase();
+      if (source == 'ONLINE' || source == 'WEB' || source == 'APP') onlineKeys.add(key);
+
+      final lines = transaction['items'] ?? transaction['line_items'];
+      if (lines is List) {
+        final seenLines = <String>{};
+        for (final rawLine in lines) {
+          if (rawLine is! Map) continue;
+          final item = Map<String, dynamic>.from(rawLine);
+          final lk = lineKey(item);
+          if (!seenLines.add(lk)) continue;
+          final productName = formatProductName(
+            (item['product_name'] ?? item['product'] ?? item['item'] ?? item['description'] ?? 'Unknown').toString(),
+          );
+          if (productName == 'Unknown') continue;
+          final quantity = _toDouble(item['quantity'] ?? item['qty']);
+          final lineGross = _toDouble(item['line_total'] ?? item['total_with_tax'] ?? item['total']) > 0
+              ? _toDouble(item['line_total'] ?? item['total_with_tax'] ?? item['total'])
+              : _toDouble(item['unit_price'] ?? item['price']) * quantity;
+          todayProductRevenue[productName] = (todayProductRevenue[productName] ?? 0) + (day == todayDate ? lineGross : 0);
+          yesterdayProductRevenue[productName] = (yesterdayProductRevenue[productName] ?? 0) + (day == yesterdayDate ? lineGross : 0);
+          if (dt.year == now.year) {
+            monthlyProductSales.putIfAbsent(productName, () => {});
+            monthlyProductSales[productName]![dt.month] = (monthlyProductSales[productName]![dt.month] ?? 0.0) + lineGross;
           }
         }
-      } catch (e) {
-        analyticsIntegrityErrors.add('Malformed sale: $e');
-        if (kDebugMode) debugPrint('⚠️ Skipping malformed sale in analytics: $e');
       }
     }
 
-    // Top Products & Best Hours
-    todayBestHourLabel = _findBestHour(todayHourRevenue);
-    yesterdayBestHourLabel = _findBestHour(yesterdayHourRevenue);
-
-    if (todayProductRevenue.isNotEmpty) {
-      todayTopProduct = todayProductRevenue.entries.reduce((a, b) => a.value >= b.value ? a : b).key;
-    }
-    if (yesterdayProductRevenue.isNotEmpty) {
-      yesterdayTopProduct = yesterdayProductRevenue.entries.reduce((a, b) => a.value >= b.value ? a : b).key;
-    }
-
-    // ── Time Filtered Cache
-    todayTransactionsCount = todayUniqueInvoices.isEmpty && todayRevenue > 0 ? 1 : todayUniqueInvoices.length;
-    yesterdayTransactionsCount = yesterdayUniqueInvoices.isEmpty && yesterdayRevenue > 0 ? 1 : yesterdayUniqueInvoices.length;
-    todayOnlineOrders = todayOnlineInvoices.length;
-    
-    // 🔒 NEW: Calculate total online orders from all sales data
-    final allOnlineInvoices = flattenedSales.where((s) {
-      final String source = (s['source'] ?? s['order_source'] ?? 'OFFLINE').toString().toUpperCase();
-      return source == 'ONLINE' || source == 'WEB' || source == 'APP';
-    }).map(_transactionKey).where((s) => s.isNotEmpty).toSet();
-    totalOnlineOrders = allOnlineInvoices.isEmpty && flattenedSales.isNotEmpty ? 0 : allOnlineInvoices.length;
-
-    filteredSalesCache = flattenedSales.where((sale) {
-      final dt = _tryGetBusinessDate(sale);
+    final sortedTransactions = transactionsWithDates;
+    final filtered = sortedTransactions.where((transaction) {
+      final dt = _tryGetBusinessDate(transaction);
       if (dt == null) return false;
       final daysAgo = normalizedNow.difference(DateTime(dt.year, dt.month, dt.day)).inDays;
       if (selectedTimeFilter == 0) return daysAgo == 0;
-      if (selectedTimeFilter == 1) return daysAgo < 7;
-      if (selectedTimeFilter == 2) return daysAgo < 30;
+      if (selectedTimeFilter == 1) return daysAgo >= 0 && daysAgo < 7;
+      if (selectedTimeFilter == 2) return daysAgo >= 0 && daysAgo < 30;
       if (selectedTimeFilter == 3) return dt.year == now.year;
       return true;
     }).toList();
 
-    filteredTotalSales = filteredSalesCache.fold(0.0, (sum, s) => sum + _toDouble(s['recognized_revenue'] ?? s['total_amount'] ?? s['total']));
-    final uniqueInvoices = filteredSalesCache.map(_transactionKey).where((s) => s.isNotEmpty).toSet();
-    filteredTotalTransactions = uniqueInvoices.isEmpty && filteredSalesCache.isNotEmpty ? 1 : uniqueInvoices.length;
-    filteredAverageSale = filteredTotalTransactions > 0 ? filteredTotalSales / filteredTotalTransactions : 0.0;
-    filteredUniqueProducts = filteredSalesCache.map((s) { // FIX R2
-      final b = (s['product_id'] ?? s['barcode'] ?? '').toString().trim();
-      return b.isNotEmpty
-          ? b
-          : (s['product_name']?.toString() ?? 'Unknown').toLowerCase().trim();
-    }).toSet().length;
-    
-    // 🔒 NEW: Calculate filtered online orders
-    final filteredOnlineInvoices = filteredSalesCache.where((s) {
-      final String source = (s['source'] ?? s['order_source'] ?? 'OFFLINE').toString().toUpperCase();
+    filteredSalesCache = filtered;
+    filteredTotalSales = filtered.fold(0.0, (sum, t) => sum + _toDouble(t['gross_revenue']));
+    filteredTotalTransactions = filtered.length;
+    filteredAverageSale = filtered.isEmpty ? 0.0 : filteredTotalSales / filtered.length;
+    filteredOnlineOrders = filtered.where((t) {
+      final source = (t['source'] ?? t['order_source'] ?? 'OFFLINE').toString().toUpperCase();
       return source == 'ONLINE' || source == 'WEB' || source == 'APP';
-    }).map(_transactionKey).where((s) => s.isNotEmpty).toSet();
-    filteredOnlineOrders = filteredOnlineInvoices.isEmpty && filteredSalesCache.isNotEmpty ? 0 : filteredOnlineInvoices.length;
+    }).map((t) => t['transaction_key'].toString()).toSet().length;
 
-    // 🔒 BUG FIX: Calculate main metrics (not just filtered metrics)
-    totalSales = flattenedSales.fold(0.0, (sum, s) => sum + _toDouble(s['recognized_revenue'] ?? s['total_amount'] ?? s['total']));
-    final allUniqueInvoices = flattenedSales.map(_transactionKey).where((s) => s.isNotEmpty).toSet();
-    totalTransactions = allUniqueInvoices.isEmpty && flattenedSales.isNotEmpty ? 1 : allUniqueInvoices.length;
-    averageSale = totalTransactions > 0 ? totalSales / totalTransactions : 0.0;
-    uniqueProducts = flattenedSales.map((s) {
-      final b = (s['product_id'] ?? s['barcode'] ?? '').toString().trim();
-      return b.isNotEmpty
-          ? b
-          : (s['product_name']?.toString() ?? 'Unknown').toLowerCase().trim();
-    }).toSet().length;
+    totalSales = sortedTransactions.fold(0.0, (sum, t) => sum + _toDouble(t['gross_revenue']));
+    totalTransactions = sortedTransactions.length;
+    averageSale = totalTransactions == 0 ? 0.0 : totalSales / totalTransactions;
+    totalOnlineOrders = onlineKeys.length;
+    todayTransactionsCount = todayKeys.length;
+    yesterdayTransactionsCount = yesterdayKeys.length;
+    todayOnlineOrders = filtered.where((t) {
+      final dt = _tryGetBusinessDate(t);
+      final source = (t['source'] ?? t['order_source'] ?? 'OFFLINE').toString().toUpperCase();
+      return dt != null && DateTime(dt.year, dt.month, dt.day) == todayDate &&
+          (source == 'ONLINE' || source == 'WEB' || source == 'APP');
+    }).map((t) => t['transaction_key'].toString()).toSet().length;
 
-    final sortedForRecent = List<Map<String, dynamic>>.from(filteredSalesCache)
+    final productKeys = <String>{};
+    final filteredProductKeys = <String>{};
+    productAnalyticsCache = {};
+    void addProductAnalytics(Map<String, dynamic> transaction, bool includeFiltered) {
+      final lines = transaction['items'] ?? transaction['line_items'];
+      if (lines is! List) return;
+      final seenLines = <String>{};
+      for (final rawLine in lines) {
+        if (rawLine is! Map) continue;
+        final item = Map<String, dynamic>.from(rawLine);
+        final lk = lineKey(item);
+        if (!seenLines.add(lk)) continue;
+        final id = (item['product_id'] ?? item['id'] ?? item['barcode'] ?? '').toString().trim();
+        final rawName = (item['product_name'] ?? item['product'] ?? item['item'] ?? item['description'] ?? 'Unknown').toString();
+        final key = id.isNotEmpty && id != '0' ? id : FormatHelper.normalizeName(rawName);
+        final name = formatProductName(rawName);
+        if (key.isEmpty || name == 'Unknown') continue;
+        final q = _toDouble(item['quantity'] ?? item['qty']);
+        final value = _toDouble(item['line_total'] ?? item['total_with_tax'] ?? item['total']) > 0
+            ? _toDouble(item['line_total'] ?? item['total_with_tax'] ?? item['total'])
+            : _toDouble(item['unit_price'] ?? item['price']) * q;
+        productKeys.add(key);
+        if (includeFiltered) filteredProductKeys.add(key);
+        final data = productAnalyticsCache.putIfAbsent(key, () => {
+          'total': 0.0,
+          'count': 0,
+          'quantity': 0.0,
+          'name': name,
+          'display_name': name,
+        });
+        if (includeFiltered) {
+          data['total'] = (data['total'] as double) + value;
+          data['count'] = (data['count'] as int) + 1;
+          data['quantity'] = (data['quantity'] as double) + q;
+        }
+      }
+    }
+    for (final t in sortedTransactions) {
+      addProductAnalytics(t, filtered.contains(t));
+    }
+    uniqueProducts = productKeys.length;
+    filteredUniqueProducts = filteredProductKeys.length;
+    if (filteredTotalSales > 0) {
+      productAnalyticsCache.forEach((key, data) {
+        data['percentage'] = ((data['total'] as double) / filteredTotalSales) * 100;
+      });
+    }
+
+    todayTopProduct = todayProductRevenue.isEmpty
+        ? ''
+        : todayProductRevenue.entries.reduce((a, b) => a.value >= b.value ? a : b).key;
+    yesterdayTopProduct = yesterdayProductRevenue.isEmpty
+        ? ''
+        : yesterdayProductRevenue.entries.reduce((a, b) => a.value >= b.value ? a : b).key;
+    todayBestHourLabel = _findBestHour(todayHourRevenue);
+    yesterdayBestHourLabel = _findBestHour(yesterdayHourRevenue);
+
+    recentSales = List<Map<String, dynamic>>.from(filtered)
       ..sort((a, b) => getLocalDate(b).compareTo(getLocalDate(a)));
-    recentSales = sortedForRecent.take(5).toList();
+    recentSales = recentSales.take(5).toList();
 
-    // Growth calculation
-    if (filteredSalesCache.length < 2) {
+    if (filtered.isEmpty) {
       filteredGrowthPercentage = 0.0;
     } else {
       _calculateGrowth(timeFilter);
     }
-
-    // Product specific analytics for the filtered period
-    productAnalyticsCache = {};
-    for (final s in filteredSalesCache) {
-      final String b = (s['product_id'] ?? s['barcode'] ?? '').toString().trim();
-      final String rawName = s['product_name']?.toString() ?? s['product']?.toString() ?? s['item']?.toString() ?? 'Unknown';
-      
-      // 🚀 PRODUCTION FIX: Use Normalized Key from FormatHelper
-      final String nameKey = FormatHelper.normalizeName(rawName);
-      final String displayName = formatProductName(rawName);
-      
-      // We use the ID if available and not '0', otherwise the normalized name key
-      final String key = (b.isNotEmpty && b != '0') ? b : nameKey;
-      
-      productAnalyticsCache.putIfAbsent(key, () => {
-        'total': 0.0, 
-        'count': 0, 
-        'quantity': 0.0,
-        'name': displayName,
-        'display_name': displayName // Store formatted name for UI
-      });
-      
-      final v = _toDouble(s['recognized_revenue'] ?? s['total_amount'] ?? s['total']);
-      final q = _toDouble(s['qty'] ?? s['quantity']);
-      productAnalyticsCache[key]!['total'] = (productAnalyticsCache[key]!['total'] as double) + v;
-      productAnalyticsCache[key]!['count'] = (productAnalyticsCache[key]!['count'] as int) + 1;
-      productAnalyticsCache[key]!['quantity'] = (productAnalyticsCache[key]!['quantity'] as double) + q;
-    }
-
-    // 🚀 FIX: Calculate percentages for Pie Chart visualization
-    if (filteredTotalSales > 0) {
-      productAnalyticsCache.forEach((key, data) {
-        final total = data['total'] as double;
-        data['percentage'] = (total / filteredTotalSales) * 100;
-      });
-    }
+    growthPercentage = filteredGrowthPercentage;
 
     if (kDebugMode) {
-      debugPrint('📊 Analytics Calculation Complete:');
-      debugPrint('  - Today Revenue: ₹$todayRevenue');
-      debugPrint('  - Today Transactions: $todayTransactionsCount');
-      debugPrint('  - Yesterday Revenue: ₹$yesterdayRevenue');
-      debugPrint('  - Total Sales: ₹$totalSales');
-      debugPrint('  - Filtered Sales: ₹$filteredTotalSales');
-      debugPrint('  - Today Top Product: $todayTopProduct');
+      debugPrint('📊 Canonical analytics: ${sortedTransactions.length} transactions, gross sales ₹$totalSales');
     }
   }
 

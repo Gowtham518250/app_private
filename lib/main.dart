@@ -535,6 +535,9 @@ void main() async {
     try {
       // 1. Move the heavy DB purging here so it doesn't block the UI thread
       await LocalStorageService.validateAndMigrateSchema();
+      // Recover any sale/local transaction that was interrupted by a crash or
+      // force-close before the normal background sync services start.
+      await CrashRecoveryService.instance.initialize();
       await LocalStorageService.purgeLegacyUnscopedHiveBoxes();
       final startupUserId = appPrefs.getInt('user_id') ?? appPrefs.getInt('userId') ?? 0;
       if (startupUserId > 0) {

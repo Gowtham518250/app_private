@@ -1312,19 +1312,9 @@ class _DashboardPageState extends State<DashboardPage>
       final List<dynamic> allItems = [];
       
       // 1. Fetch sales from /auth/sales
-      try {
-        final salesRes = await ApiClient.getJson(
-          '/auth/sales',
-          headers: {'Authorization': 'Bearer $token'},
-        );
-        if (salesRes.statusCode == 200) {
-          final salesData = json.decode(salesRes.body);
-          if (salesData is List) allItems.addAll(salesData);
-        }
-      } catch (e) {
-        if (kDebugMode) debugPrint('Failed to fetch sales: $e');
-      }
-      
+      // Canonical cloud source: invoices. The legacy /auth/sales line-item feed
+      // is intentionally not merged here because it can represent the same bill
+      // a second time and corrupt dashboard totals/customer history.
       // 2. Fetch invoices from /api/invoices
       try {
         final invoicesRes = await ApiClient.getJson(
@@ -2731,10 +2721,9 @@ class _DashboardPageState extends State<DashboardPage>
     if (!mounted) return;
 
     try {
-      // Always merge latest sales from backend (multi-device sync)
-      final mergedFromBackend = await _fetchInvoicesFromBackend();
-
-      // Load local sales (merged with backend above)
+      // OFFLINE-FIRST: local storage is the immediate source of truth.
+      // Never block the dashboard on the network. A background reconciliation
+      // runs after the local dashboard has rendered.
       final List<dynamic> history = await LocalStorageService.loadSales();
       // #region agent log
       AgentDebugLog.log(
@@ -2743,8 +2732,7 @@ class _DashboardPageState extends State<DashboardPage>
         hypothesisId: 'H4',
         data: {
           'localCacheCount': history.length,
-          'mergedFromBackend': mergedFromBackend,
-          'willFetchBackend': true,
+          'willFetchBackendInBackground': true,
         },
       );
       // #endregion
@@ -2795,6 +2783,28 @@ class _DashboardPageState extends State<DashboardPage>
           }
         });
         _recomputeDailyHealthScore();
+
+        // Background-only cloud reconciliation. It must never block the cashier UI.
+        unawaited(() async {
+          try {
+            final changed = await _fetchInvoicesFromBackend();
+            if (changed && mounted) {
+              final refreshed = await LocalStorageService.loadSales();
+              if (!mounted) return;
+              setState(() {
+                sales = _flattenLocalSales(refreshed);
+                _cachedTodaySales = null;
+                _cachedTodayOrders = null;
+                _cachedTodayOnlineOrders = null;
+                _lastMetricsCacheDate = null;
+                _recalculateAnalytics();
+              });
+            }
+          } catch (e) {
+            if (kDebugMode) debugPrint('⚠️ Background dashboard reconciliation failed: $e');
+          }
+        }());
+
         // Schedule daily 9PM summary notification
         unawaited(
           DailySummaryNotificationService.scheduleTodayNotification(

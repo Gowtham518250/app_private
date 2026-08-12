@@ -13,6 +13,15 @@ import 'package:connectivity_plus/connectivity_plus.dart';
 import 'comprehensive_logger.dart';
 
 class ApiClient {
+  static dynamic _safeDecodeForLog(String body) {
+    if (body.isEmpty) return null;
+    try {
+      return jsonDecode(body);
+    } catch (_) {
+      return {'_raw_body': body.length > 2000 ? body.substring(0, 2000) : body};
+    }
+  }
+
   // FIX-1: Session expiry stream for 401 auto-refresh handling
   static StreamController<bool> _sessionExpiredController = StreamController<bool>.broadcast();
   static Stream<bool> get onSessionExpired => _sessionExpiredController.stream;
@@ -630,7 +639,7 @@ class ApiClient {
                 url: '$_lastSuccessfulBase$currentPath',
                 statusCode: resp.statusCode,
                 headers: resp.headers,
-                body: resp.body.isNotEmpty ? jsonDecode(resp.body) : null,
+                body: _safeDecodeForLog(resp.body),
                 duration: duration,
               );
               
@@ -689,7 +698,7 @@ class ApiClient {
               url: '$base$currentPath',
               statusCode: resp.statusCode,
               headers: resp.headers,
-              body: resp.body.isNotEmpty ? jsonDecode(resp.body) : null,
+              body: _safeDecodeForLog(resp.body),
               duration: duration,
             );
             
@@ -1255,7 +1264,7 @@ class ApiClient {
             url: '$_lastSuccessfulBase$path',
             statusCode: resp.statusCode,
             headers: resp.headers,
-            body: resp.body.isNotEmpty ? jsonDecode(resp.body) : null,
+            body: _safeDecodeForLog(resp.body),
             duration: duration,
           );
           
@@ -1296,7 +1305,7 @@ class ApiClient {
           url: '$base$path',
           statusCode: resp.statusCode,
           headers: resp.headers,
-          body: resp.body.isNotEmpty ? jsonDecode(resp.body) : null,
+          body: _safeDecodeForLog(resp.body),
           duration: duration,
         );
         

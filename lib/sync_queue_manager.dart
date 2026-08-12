@@ -161,13 +161,13 @@ class SyncQueueManager {
   }
 
   /// Add item to sync queue with data validation
-  static Future<void> enqueue(String action, Map<String, dynamic> data) async {
-    await _queueLock.synchronized(() async {
+  static Future<bool> enqueue(String action, Map<String, dynamic> data) async {
+    return await _queueLock.synchronized(() async {
       try {
         // 🔒 DATA VALIDATION: Validate data before queuing
         if (!_validateQueueData(action, data)) {
           if (kDebugMode) debugPrint('⚠️ Invalid queue data for action: $action');
-          return;
+          return false;
         }
 
         final box = await _getBox();
@@ -176,7 +176,7 @@ class SyncQueueManager {
         if (box.length >= 5000) {
           if (kDebugMode) debugPrint('📦 [SyncQueue] Queue limit reached (5000). Rejecting new item to prevent silent data loss.');
           if (box.isNotEmpty) {
-            return;
+            return false;
           }
         }
 
@@ -216,7 +216,7 @@ class SyncQueueManager {
             }
             if (existing != null) {
               if (kDebugMode) debugPrint('📦 [SyncQueue] Sale $identifier already in queue - skipping duplicate');
-              return;
+              return false;
             }
           }
         }
@@ -224,18 +224,42 @@ class SyncQueueManager {
         // Generate unique Action ID
         final String actionId = sha256.convert(utf8.encode('$action${json.encode(data)}${DateTime.now().microsecondsSinceEpoch}')).toString().substring(0, 16);
 
+        final now = DateTime.now();
         final item = {
           'action_id': actionId,
           'action': action,
           'data': data,
-          'timestamp': DateTime.now().millisecondsSinceEpoch,
+          'timestamp': now.millisecondsSinceEpoch,
+          'created_at': now.toIso8601String(),
+          'updated_at': now.toIso8601String(),
+          'status': 'PENDING',
           'retries': 0,
+          'last_attempt': null,
+          'next_attempt_at': now.toIso8601String(),
+          'last_error': null,
         };
 
         await box.put(actionId, item);
         if (kDebugMode) debugPrint('📦 [SyncQueue] Queued: $action ($actionId)');
-      } catch (e) {
-        if (kDebugMode) debugPrint('❌ [SyncQueue] Enqueue Error: $e');
+        return true;
+      } catch (e, st) {
+        if (kDebugMode) {
+          debugPrint('❌ [SyncQueue] Enqueue Error: $e');
+          debugPrint(st.toString());
+        }
+        return false;
+      }
+    });
+  }
+
+
+  static Future<bool> containsAction(String actionId) async {
+    return await _queueLock.synchronized(() async {
+      try {
+        final box = await _getBox();
+        return box.containsKey(actionId);
+      } catch (_) {
+        return false;
       }
     });
   }
@@ -265,10 +289,46 @@ class SyncQueueManager {
   }
 
   /// Update item (e.g. increment retries)
-  static Future<void> update(String actionId, Map<String, dynamic> item) async {
-    await _queueLock.synchronized(() async {
-      final box = await _getBox();
-      await box.put(actionId, item);
+  static Future<bool> update(String actionId, Map<String, dynamic> item) async {
+    return await _queueLock.synchronized(() async {
+      try {
+        final box = await _getBox();
+        final updated = Map<String, dynamic>.from(item);
+        updated['updated_at'] = DateTime.now().toIso8601String();
+        await box.put(actionId, updated);
+        return true;
+      } catch (e) {
+        if (kDebugMode) debugPrint('❌ [SyncQueue] Update failed for $actionId: $e');
+        return false;
+      }
+    });
+  }
+
+  /// Check whether an operation with the same business identifier is already queued.
+  static Future<bool> containsBusinessOperation(String action, String identifier) async {
+    if (action.isEmpty || identifier.trim().isEmpty) return false;
+    return await _queueLock.synchronized(() async {
+      try {
+        final box = await _getBox();
+        final wanted = identifier.trim().toLowerCase();
+        for (final raw in box.values) {
+          if (raw is! Map) continue;
+          if (raw['action']?.toString() != action) continue;
+          final data = raw['data'];
+          if (data is! Map) continue;
+          final candidates = <String?>[
+            data['sale_id']?.toString(),
+            data['operation_id']?.toString(),
+            data['idempotency_key']?.toString(),
+          ];
+          if (candidates.any((v) => v != null && v.trim().toLowerCase() == wanted)) {
+            return true;
+          }
+        }
+      } catch (e) {
+        if (kDebugMode) debugPrint('⚠️ containsBusinessOperation failed: $e');
+      }
+      return false;
     });
   }
 

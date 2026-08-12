@@ -80,6 +80,8 @@ class SaleService {
 
 _pendingSales.add(saleId);
 
+bool durableLocalCommitComplete = false;
+
 AgentDebugLog.log(
   location: 'sale_service.dart:submitSale:entry',
   message: 'SALE CREATION START',
@@ -204,13 +206,13 @@ try {
     if (kDebugMode) debugPrint('⚠️ Failed to register incomplete-transaction safety net: $e');
   }
 
-  bool backendSuccess = false;
-
   // OFFLINE-FIRST: persist the sale and enqueue it BEFORE attempting any network call.
   // This guarantees that a sale survives app close/background/crash/network loss.
   final invoicePayload = {
     'invoice_number': saleId,
     'offline_id': offlineId,
+    'operation_id': 'SALE_OP_$saleId',
+    'idempotency_key': saleId,
     'customer_name': customerName.isNotEmpty ? customerName : 'Cash Customer',
     'customer_phone': customerPhone.isNotEmpty ? customerPhone : null,
     'total_amount': grandTotal,
@@ -237,106 +239,55 @@ try {
     syncStatus: 'pending',
   );
 
-  await SyncQueueManager.enqueue('save_sale', {
-    'is_borrow': isBorrow,
-    'endpoint': ApiClient.invoicesSync,
-    'payload': invoicePayload,
-    'invoice_payload': invoicePayload,
-    'sale_id': saleId,
-    'retry_priority': 'high',
-  });
+  // DURABLE OUTBOX: persist the sale before touching the local stock cache.
+  // The cashier path must not depend on the backend/network at all.
+  bool queued = false;
+  Object? queueError;
+  for (int attempt = 1; attempt <= 3 && !queued; attempt++) {
+    try {
+      queued = await SyncQueueManager.enqueue('save_sale', {
+        'is_borrow': isBorrow,
+        'endpoint': ApiClient.invoicesSync,
+        'payload': invoicePayload,
+        'invoice_payload': invoicePayload,
+        'sale_id': saleId,
+        'retry_priority': 'high',
+      });
+    } catch (e) {
+      queueError = e;
+      queued = false;
+    }
+    if (!queued && attempt < 3) {
+      await Future<void>.delayed(Duration(milliseconds: 100 * attempt));
+    }
+  }
+
+  if (!queued) {
+    throw StateError(
+      'DURABLE_OUTBOX_PERSISTENCE_FAILED: sale=$saleId; error=$queueError',
+    );
+  }
 
   // Local inventory is updated once. Backend inventory is updated only by /invoices/sync.
   await InventoryManagementService.deductStockLocally(items, saleId: saleId);
+  durableLocalCommitComplete = true;
   SyncService.triggerDashboardRefresh();
 
-  try {
-    final token = await SecureTokenStorage.getToken() ?? '';
-
-    AgentDebugLog.log(
-      location: 'sale_service.dart:submitSale:pre_post',
-      message: 'SALE SYNC START',
-      hypothesisId: 'H7',
-      data: {
-        'primaryEndpoint': ApiClient.salesEndpoint,
-        'tokenPresent': token.isNotEmpty,
-        'invoiceNumber': saleId,
-        'lineItemCount': lineItems.length,
-      },
-    );
-
-    final response = await ApiClient.postJson(ApiClient.invoicesSync, invoicePayload, headers: {
-      if (token.isNotEmpty) 'Authorization': 'Bearer $token',
-    }).timeout(const Duration(seconds: 15));
-
-    AgentDebugLog.log(
-      location: 'sale_service.dart:submitSale:invoice_response',
-      message: 'INVOICE API RESPONSE',
-      hypothesisId: 'H2',
-      data: {
-        'statusCode': response.statusCode,
-        'bodyPreview': response.body.length > 500 ? response.body.substring(0, 500) : response.body,
-        'saleId': saleId,
-      },
-    );
-
-    if (response.statusCode == 200 || response.statusCode == 201) {
-      backendSuccess = true;
-      await _markSaleAsSynced(saleId);
-    } else {
-      if (kDebugMode) debugPrint('⚠️ Sale queued locally; backend returned ${response.statusCode}.');
-    }
-  } catch (e, st) {
-    if (kDebugMode) debugPrint('⚠️ Sale stored locally and queued; backend sync deferred: $e');
-    AgentDebugLog.log(
-      location: 'sale_service.dart:submitSale:post_error',
-      message: 'POST FAILED - QUEUED',
-      hypothesisId: 'H2',
-      data: {
-        'error': e.toString(),
-        'stackPreview': st.toString().split('\n').take(5).join(' | '),
-        'saleId': saleId,
-      },
-    );
-  } finally {
-    _pendingSales.remove(saleId);
-    InventoryManagementService.suppressInventoryCallback = false;
-  }
-
-  // Kick the durable queue after the foreground attempt. The queue is the source of truth.
+  // Kick the durable queue asynchronously. The UI does not wait for the network.
   unawaited(SyncService.processQueueSafe());
 
-  if (backendSuccess) {
-    await _persistToLocalHistory(
-      prefs: prefs,
-      saleId: saleId,
-      customerName: customerName,
-      customerPhone: customerPhone,
-      items: lineItems,
-      grandTotal: grandTotal,
-      paidAmount: paidAmount,
-      withTax: withTax,
-      totals: totals,
-      paymentMethod: paymentMethod,
-      syncStatus: 'synced',
-    );
-    await RetailGrowthKit.recordBillCompleted();
-    SyncService.triggerDashboardRefresh();
-    unawaited(SyncService.downloadUserDataSafe());
-  } else {
-    await RetailGrowthKit.recordBillCompleted();
-  }
+  await RetailGrowthKit.recordBillCompleted();
 
   AgentDebugLog.log(
     location: 'sale_service.dart:submitSale:final_result',
     message: 'FINAL RESULT',
     hypothesisId: 'H5',
     data: {
-      'saleUploadedToBackend': backendSuccess,
-      'backendSuccess': backendSuccess,
+      'saleUploadedToBackend': false,
+      'backendSuccess': false,
       'success': true,
       'saleId': saleId,
-      'syncStatus': backendSuccess ? 'synced' : 'pending',
+      'syncStatus': 'pending',
     },
   );
 
@@ -344,7 +295,7 @@ try {
     'success': true,
     'syncCount': items.length,
     'saleId': saleId,
-    'syncStatus': backendSuccess ? 'synced' : 'pending',
+    'syncStatus': 'pending',
   };
 
 } catch (e, st) {
@@ -364,7 +315,9 @@ try {
 } finally {
   _pendingSales.remove(saleId);
   try {
-    await CrashRecoveryService.instance.clearSpecificTransaction('sale', {'sale_id': saleId});
+    if (durableLocalCommitComplete) {
+      await CrashRecoveryService.instance.clearSpecificTransaction('sale', {'sale_id': saleId});
+    }
   } catch (e) {
     if (kDebugMode) debugPrint('⚠️ Failed to clear incomplete-transaction safety net: $e');
   }
@@ -374,10 +327,11 @@ try {
 
 }
 
-  static Future<void> _markSaleAsSynced(String saleId) async {
+  static Future<bool> _markSaleAsSynced(String saleId) async {
+    if (saleId.isEmpty) return false;
     try {
       final prefs = await SharedPreferences.getInstance();
-      final syncedSales = prefs.getStringList('synced_sales') ?? [];
+      final syncedSales = prefs.getStringList('synced_sales') ?? <String>[];
       if (!syncedSales.contains(saleId)) {
         syncedSales.add(saleId);
         if (syncedSales.length > 1000) {
@@ -386,26 +340,37 @@ try {
         await prefs.setStringList('synced_sales', syncedSales);
       }
 
-  final sales = await LocalStorageService.loadSales();
-  bool updated = false;
-  for (int i = 0; i < sales.length; i++) {
-    if (sales[i]['sale_id'] == saleId) {
-      sales[i] = {
-        ...sales[i],
-        'sync_status': 'synced',
-        'updated_at': DateTime.now().toUtc().toIso8601String(),
-        'last_sync_attempt': DateTime.now().toUtc().toIso8601String(),
-      };
-      updated = true;
-      break;
+      final sales = await LocalStorageService.loadSales();
+      bool updated = false;
+      for (int i = 0; i < sales.length; i++) {
+        final sale = sales[i];
+        if (sale is! Map) continue;
+        if ((sale['sale_id'] ?? sale['invoice_number'] ?? '').toString() != saleId) {
+          continue;
+        }
+        sales[i] = {
+          ...Map<String, dynamic>.from(sale),
+          'sync_status': 'synced',
+          'pending_sync': false,
+          'updated_at': DateTime.now().toUtc().toIso8601String(),
+          'last_sync_attempt': DateTime.now().toUtc().toIso8601String(),
+        };
+        updated = true;
+        break;
+      }
+
+      if (updated) {
+        await LocalStorageService.saveSales(sales);
+      }
+
+      return true;
+    } catch (e, st) {
+      if (kDebugMode) {
+        debugPrint('⚠️ Failed to mark sale as synced: $e');
+        debugPrint(st.toString());
+      }
+      return false;
     }
-  }
-  if (updated) {
-    await LocalStorageService.saveSales(sales);
-  }
-  } catch (e) {
-    if (kDebugMode) debugPrint('⚠️ Failed to mark sale as synced: $e');
-  }
   }
 
   static Future<bool> _isSaleSynced(String saleId) async {
@@ -418,9 +383,9 @@ try {
     }
   }
 
-  static Future<void> markSaleAsSynced(String saleId) async {
-    if (saleId.isEmpty) return;
-    await _markSaleAsSynced(saleId);
+  static Future<bool> markSaleAsSynced(String saleId) async {
+    if (saleId.isEmpty) return false;
+    return await _markSaleAsSynced(saleId);
   }
 
   static void triggerBackgroundAlert(Map<String, dynamic> item) {

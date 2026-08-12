@@ -7,6 +7,7 @@ import 'package:flutter_background_service/flutter_background_service.dart';
 import 'package:flutter_background_service_android/flutter_background_service_android.dart';
 import 'package:flutter_background_service_ios/flutter_background_service_ios.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:flutter_accessibility_service/flutter_accessibility_service.dart';
 import 'payment_announcement_service.dart';
 import 'payment_detection_service.dart';
 
@@ -45,6 +46,18 @@ Future<bool> onStart(ServiceInstance service) async {
     };
 
     await pds.start();
+
+    try {
+      final accessibilityEnabled =
+          await FlutterAccessibilityService.isAccessibilityPermissionEnabled();
+      debugPrint(
+        accessibilityEnabled
+            ? '✅ Accessibility service permission is enabled'
+            : '⚠️ Accessibility service permission is NOT enabled',
+      );
+    } catch (e) {
+      debugPrint('⚠️ Accessibility status check failed: $e');
+    }
     debugPrint('✅ Background payment services initialized');
   } catch (e) {
     debugPrint('⚠️ Background service init error: $e');

@@ -107,75 +107,15 @@ class _KhataPageState extends State<KhataPage> with SingleTickerProviderStateMix
     setState(() => _invoicesLoading = true);
 
     try {
-      final rawInvoices = await LocalStorageService.loadLocalInvoices();
-
-      // 🔧 FIX: loadLocalInvoices() only ever contains borrow/credit sales —
-      // submitAllSales() only writes a local invoice mirror inside its
-      // `if (isBorrow)` branch. Regular cash/online sales never produce a
-      // record here, so a shop doing mostly cash sales always saw invoiced
-      // totals of 0 even though they had plenty of real sales/bills. Pull
-      // in regular sales too, shaped like an invoice, and dedupe against
-      // real invoices by id so a borrow sale's existing invoice mirror
-      // isn't double-counted against its own underlying sale record.
-      final rawSales = await LocalStorageService.loadSales();
-      final Set<String> invoiceIds = rawInvoices
-          .map((e) => (e is Map
-                  ? (e['invoice_number'] ?? e['sale_id'] ?? e['id'])
-                  : null)
-              ?.toString())
-          .whereType<String>()
-          .toSet();
-      final salesAsInvoices = rawSales.where((s) {
-        if (s is! Map) return false;
-        final id = (s['sale_id'] ?? s['invoice_number'] ?? s['_bill_id'])?.toString();
-        return id != null && !invoiceIds.contains(id);
-      }).map((s) {
-        final sale = Map<String, dynamic>.from(s as Map);
-        final total = sale['total'] ?? sale['total_amount'] ?? sale['grand_total'];
-        final status = (sale['payment_status']?.toString().toUpperCase()) ??
-            ((sale['paid_amount'] ?? total) == total ? 'PAID' : 'PARTIAL');
-        return {
-          ...sale,
-          'invoice_number': sale['sale_id'] ?? sale['invoice_number'],
-          'total_amount': total,
-          'paid_amount': sale['paid_amount'] ?? total, // cash sales are paid in full unless flagged otherwise
-          'payment_status': status,
-        };
-      });
-
-      final raw = [...rawInvoices, ...salesAsInvoices];
-      double parseAmount(dynamic value) {
-        if (value is num) return value.toDouble();
-        return double.tryParse(value?.toString() ?? '') ?? 0.0;
-      }
+      final raw = await LocalStorageService.loadLocalInvoices();
       final invoices = raw
-          .map((e) {
-            final invoice = Map<String, dynamic>.from(e as Map);
-            final rawName = invoice['customer_name'] ?? invoice['name'] ?? invoice['customer'] ?? '';
-            final customerName = rawName.toString().trim();
-            final phone = (invoice['customer_phone'] ?? invoice['phone'] ?? invoice['mobile'] ?? invoice['contact'] ?? '').toString().trim();
-            final total = parseAmount(invoice['total_amount'] ?? invoice['total'] ?? invoice['amount'] ?? invoice['invoice_total'] ?? invoice['grand_total']);
-            final paid = parseAmount(invoice['paid_amount'] ?? invoice['amount_paid'] ?? invoice['paid'] ?? invoice['received_amount']);
-            final businessDate = invoice['business_date'] ?? invoice['invoice_date'] ?? invoice['sale_date'] ?? invoice['date'] ?? invoice['created_at'];
-            final invoiceNumber = invoice['invoice_number'] ?? invoice['number'] ?? invoice['sale_id'] ?? invoice['id'] ?? phone;
-            final status = (invoice['payment_status'] ?? invoice['status'] ?? _deriveStatus(total, paid)).toString().toUpperCase();
-            return {
-              ...invoice,
-              'invoice_number': invoiceNumber,
-              'customer_name': customerName.isNotEmpty ? customerName : (phone.isNotEmpty ? 'Guest Customer' : ''),
-              'customer_phone': phone,
-              'business_date': businessDate,
-              'total_amount': total,
-              'paid_amount': paid,
-              'payment_status': status,
-            };
-          })
+          .map((e) => Map<String, dynamic>.from(e as Map))
           .toList();
 
       // Sort newest first for the list view
       invoices.sort((a, b) {
-        final da = DateTime.tryParse(a['business_date']?.toString() ?? '') ?? DateTime(1970);
-        final db = DateTime.tryParse(b['business_date']?.toString() ?? '') ?? DateTime(1970);
+        final da = DateTime.tryParse(a['invoice_date']?.toString() ?? a['created_at']?.toString() ?? '') ?? DateTime(2000);
+        final db = DateTime.tryParse(b['invoice_date']?.toString() ?? b['created_at']?.toString() ?? '') ?? DateTime(2000);
         return db.compareTo(da);
       });
 
@@ -211,10 +151,9 @@ class _KhataPageState extends State<KhataPage> with SingleTickerProviderStateMix
         // Uncleared amount for this invoice (0 if fully paid)
         final outstanding = (total - paidAmt).clamp(0, double.infinity);
         if (outstanding > 0.01) {
-final name = inv['customer_name']?.toString().trim() ?? '';
-        final phone = inv['customer_phone']?.toString().trim() ?? '';
-        if (name.isEmpty && phone.isEmpty) continue;
-        final displayName = name.isNotEmpty ? name : 'Guest Customer';
+          final name = inv['customer_name']?.toString().trim();
+          final phone = inv['customer_phone']?.toString().trim() ?? '';
+          final displayName = (name == null || name.isEmpty) ? 'Guest Customer' : name;
           // Key by phone when available so the same person's invoices merge together
           final key = phone.isNotEmpty ? phone : displayName;
 
@@ -290,7 +229,7 @@ final name = inv['customer_name']?.toString().trim() ?? '';
         double.tryParse(inv['total_amount']?.toString() ?? inv['total']?.toString() ?? '0') ??
         0.0;
     DateTime dateOf(Map<String, dynamic> inv) =>
-      DateTime.tryParse(inv['business_date']?.toString() ?? '') ?? DateTime(1970);
+        DateTime.tryParse(inv['invoice_date']?.toString() ?? inv['created_at']?.toString() ?? '') ?? DateTime(2000);
 
     switch (_invoiceSortOption) {
       case 'DATE_ASC':
@@ -342,32 +281,11 @@ final name = inv['customer_name']?.toString().trim() ?? '';
           _pendingCount = (sumData['pending_customers_count'] as num?)?.toInt() ?? 0;
           _overdueCount = (sumData['overdue_customers_count'] as num?)?.toInt() ?? 0;
 
-          final rawList = List<Map<String, dynamic>>.from(
-            listData['customers'] ?? listData['pending_customers'] ?? listData['data'] ?? const [],
-          );
-          _customers = rawList.map((customer) {
-            final balanceValue = customer['balance'] ??
-                customer['total_balance'] ??
-                customer['pending_amount'] ??
-                customer['outstanding'] ??
-                customer['total_outstanding'] ??
-                0;
-            final balance = balanceValue is num
-                ? balanceValue.toDouble()
-                : double.tryParse(balanceValue.toString()) ?? 0.0;
-            final rawName = customer['customer_name'] ?? customer['name'] ?? customer['customer'] ?? '';
-            final name = rawName.toString().trim().isNotEmpty ? rawName.toString().trim() : 'Customer';
-            final phone = (customer['customer_phone'] ?? customer['phone'] ?? customer['mobile'] ?? '').toString().trim();
-            return {
-              ...customer,
-              'customer_id': customer['customer_id'] ?? customer['id'] ?? phone,
-              'customer_name': name,
-              'customer_phone': phone,
-              'total_balance': balance,
-              'overdue_amount': customer['overdue_amount'] ?? customer['overdue'] ?? 0.0,
-              'invoices': customer['invoices'] ?? customer['invoice_history'] ?? const [],
-            };
-          }).where((customer) => (customer['total_balance'] as double) > 0.01).toList();
+          final rawList = List<Map<String, dynamic>>.from(listData['customers'] ?? []);
+          _customers = rawList.where((c) {
+            double bal = (c['balance'] as num?)?.toDouble() ?? 0.0;
+            return bal > 0;
+          }).toList();
           
           if (kDebugMode) debugPrint('✅ Backend khata data loaded successfully');
         } else {
@@ -397,7 +315,6 @@ final name = inv['customer_name']?.toString().trim() ?? '';
 
     if (kDebugMode) debugPrint('📦 Loading ${unified.length} customers from local storage');
 
-    final today = DateTime.now();
     for (var c in unified) {
       // FIX: loadUnifiedCustomersLedger() returns 'unified_balance' and
       // 'history', not 'balance' and 'invoices'. Reading the wrong keys
@@ -407,36 +324,17 @@ final name = inv['customer_name']?.toString().trim() ?? '';
       // (exactly the offline-first case), this was the only data source.
       double bal = (c['unified_balance'] as num?)?.toDouble() ?? 0.0;
       if (bal > 0.01) {
-        final dueDateRaw = c['due_date']?.toString();
-        DateTime? dueDate;
-        if (dueDateRaw != null && dueDateRaw.isNotEmpty) {
-          dueDate = DateTime.tryParse(dueDateRaw);
-        }
-
-        bool overdue = false;
-        int daysOverdue = 0;
-        if (dueDate != null) {
-          final dueDateOnly = DateTime(dueDate.year, dueDate.month, dueDate.day);
-          final diff = today.difference(dueDateOnly).inDays;
-          overdue = diff > 0;
-          daysOverdue = overdue ? diff : 0;
-        }
-
         _totalOutstanding += bal;
-        if (overdue) {
-          _totalOverdue += bal;
-          _overdueCount++;
-        }
         _pendingCount++;
         _customers.add({
-          'customer_id': c['phone'],
+          'customer_id': _positiveCustomerId(c['customer_id']),
           'customer_name': c['name'] ?? 'Customer',
           'customer_phone': c['phone'] ?? '',
           'total_balance': bal,
-          'overdue_amount': overdue ? bal : 0.0,
-          'is_overdue': overdue,
-          'days_overdue': daysOverdue,
-          'earliest_due_date': dueDateRaw,
+          'overdue_amount': bal,
+          'is_overdue': false,
+          'days_overdue': 0,
+          'earliest_due_date': c['due_date'],
           'invoices': c['history'] ?? []
         });
       }
@@ -524,6 +422,18 @@ final name = inv['customer_name']?.toString().trim() ?? '';
       await _sendWhatsAppReminder(c);
       await Future.delayed(const Duration(milliseconds: 600));
     }
+  }
+
+  int? _positiveCustomerId(dynamic raw) {
+    if (raw is int && raw > 0) return raw;
+    if (raw is num && raw.toInt() > 0) return raw.toInt();
+    final parsed = int.tryParse(raw?.toString().trim() ?? '');
+    return (parsed != null && parsed > 0) ? parsed : null;
+  }
+
+  String _paymentIdempotencyKey(String phone, double amount) {
+    final normalizedPhone = phone.trim();
+    return 'KHATA_${normalizedPhone.isNotEmpty ? normalizedPhone : 'CUSTOMER'}_${amount.toStringAsFixed(2)}_${DateTime.now().microsecondsSinceEpoch}';
   }
 
   void _showPaymentModal(Map<String, dynamic> customer) {
@@ -662,44 +572,44 @@ final name = inv['customer_name']?.toString().trim() ?? '';
 
                               setModalState(() => isSubmitting = true);
 
-                              final paymentPayload = {
-                                'customer_phone': customer['customer_phone'],
-                                'customer_id': customer['customer_id'],
+                              final customerPhone =
+                                  (customer['customer_phone'] ?? customer['phone'] ?? '')
+                                      .toString()
+                                      .trim();
+                              final customerId = _positiveCustomerId(customer['customer_id']);
+
+                              // OFFLINE-FIRST: never send an invalid phone/string value
+                              // as customer_id. The backend can resolve the customer by
+                              // phone when a numeric backend id is not available locally.
+                              final paymentPayload = <String, dynamic>{
+                                if (customerId != null) 'customer_id': customerId,
+                                if (customerPhone.isNotEmpty) 'customer_phone': customerPhone,
                                 'amount': amt,
                                 'payment_method': selectedMethod,
                                 'notes': notesController.text.trim(),
-                                'idempotency_key': '${customer['customer_id'] ?? customer['customer_phone']}_${amt}_${DateTime.now().millisecondsSinceEpoch}',
+                                'payment_date': DateTime.now().toIso8601String(),
+                                'idempotency_key': _paymentIdempotencyKey(customerPhone, amt),
                               };
 
-                              try {
-                                final resp = await ApiClient.postJson(
-                                  '/api/khata/record-payment',
-                                  paymentPayload,
-                                ).timeout(const Duration(seconds: 15));
+                              if (customerPhone.isEmpty && customerId == null) {
+                                _showToast('Customer identity is missing. Payment was not recorded.');
+                                setModalState(() => isSubmitting = false);
+                                return;
+                              }
 
-                                if (resp.statusCode == 200) {
-                                  if (ctx.mounted) Navigator.pop(ctx);
-                                  _showToast('✅ Payment of ₹$amt recorded successfully!');
-                                  _loadKhata();
-                                } else {
-                                  final errData = json.decode(resp.body);
-                                  _showToast('Payment record failed: ${errData['detail']}');
-                                }
-                              } catch (e) {
-                                // 🔧 FIX (data loss): this used to just show
-                                // an error toast and discard the payment —
-                                // no offline queue, no retry, nothing saved.
-                                // A shopkeeper recording a customer's cash/
-                                // UPI payment while offline (or during any
-                                // network blip) would believe it was saved
-                                // when it was actually gone. Now it's queued
-                                // for automatic retry the same durable way
-                                // sales and purchase orders already are.
+                              try {
+                                // Durable local commit FIRST. Cloud sync is secondary.
+                                await LocalStorageService.recordUnifiedPayment(customerPhone, amt);
                                 await SyncQueueManager.enqueue('record_khata_payment', paymentPayload);
-                                unawaited(SyncService.processQueueSafe());
+
                                 if (ctx.mounted) Navigator.pop(ctx);
-                                _showToast('⚠️ No connection — payment of ₹$amt saved and will sync automatically.');
-                                _loadKhata();
+                                _showToast('✅ Payment of ₹$amt saved locally and queued for sync.');
+                                await _loadKhata();
+                                unawaited(SyncService.processQueueSafe());
+                              } catch (e) {
+                                // IMPORTANT: do not report success unless both the local
+                                // commit and durable outbox enqueue completed.
+                                _showToast('❌ Payment could not be durably saved: $e');
                               } finally {
                                 if (ctx.mounted) setModalState(() => isSubmitting = false);
                               }
@@ -736,11 +646,27 @@ final name = inv['customer_name']?.toString().trim() ?? '';
       if (picked != null) {
         final dateStr = "${picked.year}-${picked.month.toString().padLeft(2, '0')}-${picked.day.toString().padLeft(2, '0')}";
         try {
-          final resp = await ApiClient.postJson('/api/khata/update-deadline', {
-            'customer_phone': customer['customer_phone'],
-            'customer_id': customer['customer_id'],
+          final customerPhone =
+              (customer['customer_phone'] ?? customer['phone'] ?? '')
+                  .toString()
+                  .trim();
+          final customerId = _positiveCustomerId(customer['customer_id']);
+
+          final deadlinePayload = <String, dynamic>{
+            if (customerId != null) 'customer_id': customerId,
+            if (customerPhone.isNotEmpty) 'customer_phone': customerPhone,
             'due_date': dateStr,
-          });
+          };
+
+          if (customerPhone.isEmpty && customerId == null) {
+            _showToast('Customer identity is missing. Deadline was not saved.');
+            return;
+          }
+
+          final resp = await ApiClient.postJson(
+            '/api/khata/update-deadline',
+            deadlinePayload,
+          ).timeout(const Duration(seconds: 15));
 
           if (resp.statusCode == 200) {
             _showToast('⏰ Payment deadline set to $dateStr');
@@ -1552,7 +1478,7 @@ final name = inv['customer_name']?.toString().trim() ?? '';
     final status = (inv['payment_status']?.toString() ?? _deriveStatus(total, paidAmt)).toUpperCase();
     final customerName = inv['customer_name']?.toString() ?? 'Guest Customer';
     final invoiceNumber = inv['invoice_number']?.toString() ?? inv['sale_id']?.toString() ?? '—';
-    final dateStr = inv['business_date']?.toString() ?? '';
+    final dateStr = inv['invoice_date']?.toString() ?? inv['created_at']?.toString() ?? '';
 
     Color statusColor;
     switch (status) {
@@ -1630,7 +1556,7 @@ final name = inv['customer_name']?.toString().trim() ?? '';
     final customerName = inv['customer_name']?.toString() ?? 'Guest Customer';
     final customerPhone = inv['customer_phone']?.toString() ?? '';
     final invoiceNumber = inv['invoice_number']?.toString() ?? inv['sale_id']?.toString() ?? '—';
-    final dateStr = inv['business_date']?.toString() ?? '';
+    final dateStr = inv['invoice_date']?.toString() ?? inv['created_at']?.toString() ?? '';
     final lineItems = List<Map<String, dynamic>>.from(inv['line_items'] ?? inv['items'] ?? []);
 
     Color statusColor;

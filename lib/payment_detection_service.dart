@@ -94,6 +94,8 @@ import 'dart:convert';
 import 'dart:math' as math;
 import 'package:crypto/crypto.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_accessibility_service/accessibility_event.dart';
+import 'package:flutter_accessibility_service/flutter_accessibility_service.dart';
 import 'package:notification_listener_service/notification_listener_service.dart';
 import 'package:notification_listener_service/notification_event.dart';
 import 'package:permission_handler/permission_handler.dart';
@@ -2125,6 +2127,7 @@ class PaymentDetectionService {
   VoiceLanguage _voiceLanguage = VoiceLanguage.english;
 
   StreamSubscription<ServiceNotificationEvent>? _notifSub;
+  StreamSubscription<AccessibilityEvent>? _accessSub;
 
   final Map<String, DateTime> _dedupStore = {};
   bool _dedupDirty = false;
@@ -2546,38 +2549,88 @@ class PaymentDetectionService {
 
   void _startAccessibilityListener() {
     if (!PdsConfig.isAccessibilityEnabled) return;
-    try {
-      _channel.setMethodCallHandler((call) async {
-        if (call.method != 'onPaymentDetected') return;
-        try {
-          final Map    data         = call.arguments as Map;
-          final String text         = (data['text']        as String?) ?? '';
-          final String pkg          = (data['packageName'] as String?) ?? '';
-          final bool   isUserActive = (data['isUserActive'] as bool?)  ?? false;
 
-          // ANTI-05: reject during active user interaction
-          if (isUserActive) {
-            PdsLogger.d('L0', 'ACC rejected: user active');
-            return;
-          }
-          if (_TrustGate.isBlockedPackage(pkg)) return;
-          if (!_accRateLimit.isAllowed(pkg)) {
-            _emitStatus(ChannelType.accessibility, ChannelStatus.rateLimited,
-                detail: pkg);
-            return;
-          }
-          if (!_floodGuard.isAllowed('acc:$pkg')) {
-            _emitStatus(ChannelType.accessibility, ChannelStatus.blocked,
-                detail: pkg);
-            return;
-          }
-          _processText(text, _AppRegistry.identify(pkg),
-              source: 'accessibility');
-        } catch (e, st) { PdsLogger.e('L3-ACC', 'Handler error', e, st); }
-      });
-      PdsLogger.i('L3-ACC', 'Accessibility LISTENING');
-      _emitStatus(ChannelType.accessibility, ChannelStatus.online);
-    } catch (e, st) { PdsLogger.e('L3-ACC', 'Start error', e, st); }
+    Future<void>(() async {
+      try {
+        final enabled =
+            await FlutterAccessibilityService.isAccessibilityPermissionEnabled();
+
+        if (!enabled) {
+          _emitStatus(
+            ChannelType.accessibility,
+            ChannelStatus.permissionDenied,
+            detail: 'Accessibility permission is disabled',
+          );
+          return;
+        }
+
+        await _accessSub?.cancel();
+
+        _accessSub = FlutterAccessibilityService.accessStream.listen(
+          (event) {
+            try {
+              final pkg = (event.packageName ?? '').trim();
+              final text = _collectAccessibilityText(event).trim();
+
+              if (pkg.isEmpty || text.isEmpty) return;
+              if (pkg == 'com.example.retail_mind') return;
+
+              if (_TrustGate.isBlockedPackage(pkg)) return;
+
+              if (!_accRateLimit.isAllowed(pkg)) {
+                _emitStatus(
+                  ChannelType.accessibility,
+                  ChannelStatus.rateLimited,
+                  detail: pkg,
+                );
+                return;
+              }
+
+              if (!_floodGuard.isAllowed('acc:$pkg')) {
+                _emitStatus(
+                  ChannelType.accessibility,
+                  ChannelStatus.blocked,
+                  detail: pkg,
+                );
+                return;
+              }
+
+              _processText(
+                text,
+                _AppRegistry.identify(pkg),
+                source: 'accessibility',
+              );
+            } catch (e, st) {
+              PdsLogger.e(
+                'L3-ACC',
+                'Accessibility event handler error',
+                e,
+                st,
+              );
+            }
+          },
+          onError: (Object error, StackTrace stack) {
+            PdsLogger.e('L3-ACC', 'Accessibility stream error', error, stack);
+            _emitStatus(
+              ChannelType.accessibility,
+              ChannelStatus.error,
+              detail: '$error',
+            );
+          },
+          cancelOnError: false,
+        );
+
+        PdsLogger.i('L3-ACC', 'Accessibility LISTENING (plugin stream)');
+        _emitStatus(ChannelType.accessibility, ChannelStatus.online);
+      } catch (e, st) {
+        PdsLogger.e('L3-ACC', 'Accessibility startup error', e, st);
+        _emitStatus(
+          ChannelType.accessibility,
+          ChannelStatus.error,
+          detail: '$e',
+        );
+      }
+    });
   }
 
   // ==========================================================================
@@ -2612,16 +2665,42 @@ class PaymentDetectionService {
       (await Permission.ignoreBatteryOptimizations.status).isGranted;
   static Future<void>  requestBatteryExemption() =>
       Permission.ignoreBatteryOptimizations.request();
-  static Future<bool>  hasAccessibilityPermission() async {
+  static Future<bool> hasAccessibilityPermission() async {
     try {
-      return await _channel.invokeMethod<bool>(
-              'isAccessibilityPermissionGranted') ??
-          false;
-    } catch (_) { return false; }
+      return await FlutterAccessibilityService
+          .isAccessibilityPermissionEnabled();
+    } catch (_) {
+      return false;
+    }
   }
+
+  static Future<bool> requestAccessibilityPermission() async {
+    try {
+      return await FlutterAccessibilityService
+          .requestAccessibilityPermission();
+    } catch (_) {
+      return false;
+    }
+  }
+
   static Future<void> openAccessibilitySettings() async {
-    try { await _channel.invokeMethod('openAccessibilitySettings'); }
-    catch (_) {}
+    try {
+      await FlutterAccessibilityService.requestAccessibilityPermission();
+    } catch (_) {}
+  }
+
+  static String _collectAccessibilityText(AccessibilityEvent event) {
+    final chunks = <String>[];
+
+    final primary = (event.text ?? '').trim();
+    if (primary.isNotEmpty) chunks.add(primary);
+
+    for (final child in event.subNodes ?? const <AccessibilityEvent>[]) {
+      final childText = _collectAccessibilityText(child).trim();
+      if (childText.isNotEmpty) chunks.add(childText);
+    }
+
+    return chunks.join(' ');
   }
 
   // ==========================================================================
