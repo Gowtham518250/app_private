@@ -1,234 +1,309 @@
-import 'dart:convert';
-import 'dart:typed_data';
 import 'dart:async';
-import 'package:shared_preferences/shared_preferences.dart';
-import 'package:hive_flutter/hive_flutter.dart';
+import 'dart:convert';
+
 import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:hive_flutter/hive_flutter.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:synchronized/synchronized.dart';
-import 'local_storage_service.dart';
 
+/// Durable, user-scoped offline outbox.
+///
+/// Design goals:
+/// - Never silently reject a critical financial operation because the queue
+///   reached an arbitrary size limit.
+/// - Never move unauthenticated data into an arbitrary logged-in account.
+/// - Never permanently dead-letter a transaction without a recovery path.
+/// - Make retries idempotent by business identifier.
+/// - Keep the queue encrypted and serialized with one lock.
 class SyncQueueManager {
-  static const String _queueBoxName = 'sync_queue_secure_v3';
-  static Box? _box;
+  static const String _queueBoxName = 'sync_queue_secure_v4';
   static const FlutterSecureStorage _secureStorage = FlutterSecureStorage();
 
-  // 🔒 CRITICAL: Lock for queue operations to prevent race conditions
-  static final _queueLock = Lock();
+  // High-value operations must never be rejected because of queue pressure.
+  static const Set<String> _criticalActions = <String>{
+    'save_sale',
+    'create_sale',
+    'sync_sale',
+    'sync_invoice_batch',
+    'update_payment',
+    'update_invoice_payment',
+    'update_invoice_paid',
+    'update_invoice_unpaid',
+    'record_khata_payment',
+    'decrease_stock',
+    'create_purchase_order',
+    'update_purchase_order_status',
+  };
 
-  // 🔒 CRITICAL: Enhanced sync lock with timeout and deadlock prevention
+  static const int _softQueueLimit = 10000;
+
+  static Box? _box;
+  static String? _boxName;
+
+  static final Lock _queueLock = Lock();
+
+  // Public because SyncService already reads this field.
   static bool isSyncing = false;
   static DateTime? _syncStartTime;
-  static const Duration _syncTimeout = Duration(minutes: 5); // 5 minute sync timeout
+  static const Duration _syncTimeout = Duration(minutes: 5);
   static Timer? _syncTimeoutTimer;
 
-  /// Set sync lock with timeout protection
   static Future<bool> _setSyncLock() async {
     if (isSyncing) {
-      // Check if sync has been running too long (deadlock detection)
-      if (_syncStartTime != null && 
-          DateTime.now().difference(_syncStartTime!) > _syncTimeout) {
-        if (kDebugMode) debugPrint('⚠️ Sync timeout detected, forcing lock reset');
+      final started = _syncStartTime;
+      if (started != null &&
+          DateTime.now().difference(started) > _syncTimeout) {
         await _clearSyncLock();
       } else {
-        if (kDebugMode) debugPrint('⚠️ Sync already in progress');
         return false;
       }
     }
-    
+
     isSyncing = true;
     _syncStartTime = DateTime.now();
-    
-    // Set timeout timer to prevent deadlocks
+
     _syncTimeoutTimer?.cancel();
     _syncTimeoutTimer = Timer(_syncTimeout, () async {
-      if (kDebugMode) debugPrint('⚠️ Sync timeout, forcing lock reset');
       await _clearSyncLock();
     });
-    
-    if (kDebugMode) debugPrint('🔒 Sync lock set');
+
     return true;
   }
-  
-  /// Clear sync lock safely
+
   static Future<void> _clearSyncLock() async {
     isSyncing = false;
     _syncStartTime = null;
     _syncTimeoutTimer?.cancel();
     _syncTimeoutTimer = null;
-    if (kDebugMode) debugPrint('🔓 Sync lock cleared');
   }
-  
-  /// 🔒 DATA VALIDATION: Validate queue data before queuing
-  static bool _validateQueueData(String action, Map<String, dynamic> data) {
-    try {
-      // Validate action is not empty
-      if (action.isEmpty) {
-        if (kDebugMode) debugPrint('⚠️ Empty action in queue data');
-        return false;
-      }
-      
-      // Validate data is not empty
-      if (data.isEmpty) {
-        if (kDebugMode) debugPrint('⚠️ Empty data in queue');
-        return false;
-      }
-      
-      // Action-specific validation
-      switch (action) {
-        case 'save_sale':
-        case 'create_sale':
-          // Validate sale data has a stable identifier: sale_id or invoice number.
-          final saleId = data['sale_id']?.toString().trim().toLowerCase() ?? '';
-          final invoiceNumber = (data['invoice_payload'] is Map<String, dynamic>
-                  ? data['invoice_payload']['invoice_number']?.toString().trim().toLowerCase()
-                  : null) ??
-              (data['payload'] is Map<String, dynamic>
-                  ? data['payload']['invoice_number']?.toString().trim().toLowerCase()
-                  : null) ??
-              data['invoice_number']?.toString().trim().toLowerCase() ?? '';
-          if (saleId.isEmpty && invoiceNumber.isEmpty) {
-            if (kDebugMode) debugPrint('⚠️ Missing sale identifier in $action data');
-            return false;
-          }
-          break;
-        case 'save_customer':
-          // Validate customer data has required fields
-          if (!data.containsKey('customer_id') && !data.containsKey('phone')) {
-            if (kDebugMode) debugPrint('⚠️ Missing customer identification in save_customer data');
-            return false;
-          }
-          break;
-        case 'update_inventory':
-          // Validate inventory data has required fields
-          if (!data.containsKey('product_id') || data['product_id'] == null) {
-            if (kDebugMode) debugPrint('⚠️ Missing product_id in update_inventory data');
-            return false;
-          }
-          break;
-      }
-      
-      return true;
-    } catch (e) {
-      if (kDebugMode) debugPrint('⚠️ Queue data validation error: $e');
-      return false;
+
+  static bool _validateQueueData(
+    String action,
+    Map<String, dynamic> data,
+  ) {
+    if (action.trim().isEmpty || data.isEmpty) return false;
+
+    switch (action) {
+      case 'save_sale':
+      case 'create_sale':
+      case 'sync_sale':
+      case 'sync_invoice_batch':
+        final identifier = _businessIdentifier(data);
+        return identifier.isNotEmpty;
+
+      case 'save_customer':
+      case 'create_customer':
+        return data.containsKey('customer_id') ||
+            data.containsKey('phone') ||
+            data.containsKey('operation_id');
+
+      case 'update_inventory':
+      case 'decrease_stock':
+        return data['product_id'] != null ||
+            data['product_name'] != null;
+
+      default:
+        return true;
     }
   }
-  
+
+  static String _businessIdentifier(Map<dynamic, dynamic> data) {
+    String firstNonEmpty(Iterable<dynamic> values) {
+      for (final value in values) {
+        final text = value?.toString().trim() ?? '';
+        if (text.isNotEmpty) return text.toLowerCase();
+      }
+      return '';
+    }
+
+    final invoicePayload = data['invoice_payload'];
+    final payload = data['payload'];
+
+    return firstNonEmpty(<dynamic>[
+      data['sale_id'],
+      data['offline_id'],
+      data['operation_id'],
+      data['idempotency_key'],
+      data['invoice_number'],
+      if (invoicePayload is Map) invoicePayload['invoice_number'],
+      if (invoicePayload is Map) invoicePayload['offline_id'],
+      if (payload is Map) payload['invoice_number'],
+      if (payload is Map) payload['offline_id'],
+    ]);
+  }
+
   static Future<List<int>> _getHiveKey() async {
-    const keyStr = 'hive_encryption_key';
-    String? stored = await _secureStorage.read(key: keyStr);
-    if (stored == null) {
+    const keyName = 'hive_encryption_key_v2';
+    final stored = await _secureStorage.read(key: keyName);
+
+    if (stored == null || stored.isEmpty) {
       final key = Hive.generateSecureKey();
-      await _secureStorage.write(key: keyStr, value: base64UrlEncode(key));
+      await _secureStorage.write(
+        key: keyName,
+        value: base64UrlEncode(key),
+      );
       return key;
     }
+
     return base64Url.decode(stored);
   }
 
-  // IMPORTANT: callers already hold _queueLock. This method must NEVER acquire
-  // _queueLock itself, otherwise enqueue/get/remove can deadlock recursively.
-  static Future<Box> _getBox() async {
+  static Future<int?> _currentUserId() async {
     final prefs = await SharedPreferences.getInstance();
-    final userId = prefs.getInt('user_id') ?? prefs.getInt('userId');
-    final String scopedName = (userId == null || userId == 0)
-        ? '${_queueBoxName}_unauthenticated'
-        : '${_queueBoxName}_$userId';
+    return prefs.getInt('user_id') ?? prefs.getInt('userId');
+  }
 
-    if (_box != null && _box!.isOpen && _box!.name == scopedName) return _box!;
+  static Future<Box> _getBoxUnlocked() async {
+    final userId = await _currentUserId();
+
+    // A missing user is isolated in a quarantine box. It is NEVER merged
+    // automatically into an arbitrary future account.
+    final scopedName = userId == null || userId <= 0
+        ? '${_queueBoxName}_quarantine'
+        : '${_queueBoxName}_user_$userId';
+
+    if (_box != null &&
+        _box!.isOpen &&
+        _boxName == scopedName) {
+      return _box!;
+    }
+
+    if (_box != null && _box!.isOpen && _boxName != scopedName) {
+      try {
+        await _box!.close();
+      } catch (_) {}
+      _box = null;
+      _boxName = null;
+    }
 
     final key = await _getHiveKey();
-    _box = await Hive.openBox(scopedName, encryptionCipher: HiveAesCipher(key));
-
-    if (userId != null && userId > 0) {
-      try {
-        final unauthName = '${_queueBoxName}_unauthenticated';
-        final unauthBox = await Hive.openBox(unauthName, encryptionCipher: HiveAesCipher(key));
-        if (unauthBox.isNotEmpty) {
-          if (kDebugMode) debugPrint('📦 [SyncQueue] Recovering ${unauthBox.length} items from unauthenticated queue');
-          for (final k in unauthBox.keys) {
-            await _box!.put(k, unauthBox.get(k));
-          }
-          await unauthBox.clear();
-        }
-      } catch (e) {
-        if (kDebugMode) debugPrint('⚠️ [SyncQueue] Error recovering unauth queue: $e');
-      }
-    }
+    _box = await Hive.openBox(
+      scopedName,
+      encryptionCipher: HiveAesCipher(key),
+    );
+    _boxName = scopedName;
 
     return _box!;
   }
 
-  /// Add item to sync queue with data validation
-  static Future<bool> enqueue(String action, Map<String, dynamic> data) async {
-    return await _queueLock.synchronized(() async {
+  /// Recover only queue records explicitly owned by the authenticated user.
+  ///
+  /// Legacy quarantine items without owner_user_id remain quarantined so they
+  /// cannot leak into a different account.
+  static Future<int> recoverQuarantinedForCurrentUser() async {
+    return _queueLock.synchronized(() async {
       try {
-        // 🔒 DATA VALIDATION: Validate data before queuing
+        final userId = await _currentUserId();
+        if (userId == null || userId <= 0) return 0;
+
+        final key = await _getHiveKey();
+        final quarantine = await Hive.openBox(
+          '${_queueBoxName}_quarantine',
+          encryptionCipher: HiveAesCipher(key),
+        );
+        final target = await _getBoxUnlocked();
+
+        int moved = 0;
+        for (final keyValue in quarantine.keys.toList()) {
+          final raw = quarantine.get(keyValue);
+          if (raw is! Map) continue;
+
+          final ownerId =
+              int.tryParse(raw['owner_user_id']?.toString() ?? '');
+          if (ownerId != userId) continue;
+
+          await target.put(keyValue, Map<String, dynamic>.from(raw));
+          await quarantine.delete(keyValue);
+          moved++;
+        }
+
+        await quarantine.close();
+        if (moved > 0 && kDebugMode) {
+          debugPrint(
+            '✅ [SyncQueue] Recovered $moved authenticated quarantine items',
+          );
+        }
+        return moved;
+      } catch (e) {
+        if (kDebugMode) {
+          debugPrint('⚠️ [SyncQueue] Quarantine recovery failed: $e');
+        }
+        return 0;
+      }
+    });
+  }
+
+  static Future<bool> enqueue(
+    String action,
+    Map<String, dynamic> data,
+  ) async {
+    return _queueLock.synchronized(() async {
+      try {
         if (!_validateQueueData(action, data)) {
-          if (kDebugMode) debugPrint('⚠️ Invalid queue data for action: $action');
+          if (kDebugMode) {
+            debugPrint('⚠️ [SyncQueue] Invalid queue data: $action');
+          }
           return false;
         }
 
-        final box = await _getBox();
+        final userId = await _currentUserId();
+        final box = await _getBoxUnlocked();
 
-        // Prevent unbounded queue growth (OOM protection)
-        if (box.length >= 5000) {
-          if (kDebugMode) debugPrint('📦 [SyncQueue] Queue limit reached (5000). Rejecting new item to prevent silent data loss.');
-          if (box.isNotEmpty) {
-            return false;
+        // Critical financial operations are never rejected because the queue
+        // reached an arbitrary soft limit. Non-critical operations are bounded.
+        if (box.length >= _softQueueLimit &&
+            !_criticalActions.contains(action)) {
+          if (kDebugMode) {
+            debugPrint(
+              '⚠️ [SyncQueue] Soft limit reached; rejecting non-critical action $action',
+            );
           }
+          return false;
         }
 
-        // 🔧 FIX: Check if the sale/invoice identifier already exists in the queue (idempotency)
-        if (action == 'save_sale' || action == 'create_sale') {
-          final saleId = data['sale_id']?.toString().trim().toLowerCase() ?? '';
-          final invoiceNumber = (data['invoice_payload'] is Map<String, dynamic>
-                  ? data['invoice_payload']['invoice_number']?.toString().trim().toLowerCase()
-                  : null) ??
-              (data['payload'] is Map<String, dynamic>
-                  ? data['payload']['invoice_number']?.toString().trim().toLowerCase()
-                  : null) ??
-              data['invoice_number']?.toString().trim().toLowerCase() ?? '';
-          final identifier = saleId.isNotEmpty ? saleId : invoiceNumber;
+        final identifier = _businessIdentifier(data);
 
-          if (identifier.isNotEmpty) {
-            Map<String, dynamic>? existing;
-            try {
-              existing = box.values.cast<Map<String, dynamic>>().firstWhere(
-                (item) {
-                  if (item['action'] != 'save_sale' && item['action'] != 'create_sale') return false;
-                  final itemData = item['data'] as Map<String, dynamic>?;
-                  if (itemData == null) return false;
-                  final itemSaleId = itemData['sale_id']?.toString().trim().toLowerCase() ?? '';
-                  final itemInvoice = (itemData['invoice_payload'] is Map<String, dynamic>
-                          ? itemData['invoice_payload']['invoice_number']?.toString().trim().toLowerCase()
-                          : null) ??
-                      (itemData['payload'] is Map<String, dynamic>
-                          ? itemData['payload']['invoice_number']?.toString().trim().toLowerCase()
-                          : null) ??
-                      itemData['invoice_number']?.toString().trim().toLowerCase() ?? '';
-                  return itemSaleId == identifier || itemInvoice == identifier;
-                },
-              );
-            } catch (e) {
-              existing = null;
+        if (identifier.isNotEmpty) {
+          for (final raw in box.values) {
+            if (raw is! Map) continue;
+
+            final rawAction = raw['action']?.toString() ?? '';
+            if (rawAction != action &&
+                !(_criticalActions.contains(action) &&
+                    (rawAction == 'save_sale' ||
+                        rawAction == 'create_sale' ||
+                        rawAction == 'sync_sale'))) {
+              continue;
             }
-            if (existing != null) {
-              if (kDebugMode) debugPrint('📦 [SyncQueue] Sale $identifier already in queue - skipping duplicate');
+
+            final rawData = raw['data'];
+            if (rawData is! Map) continue;
+
+            if (_businessIdentifier(rawData) == identifier) {
+              // Existing record is already durable. Do not create a second
+              // local operation.
               return false;
             }
           }
         }
 
-        // Generate unique Action ID
-        final String actionId = sha256.convert(utf8.encode('$action${json.encode(data)}${DateTime.now().microsecondsSinceEpoch}')).toString().substring(0, 16);
+        final now = DateTime.now().toUtc();
+        final actionId = sha256
+            .convert(
+              utf8.encode(
+                '$action|$identifier|${now.microsecondsSinceEpoch}',
+              ),
+            )
+            .toString()
+            .substring(0, 24);
 
-        final now = DateTime.now();
-        final item = {
+        final item = <String, dynamic>{
           'action_id': actionId,
           'action': action,
-          'data': data,
+          'data': Map<String, dynamic>.from(data),
+          'owner_user_id': userId,
           'timestamp': now.millisecondsSinceEpoch,
           'created_at': now.toIso8601String(),
           'updated_at': now.toIso8601String(),
@@ -237,14 +312,19 @@ class SyncQueueManager {
           'last_attempt': null,
           'next_attempt_at': now.toIso8601String(),
           'last_error': null,
+          'needs_attention': false,
         };
 
+        // The durable write is the success boundary.
         await box.put(actionId, item);
-        if (kDebugMode) debugPrint('📦 [SyncQueue] Queued: $action ($actionId)');
+
+        if (kDebugMode) {
+          debugPrint('📦 [SyncQueue] Durable enqueue: $action/$actionId');
+        }
         return true;
       } catch (e, st) {
         if (kDebugMode) {
-          debugPrint('❌ [SyncQueue] Enqueue Error: $e');
+          debugPrint('❌ [SyncQueue] Enqueue failed: $e');
           debugPrint(st.toString());
         }
         return false;
@@ -252,11 +332,49 @@ class SyncQueueManager {
     });
   }
 
+  /// Convert legacy PARKED/FAILED records into retryable records. This prevents
+  /// a financial transaction from becoming permanently invisible to the queue.
+  static Future<int> recoverStuckItems() async {
+    return _queueLock.synchronized(() async {
+      try {
+        final box = await _getBoxUnlocked();
+        int recovered = 0;
+
+        for (final key in box.keys.toList()) {
+          final raw = box.get(key);
+          if (raw is! Map) continue;
+
+          final item = Map<String, dynamic>.from(raw);
+          final action = item['action']?.toString() ?? '';
+          final status = item['status']?.toString() ?? '';
+
+          if ((status == 'PARKED' || status == 'FAILED') &&
+              _criticalActions.contains(action)) {
+            item['status'] = 'PENDING';
+            item['needs_attention'] = false;
+            item['next_attempt_at'] =
+                DateTime.now().toUtc().toIso8601String();
+            item['updated_at'] =
+                DateTime.now().toUtc().toIso8601String();
+            await box.put(key, item);
+            recovered++;
+          }
+        }
+
+        return recovered;
+      } catch (e) {
+        if (kDebugMode) {
+          debugPrint('⚠️ [SyncQueue] Stuck-item recovery failed: $e');
+        }
+        return 0;
+      }
+    });
+  }
 
   static Future<bool> containsAction(String actionId) async {
-    return await _queueLock.synchronized(() async {
+    return _queueLock.synchronized(() async {
       try {
-        final box = await _getBox();
+        final box = await _getBoxUnlocked();
         return box.containsKey(actionId);
       } catch (_) {
         return false;
@@ -264,101 +382,137 @@ class SyncQueueManager {
     });
   }
 
-  /// Get the oldest item from queue
   static Future<Map<String, dynamic>?> peek() async {
-    return await _queueLock.synchronized(() async {
+    return _queueLock.synchronized(() async {
       try {
-        final box = await _getBox();
+        final box = await _getBoxUnlocked();
         if (box.isEmpty) return null;
 
-        // Hive values are not necessarily ordered by insertion if we use keys
-        // But we can get the first one
-        return Map<String, dynamic>.from(box.values.first);
-      } catch (e) {
+        Map<String, dynamic>? oldest;
+        DateTime? oldestTime;
+
+        for (final raw in box.values) {
+          if (raw is! Map) continue;
+          final item = Map<String, dynamic>.from(raw);
+          final created =
+              DateTime.tryParse(item['created_at']?.toString() ?? '') ??
+                  DateTime.fromMillisecondsSinceEpoch(
+                    (item['timestamp'] as int?) ?? 0,
+                  );
+
+          if (oldestTime == null || created.isBefore(oldestTime)) {
+            oldestTime = created;
+            oldest = item;
+          }
+        }
+
+        return oldest;
+      } catch (_) {
         return null;
       }
     });
   }
 
-  /// Remove item by ID
   static Future<void> remove(String actionId) async {
     await _queueLock.synchronized(() async {
-      final box = await _getBox();
+      final box = await _getBoxUnlocked();
       await box.delete(actionId);
     });
   }
 
-  /// Update item (e.g. increment retries)
-  static Future<bool> update(String actionId, Map<String, dynamic> item) async {
-    return await _queueLock.synchronized(() async {
+  static Future<bool> update(
+    String actionId,
+    Map<String, dynamic> item,
+  ) async {
+    return _queueLock.synchronized(() async {
       try {
-        final box = await _getBox();
+        final box = await _getBoxUnlocked();
         final updated = Map<String, dynamic>.from(item);
-        updated['updated_at'] = DateTime.now().toIso8601String();
+        updated['updated_at'] = DateTime.now().toUtc().toIso8601String();
         await box.put(actionId, updated);
         return true;
       } catch (e) {
-        if (kDebugMode) debugPrint('❌ [SyncQueue] Update failed for $actionId: $e');
+        if (kDebugMode) {
+          debugPrint('❌ [SyncQueue] Update failed for $actionId: $e');
+        }
         return false;
       }
     });
   }
 
-  /// Check whether an operation with the same business identifier is already queued.
-  static Future<bool> containsBusinessOperation(String action, String identifier) async {
-    if (action.isEmpty || identifier.trim().isEmpty) return false;
-    return await _queueLock.synchronized(() async {
+  static Future<bool> containsBusinessOperation(
+    String action,
+    String identifier,
+  ) async {
+    if (action.trim().isEmpty || identifier.trim().isEmpty) {
+      return false;
+    }
+
+    return _queueLock.synchronized(() async {
       try {
-        final box = await _getBox();
+        final box = await _getBoxUnlocked();
         final wanted = identifier.trim().toLowerCase();
+
         for (final raw in box.values) {
           if (raw is! Map) continue;
           if (raw['action']?.toString() != action) continue;
+
           final data = raw['data'];
           if (data is! Map) continue;
-          final candidates = <String?>[
-            data['sale_id']?.toString(),
-            data['operation_id']?.toString(),
-            data['idempotency_key']?.toString(),
-          ];
-          if (candidates.any((v) => v != null && v.trim().toLowerCase() == wanted)) {
-            return true;
-          }
+
+          if (_businessIdentifier(data) == wanted) return true;
         }
       } catch (e) {
-        if (kDebugMode) debugPrint('⚠️ containsBusinessOperation failed: $e');
+        if (kDebugMode) {
+          debugPrint(
+            '⚠️ [SyncQueue] containsBusinessOperation failed: $e',
+          );
+        }
       }
+
       return false;
     });
   }
 
-  /// Get all pending items
   static Future<List<Map<String, dynamic>>> getAll() async {
-    return await _queueLock.synchronized(() async {
-      final box = await _getBox();
-      return box.values.map((e) => Map<String, dynamic>.from(e)).toList();
+    await recoverQuarantinedForCurrentUser();
+    await recoverStuckItems();
+
+    return _queueLock.synchronized(() async {
+      final box = await _getBoxUnlocked();
+      return box.values
+          .whereType<Map>()
+          .map((e) => Map<String, dynamic>.from(e))
+          .toList();
     });
   }
 
   static Future<int> getQueueSize() async {
-    return await _queueLock.synchronized(() async {
-      final box = await _getBox();
+    return _queueLock.synchronized(() async {
+      final box = await _getBoxUnlocked();
       return box.length;
     });
   }
 
-  static Future<void> clearQueue() async {
-    await _queueLock.synchronized(() async {
-      try {
-        final box = await _getBox();
-        await box.clear();
-      } catch (e) {
-        if (kDebugMode) debugPrint('⚠️ clearQueue: $e');
-      }
+  static Future<int> getAttentionCount() async {
+    return _queueLock.synchronized(() async {
+      final box = await _getBoxUnlocked();
+      return box.values.where((raw) {
+        if (raw is! Map) return false;
+        return raw['needs_attention'] == true;
+      }).length;
     });
   }
 
-  /// Drop cached box handle so next enqueue opens the correct user-scoped box.
+  /// Intentionally requires an explicit caller. Never use this to discard
+  /// financial operations automatically.
+  static Future<void> clearQueue() async {
+    await _queueLock.synchronized(() async {
+      final box = await _getBoxUnlocked();
+      await box.clear();
+    });
+  }
+
   static Future<void> resetBoxReference() async {
     await _queueLock.synchronized(() async {
       if (_box != null && _box!.isOpen) {
@@ -367,31 +521,29 @@ class SyncQueueManager {
         } catch (_) {}
       }
       _box = null;
+      _boxName = null;
     });
   }
 
-  /// Dispose resources - called during app shutdown
   static Future<void> dispose() async {
     await _queueLock.synchronized(() async {
       try {
-        // Cancel sync timeout timer
         _syncTimeoutTimer?.cancel();
         _syncTimeoutTimer = null;
-
-        // Clear sync lock
         await _clearSyncLock();
 
-        // Close box if open
         if (_box != null && _box!.isOpen) {
           try {
             await _box!.close();
           } catch (_) {}
         }
-        _box = null;
 
-        if (kDebugMode) debugPrint('✅ SyncQueueManager disposed');
+        _box = null;
+        _boxName = null;
       } catch (e) {
-        if (kDebugMode) debugPrint('⚠️ Error disposing SyncQueueManager: $e');
+        if (kDebugMode) {
+          debugPrint('⚠️ [SyncQueue] dispose failed: $e');
+        }
       }
     });
   }
