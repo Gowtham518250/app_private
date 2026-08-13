@@ -150,6 +150,7 @@ class SalesRestoreService {
         
         // Save restored customers to local storage
         await _saveRestoredCustomers(data['customers']);
+        try { await InventorySyncService.refreshAllInventory(); } catch (_) {}
         
         if (kDebugMode) {
           debugPrint('✅ Customer restoration complete');

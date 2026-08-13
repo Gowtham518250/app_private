@@ -8,7 +8,21 @@ import 'package:shared_preferences/shared_preferences.dart';
 /// Prevents duplicate payment processing through idempotency keys
 class PaymentIdempotencyService {
   static PaymentIdempotencyService? _instance;
-  static const String _storageKey = 'payment_idempotency_keys';
+  static const String _storageKey = 'payment_idempotency_keys_v2';
+
+  Future<String> _scopedStorageKey() async {
+    final prefs = await SharedPreferences.getInstance();
+    final userId = prefs.getInt('user_id') ?? prefs.getInt('userId') ?? 0;
+    final shopId = prefs.getInt('active_shop_id') ?? prefs.getInt('shop_id') ?? 0;
+    return '${_storageKey}_${userId}_$shopId';
+  }
+
+  String generateStableKey({String? customerId, String? phone, required double amount, String? note}) {
+    final normalizedCustomer = (customerId ?? '').trim().isNotEmpty ? customerId!.trim() : (phone ?? '').trim();
+    final normalizedNote = (note ?? '').trim().toLowerCase();
+    final basis = '$normalizedCustomer|${amount.toStringAsFixed(2)}|$normalizedNote';
+    return 'payment_${base64Url.encode(utf8.encode(basis)).replaceAll('=', '')}';
+  }
   static const Duration _keyExpiry = Duration(hours: 24);
   
   PaymentIdempotencyService._();
@@ -29,7 +43,7 @@ class PaymentIdempotencyService {
   Future<bool> isKeyUsed(String key) async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      final keysJson = prefs.getString(_storageKey) ?? '{}';
+      final keysJson = prefs.getString(await _scopedStorageKey()) ?? '{}';
       final keys = Map<String, int>.from(
         // Safe JSON parsing
         _parseJson(keysJson) as Map? ?? {}
@@ -46,7 +60,7 @@ class PaymentIdempotencyService {
   Future<void> markKeyUsed(String key) async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      final keysJson = prefs.getString(_storageKey) ?? '{}';
+      final keysJson = prefs.getString(await _scopedStorageKey()) ?? '{}';
       final keys = Map<String, int>.from(
         _parseJson(keysJson) as Map? ?? {}
       );
@@ -56,7 +70,7 @@ class PaymentIdempotencyService {
       // Clean up expired keys
       _cleanExpiredKeys(keys);
       
-      await prefs.setString(_storageKey, _encodeJson(keys));
+      await prefs.setString(await _scopedStorageKey(), _encodeJson(keys));
       if (kDebugMode) debugPrint('✅ Marked idempotency key as used: $key');
     } catch (e) {
       if (kDebugMode) debugPrint('⚠️ Error marking idempotency key: $e');
@@ -75,7 +89,7 @@ class PaymentIdempotencyService {
   Future<void> clearAllKeys() async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      await prefs.remove(_storageKey);
+      await prefs.remove(await _scopedStorageKey());
       if (kDebugMode) debugPrint('✅ Cleared all idempotency keys');
     } catch (e) {
       if (kDebugMode) debugPrint('⚠️ Error clearing idempotency keys: $e');

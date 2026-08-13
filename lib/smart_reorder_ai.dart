@@ -18,7 +18,7 @@ class SmartReorderAIService {
     try {
       final prefs = await SharedPreferences.getInstance();
       final now = DateTime.now();
-      final dateKey = '${now.year}-${now.month}-${now.day}';
+      final dateKey = '${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}';
       
       Map<String, int> dailySales = {};
       final existing = prefs.getString('$_salesHistoryKey\_$dateKey');
@@ -46,7 +46,7 @@ class SmartReorderAIService {
       
       for (int i = 0; i < 7; i++) {
         final date = now.subtract(Duration(days: i));
-        final dateKey = '${date.year}-${date.month}-${date.day}';
+        final dateKey = '${date.year}-${date.month.toString().padLeft(2, '0')}-${date.day.toString().padLeft(2, '0')}';
         final data = prefs.getString('$_salesHistoryKey\_$dateKey');
         
         if (data != null) {
@@ -58,7 +58,7 @@ class SmartReorderAIService {
         }
       }
       
-      return daysWithSales > 0 ? totalQty / 7 : 0;
+      return totalQty / 7.0;
     } catch (e) {
       return 0;
     }
@@ -83,18 +83,20 @@ class SmartReorderAIService {
     List<Map<String, dynamic>> alerts = [];
     
     for (var product in inventory) {
+      final productName = (product['name'] ?? product['product_name'] ?? '').toString();
+      final currentStock = int.tryParse((product['stock'] ?? product['current_stock'] ?? 0).toString()) ?? 0;
       final stockoutDays = await predictStockoutDays(
-        productName: product['name'] ?? '',
-        currentStock: product['stock'] ?? 0,
+        productName: productName,
+        currentStock: currentStock,
       );
       
       if (stockoutDays != null && stockoutDays < 5 && stockoutDays > 0) {
         alerts.add({
-          'product_name': product['name'],
-          'current_stock': product['stock'],
-          'daily_velocity': await calculateVelocity(product['name'] ?? ''),
+          'product_name': productName,
+          'current_stock': currentStock,
+          'daily_velocity': await calculateVelocity(productName),
           'days_until_stockout': stockoutDays,
-          'suggested_reorder_qty': (stockoutDays * (await calculateVelocity(product['name'] ?? '')) * 1.2).toInt(),
+          'suggested_reorder_qty': (stockoutDays * (await calculateVelocity(productName)) * 1.2).toInt(),
           'supplier_whatsapp': product['supplier_whatsapp'],
         });
       }

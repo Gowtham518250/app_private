@@ -1,0 +1,7 @@
+Edited existing files only; no new Dart feature/service file was introduced.
+1. lib/intelligence_engine.dart — deterministic fraud/anomaly risk assessment.
+2. lib/multi_shop_dashboard.dart — owner-scoped active-shop selection and cross-account protection.
+3. lib/audit_logging_service.dart — user/shop-scoped local audit trail, event IDs, before/after details.
+
+AI Copilot was intentionally not modified.
+Backend was not modified in this bundle because the existing backend already has audit/shop infrastructure and should be changed only after its exact current integration points are verified.

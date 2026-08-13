@@ -252,11 +252,23 @@ class _InventoryPageState extends State<InventoryPage> {
       'product_name': _nameC.text.trim(),
       'sku': (_barcodeC.text.trim().isNotEmpty ? _barcodeC.text.trim() : _nameC.text.trim()).toLowerCase(),
       'unit_price': double.tryParse(_priceC.text) ?? 0,
-      'mrp': double.tryParse(_mrpC.text) ?? 0, // GST Compliance: Store declared MRP
+      'mrp': double.tryParse(_mrpC.text) ?? 0,
       'current_stock': int.tryParse(_stockC.text) ?? 0,
       'min_stock': int.tryParse(_minStockC.text) ?? 10,
       'category': _catC.text.trim().isNotEmpty ? _catC.text.trim() : 'General',
       'unit': _unitC.text.trim().isNotEmpty ? _unitC.text.trim() : 'pcs',
+    };
+
+    // Keep the UI model rich, but send only the canonical inventory contract
+    // to the backend. This prevents older/newer optional UI-only fields such as
+    // MRP/unit from causing a 422 on ProductCreate/ProductUpdate.
+    final apiProductData = <String, dynamic>{
+      'product_name': productData['product_name'],
+      'sku': productData['sku'],
+      'unit_price': productData['unit_price'],
+      'current_stock': productData['current_stock'],
+      'min_stock': productData['min_stock'],
+      'category': productData['category'],
     };
     
     try {
@@ -297,14 +309,28 @@ class _InventoryPageState extends State<InventoryPage> {
             }
             return;
           } else {
-            // Return error or proceed to local fallback
-    if (kDebugMode) debugPrint('⚠️ Backend returned ${res.statusCode}, saving locally');
+            final detail = () {
+              try {
+                final body = json.decode(res.body);
+                return body is Map ? (body['detail'] ?? body['message'] ?? 'Backend rejected the product') : 'Backend rejected the product';
+              } catch (_) {
+                return 'Backend rejected the product (HTTP ${res.statusCode})';
+              }
+            }();
+            if (mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(content: Text('Product was not created: $detail'), backgroundColor: Colors.red),
+              );
+            }
+            return;
           }
         } catch (e) {
-    if (kDebugMode) debugPrint('⚠️ Backend save failed: $e, saving locally');
+          if (kDebugMode) debugPrint('⚠️ Backend unavailable, saving product offline: $e');
         }
       }
       
+      // Offline/network fallback only. HTTP validation/auth errors never
+      // become local-only records, because that masks contract bugs.
       // Fallback: Save locally
     if (kDebugMode) debugPrint('💾 Saving product locally (offline)');
       final local = await LocalStorageService.loadLocalProducts();
@@ -1021,39 +1047,57 @@ class _InventoryPageState extends State<InventoryPage> {
   }
 
   Future<void> _deleteProduct(Map<String, dynamic> p) async {
+    final prefs = await SharedPreferences.getInstance();
+    final token = await SecureTokenStorage.getToken() ?? '';
+    final productId = p['id']?.toString() ?? '';
+
+    if (productId.isEmpty || int.tryParse(productId) == null) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Product has no valid backend ID. It cannot be deleted yet.')));
+      return;
+    }
+
+    if (token.isEmpty || _userId == null) {
+      await SyncQueueManager.enqueue('delete_product', {
+        'id': int.parse(productId),
+        'user_id': _userId,
+      });
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Offline: delete queued and will sync automatically.')));
+      return;
+    }
+
     try {
-      final prefs = await SharedPreferences.getInstance();
-      final token = await SecureTokenStorage.getToken() ?? '';
-      final productId = p['id']?.toString() ?? '';
+      final response = await ApiClient.deleteJson(
+        '${ApiClient.inventoryPrefix}/products/$productId?user_id=$_userId',
+        headers: {'Authorization': 'Bearer $token'},
+      ).timeout(const Duration(seconds: 12));
 
-      // Try backend delete
-      if (token.isNotEmpty && _userId != null && productId.isNotEmpty) {
-        try {
-          await ApiClient.deleteJson(
-            '${ApiClient.inventoryPrefix}/products/$productId?user_id=$_userId',
-            headers: {'Authorization': 'Bearer $token'},
-          ).timeout(const Duration(seconds: 8));
-        } catch (_) {
-          SyncQueueManager.enqueue('delete_product', p);
+      if (response.statusCode == 200 || response.statusCode == 204) {
+        final cached = await LocalStorageService.loadBackendProducts();
+        cached.removeWhere((item) => item['id'].toString() == productId);
+        await LocalStorageService.saveBackendProducts(cached);
+        if (mounted) {
+          setState(() => _products.removeWhere((item) => item['id'].toString() == productId));
+          await _fetch();
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: const Text('Product deleted successfully.'), backgroundColor: Colors.red.shade400));
         }
+        return;
       }
 
-      // Remove from local cache
-      final cached = await LocalStorageService.loadBackendProducts();
-      cached.removeWhere((item) => item['id'].toString() == productId ||
-          item['product_name'] == p['product_name']);
-      await LocalStorageService.saveBackendProducts(cached);
-
-      await _fetch();
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-            content: const Text('Product deleted!'), backgroundColor: Colors.red.shade400));
-      }
+      final detail = () {
+        try {
+          final body = json.decode(response.body);
+          return body is Map ? (body['detail'] ?? body['message'] ?? 'Delete failed') : 'Delete failed';
+        } catch (_) {
+          return 'Delete failed (HTTP ${response.statusCode})';
+        }
+      }();
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(detail), backgroundColor: Colors.red));
     } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Error: $e'), backgroundColor: Colors.red));
-      }
+      await SyncQueueManager.enqueue('delete_product', {
+        'id': int.parse(productId),
+        'user_id': _userId,
+      });
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Network unavailable: delete queued for retry.')));
     }
   }
 
@@ -1114,51 +1158,77 @@ class _InventoryPageState extends State<InventoryPage> {
                   updated['min_stock'] = int.tryParse(minC.text) ?? updated['min_stock'];
                   updated['category'] = catC.text.trim().isNotEmpty ? catC.text.trim() : updated['category'];
 
-                  final prefs = await SharedPreferences.getInstance();
-                  // Update local cache
-                  final cached = await LocalStorageService.loadBackendProducts();
-                  final idx = cached.indexWhere((item) => item['id'].toString() == p['id'].toString());
-                  if (idx >= 0) {
-                    cached[idx] = updated;
-                    await LocalStorageService.saveBackendProducts(cached);
-                    // 🛡️ CRITICAL FIX: Update local UI state immediately!
-                    setState(() {
-                      final prodIdx = _products.indexWhere((i) => i['id'].toString() == p['id'].toString());
-                      if (prodIdx >= 0) _products[prodIdx] = updated;
-                    });
-                  }
+                  final token = await SecureTokenStorage.getToken() ?? '';
+                  final productId = int.tryParse(p['id']?.toString() ?? '');
+                  if (productId == null) throw Exception('Invalid backend product id');
 
-                  // Try backend update
-                  try {
-                    final token = await SecureTokenStorage.getToken() ?? '';
-                    if (token.isNotEmpty && _userId != null) {
-                      await ApiClient.putJson(
-                        '${ApiClient.inventoryPrefix}/products/${p['id']}?user_id=$_userId',
-                        updated,
+                  final apiUpdate = <String, dynamic>{
+                    'product_name': updated['product_name'],
+                    'sku': updated['sku'] ?? updated['barcode'] ?? '',
+                    'unit_price': updated['unit_price'],
+                    'current_stock': InventoryStockHelper.readStock(updated),
+                    'min_stock': updated['min_stock'] ?? 10,
+                    'category': updated['category'] ?? 'General',
+                  };
+
+                  bool backendConfirmed = false;
+                  if (token.isNotEmpty && _userId != null) {
+                    try {
+                      final response = await ApiClient.putJson(
+                        '${ApiClient.inventoryPrefix}/products/$productId?user_id=$_userId',
+                        apiUpdate,
                         headers: {'Authorization': 'Bearer $token'},
-                      ).timeout(const Duration(seconds: 8));
+                      ).timeout(const Duration(seconds: 12));
+                      if (response.statusCode >= 200 && response.statusCode < 300) {
+                        backendConfirmed = true;
+                      } else {
+                        final detail = () {
+                          try {
+                            final body = json.decode(response.body);
+                            return body is Map ? (body['detail'] ?? body['message'] ?? 'Update rejected') : 'Update rejected';
+                          } catch (_) { return 'Update rejected (HTTP ${response.statusCode})'; }
+                        }();
+                        throw Exception(detail);
+                      }
+                    } catch (e) {
+                      if (e.toString().contains('Update rejected')) rethrow;
+                      // Network failure: keep the local edit and durably queue it.
+                      if (_userId != null) {
+                        await SyncQueueManager.enqueue('update_local_product', {
+                          'id': productId,
+                          'user_id': _userId,
+                          'payload': apiUpdate,
+                        });
+                      }
                     }
-                  } catch (e) {
-                    debugPrint('Backend sync error - will sync later: $e');
-                    // 🔧 FIX: same shape mismatch as _updateStock above —
-                    // _updateLocalProductItem needs {id, user_id, payload}.
+                  } else {
                     if (_userId != null) {
-                      SyncQueueManager.enqueue('update_local_product', {
-                        'id': p['id'],
+                      await SyncQueueManager.enqueue('update_local_product', {
+                        'id': productId,
                         'user_id': _userId,
-                        'payload': updated,
+                        'payload': apiUpdate,
                       });
                     }
                   }
 
-                  if (mounted) Navigator.pop(context);
-                  // Refresh from server in background, but the UI is already updated
-                  _fetch(); 
-
+                  // Update cache only after backend confirmation or after the
+                  // operation is explicitly queued as an offline change.
+                  final cached = await LocalStorageService.loadBackendProducts();
+                  final idx = cached.indexWhere((item) => item['id'].toString() == productId.toString());
+                  if (idx >= 0) {
+                    cached[idx] = updated;
+                    await LocalStorageService.saveBackendProducts(cached);
+                  }
                   if (mounted) {
-                    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-                        content: const Text('\u2705 Product updated!'),
-                        backgroundColor: _success));
+                    setState(() {
+                      final prodIdx = _products.indexWhere((i) => i['id'].toString() == productId.toString());
+                      if (prodIdx >= 0) _products[prodIdx] = updated;
+                    });
+                    Navigator.pop(context);
+                    await _fetch();
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(content: Text(backendConfirmed ? '✅ Product updated on server.' : '📶 Product updated locally and queued for sync.'), backgroundColor: backendConfirmed ? _success : _warning),
+                    );
                   }
                   } finally {
                     // Only matters if we returned before the Navigator.pop

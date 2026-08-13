@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:crypto/crypto.dart';
+import 'local_storage_service.dart';
 
 class BackupService {
   static const String backupDir = 'retail_mind_backups';
@@ -19,16 +20,31 @@ class BackupService {
         throw Exception('No app data to backup');
       }
       
-      // Get all stored data
+      // Include both SharedPreferences and the encrypted Hive-backed business snapshot.
+      String? localStorageSnapshot;
+      try {
+        final snapshotPath = await LocalStorageService.exportSecureBackup();
+        if (snapshotPath != null) {
+          localStorageSnapshot = await File(snapshotPath).readAsString();
+        }
+      } catch (e) {
+        if (kDebugMode) debugPrint('⚠️ Secure local snapshot unavailable: $e');
+      }
+
+      final prefsData = _getAllPreferences(prefs);
       final backupData = {
         'timestamp': DateTime.now().toIso8601String(),
-        'version': '2.0',
+        'version': '2.1',
         'appVersion': '1.0.0+1',
         'data': {
-          'preferences': _getAllPreferences(prefs),
+          'preferences': prefsData,
           'backupDate': DateTime.now().toString(),
+          'local_storage_backup': localStorageSnapshot,
         },
-        'checksum': _generateChecksum(_getAllPreferences(prefs)),
+        'checksum': _generateChecksum({
+          'preferences': prefsData,
+          'local_storage_backup': localStorageSnapshot,
+        }),
       };
 
       // Save backup file
@@ -72,8 +88,8 @@ class BackupService {
 
       // App Version Compatibility Check
       final version = backupData['version']?.toString();
-      if (version != '2.0') {
-        throw Exception('Incompatible backup version ($version). Expected 2.0');
+      if (version != '2.0' && version != '2.1') {
+        throw Exception('Incompatible backup version ($version). Expected 2.0 or 2.1');
       }
 
       // Staleness Check (Max 30 days)
@@ -91,11 +107,12 @@ class BackupService {
       // Validate checksum if present
       if (backupData.containsKey('checksum')) {
         final prefsData = backupData['data']['preferences'] as Map<String, dynamic>?;
-        if (prefsData != null) {
-          final calculatedChecksum = _generateChecksum(prefsData);
-          if (calculatedChecksum != backupData['checksum']) {
-            throw Exception('Backup file corrupted: checksum mismatch');
-          }
+        final localSnapshot = backupData['data']['local_storage_backup'];
+        final calculatedChecksum = version == '2.1'
+            ? _generateChecksum({'preferences': prefsData ?? <String, dynamic>{}, 'local_storage_backup': localSnapshot})
+            : _generateChecksum(prefsData ?? <String, dynamic>{});
+        if (calculatedChecksum != backupData['checksum']) {
+          throw Exception('Backup file corrupted: checksum mismatch');
         }
       }
       
@@ -113,6 +130,12 @@ class BackupService {
     if (kDebugMode) debugPrint('⚠️ Failed to restore key ${entry.key}: $e');
           // Continue with next entry
         }
+      }
+
+      final localSnapshot = backupData['data']['local_storage_backup'];
+      if (localSnapshot is String && localSnapshot.isNotEmpty) {
+        final restored = await LocalStorageService.importSecureBackup(localSnapshot);
+        if (!restored) throw Exception('Local business-data restore failed');
       }
     if (kDebugMode) debugPrint('✅ Backup restored successfully: $restoredCount items restored');
       return true;

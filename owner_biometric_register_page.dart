@@ -121,8 +121,8 @@ class _OwnerBiometricRegisterPageState extends State<OwnerBiometricRegisterPage>
       await SecurityService.setOwnerBiometricStatusVerified();
       await SecurityService.setBiometricEnabled(true);
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: const Text('Biometric login enabled for this device.'),
+        const SnackBar(
+          content: Text('Biometric login enabled for this device.'),
           backgroundColor: AppColors.secondary,
         ),
       );

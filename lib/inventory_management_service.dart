@@ -11,6 +11,7 @@ import 'inventory_stock_helper.dart';
 import 'secure_token_storage.dart';
 import 'sync_queue_manager.dart';
 import 'sync_service.dart';
+import 'inventory_sync_service.dart';
 
 class InventoryManagementService {
   static bool suppressInventoryCallback = false;
@@ -42,20 +43,19 @@ class InventoryManagementService {
     try {
     if (kDebugMode) debugPrint('📦 Decreasing stock for $productName by $quantitySold units');
 
-      // Call backend to update stock
-      final response = await ApiClient.putJson(
-        '${ApiClient.inventoryPrefix}/products/$productId/decrease-stock',
-        {
-          'quantity': quantitySold,
-          'reason': 'SALE',
-          'reference_id': 'SALE_${DateTime.now().millisecondsSinceEpoch}',
-        },
+      // Canonical backend stock mutation. The old /products/{id}/decrease-stock
+      // endpoint was a legacy route and could diverge from invoice sync.
+      final referenceId = 'SALE_${DateTime.now().microsecondsSinceEpoch}_$productId';
+      final result = await InventorySyncService.deductStock(
+        productId: productId,
+        quantity: quantitySold,
+        referenceId: referenceId,
+        reason: 'SALE',
       );
 
-      if (response.statusCode == 200) {
-        final data = json.decode(response.body);
-        final newStock = data['current_stock'] ?? 0;
-        final alertTriggered = data['low_stock_alert'] ?? false;
+      if (result['success'] == true) {
+        final newStock = result['new_stock'] ?? result['current_stock'] ?? 0;
+        final alertTriggered = result['alertTriggered'] == true;
     if (kDebugMode) debugPrint('✅ Stock updated: $productName new stock = $newStock');
 
         // Handle low stock alert
@@ -81,8 +81,8 @@ class InventoryManagementService {
           'alertTriggered': false,
           'message': '✅ Stock decreased by $quantitySold units'
         };
-      } else if (response.statusCode == 400) {
-        final error = json.decode(response.body)['detail'] ?? 'Unknown error';
+      } else if (result['error'] == 'OUT_OF_STOCK' || result['error'] == 'INVALID_QUANTITY') {
+        final error = result['message'] ?? result['error'] ?? 'Invalid stock operation';
     if (kDebugMode) debugPrint('❌ Stock decrease error: $error');
         return {
           'success': false,
@@ -95,7 +95,7 @@ class InventoryManagementService {
           'success': false,
           'newStock': -1,
           'alertTriggered': false,
-          'message': 'Failed to update stock'
+          'message': result['message'] ?? result['error'] ?? 'Failed to update stock'
         };
       }
     } catch (e) {

@@ -1073,14 +1073,27 @@ class LocalStorageService {
     try {
       final sales = await loadSales();
       final products = await loadLocalProducts();
+      final backendProducts = await loadBackendProducts();
       final customers = await loadLocalCustomers();
+      final invoices = await loadLocalInvoices();
+      final inventory = await loadInventory();
+      final prefs = await SharedPreferences.getInstance();
       
       final Map<String, dynamic> backupData = {
         'timestamp': DateTime.now().toIso8601String(),
         'schema_version': _schemaVersion,
+        'user_id': await _getUserId(),
         'sales': sales,
         'products': products,
+        'backend_products': backendProducts,
         'customers': customers,
+        'invoices': invoices,
+        'inventory': inventory,
+        'scoped_preferences': prefs.getKeys().where((k) => !k.contains('token') && !k.contains('password')).fold<Map<String, dynamic>>({}, (m, k) {
+          final v = prefs.get(k);
+          if (v is String || v is num || v is bool || v is List<String>) m[k] = v;
+          return m;
+        }),
       };
       
       final jsonString = jsonEncode(backupData);
@@ -1102,7 +1115,16 @@ class LocalStorageService {
       
       final sales = backupData['sales'] as List<dynamic>? ?? [];
       final products = backupData['products'] as List<dynamic>? ?? [];
+      final backendProducts = backupData['backend_products'] as List<dynamic>? ?? [];
       final customers = backupData['customers'] as List<dynamic>? ?? [];
+      final invoices = backupData['invoices'] as List<dynamic>? ?? [];
+      final inventory = backupData['inventory'] as List<dynamic>? ?? [];
+
+      final expectedUser = await _getUserId();
+      final backupUser = int.tryParse(backupData['user_id']?.toString() ?? '');
+      if (expectedUser != null && backupUser != null && expectedUser != backupUser) {
+        throw Exception('Backup belongs to a different account');
+      }
       
       final salesBox = await _getBox(_salesBoxBase, encrypted: true);
       final productsBox = await _getBox(_productsBoxBase, encrypted: true);
@@ -1123,6 +1145,12 @@ class LocalStorageService {
       }
       
       await customersBox.put('customers', customers);
+      final backendProductsBox = await _getBox(_productsBoxBase, encrypted: true);
+      await backendProductsBox.put('backend_products', backendProducts);
+      final invoicesBox = await _getBox(_invoicesBoxBase, encrypted: true);
+      await invoicesBox.put('all_invoices', invoices);
+      final inventoryBox = await _getBox(_inventoryBoxBase, encrypted: true);
+      await inventoryBox.put('all_inventory', inventory);
       
       if (kDebugMode) debugPrint('✅ Backup imported successfully');
       return true;

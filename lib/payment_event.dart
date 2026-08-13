@@ -73,7 +73,7 @@ class PaymentEvent {
        updatedAt = updatedAt ?? DateTime.now();
 
   static String _genId() {
-    final ts = DateTime.now().millisecondsSinceEpoch;
+    final ts = DateTime.now().microsecondsSinceEpoch;
     return 'pmt_$ts';
   }
 

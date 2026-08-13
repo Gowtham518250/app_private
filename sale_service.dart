@@ -375,48 +375,39 @@ try {
 }
 
   static Future<bool> _markSaleAsSynced(String saleId) async {
-    if (saleId.isEmpty) return false;
     try {
       final prefs = await SharedPreferences.getInstance();
-      final syncedSales = prefs.getStringList('synced_sales') ?? <String>[];
+      final syncedSales = prefs.getStringList('synced_sales') ?? [];
       if (!syncedSales.contains(saleId)) {
         syncedSales.add(saleId);
         if (syncedSales.length > 1000) {
           syncedSales.removeRange(0, syncedSales.length - 1000);
         }
-        final saved = await prefs.setStringList('synced_sales', syncedSales);
-        if (!saved) return false;
+        await prefs.setStringList('synced_sales', syncedSales);
       }
 
-      final sales = await LocalStorageService.loadSales();
-      bool updated = false;
-      for (int i = 0; i < sales.length; i++) {
-        final raw = sales[i];
-        if (raw is! Map) continue;
-        final currentId = (raw['sale_id'] ?? raw['invoice_number'] ?? raw['id'] ?? '').toString();
-        if (currentId != saleId) continue;
-        sales[i] = {
-          ...Map<String, dynamic>.from(raw),
-          'sync_status': 'synced',
-          'updated_at': DateTime.now().toUtc().toIso8601String(),
-          'last_sync_attempt': DateTime.now().toUtc().toIso8601String(),
-          'is_synced': true,
-        };
-        updated = true;
-        break;
-      }
-
-      if (updated) {
-        await LocalStorageService.saveSales(sales);
-      }
-
-      // The idempotency marker is the durable acknowledgement even if the
-      // local sales cache does not currently contain the sale.
-      return (await _isSaleSynced(saleId));
-    } catch (e) {
-      if (kDebugMode) debugPrint('⚠️ Failed to mark sale as synced: $e');
-      return false;
+  final sales = await LocalStorageService.loadSales();
+  bool updated = false;
+  for (int i = 0; i < sales.length; i++) {
+    if (sales[i]['sale_id'] == saleId) {
+      sales[i] = {
+        ...sales[i],
+        'sync_status': 'synced',
+        'updated_at': DateTime.now().toUtc().toIso8601String(),
+        'last_sync_attempt': DateTime.now().toUtc().toIso8601String(),
+      };
+      updated = true;
+      break;
     }
+  }
+  if (updated) {
+    await LocalStorageService.saveSales(sales);
+  }
+  return true;
+  } catch (e) {
+    if (kDebugMode) debugPrint('⚠️ Failed to mark sale as synced: $e');
+    return false;
+  }
   }
 
   static Future<bool> _isSaleSynced(String saleId) async {
@@ -430,8 +421,8 @@ try {
   }
 
   static Future<bool> markSaleAsSynced(String saleId) async {
-    if (saleId.trim().isEmpty) return false;
-    return _markSaleAsSynced(saleId.trim());
+    if (saleId.isEmpty) return false;
+    return _markSaleAsSynced(saleId);
   }
 
   static void triggerBackgroundAlert(Map<String, dynamic> item) {

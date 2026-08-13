@@ -2410,32 +2410,58 @@ class _SalesEntryPageState extends State<SalesEntryPage>
     double flashSaleDiscount = 0.0;
     try {
       final flashSaleData = await ScopedSharedPreferences.getString('active_flash_sale');
-
       if (flashSaleData != null && flashSaleData.isNotEmpty) {
-        final flashSale = jsonDecode(flashSaleData);
-        final expiry = DateTime.parse(flashSale['expiry']);
-
-        // Check if flash sale is still valid
-        if (DateTime.now().isBefore(expiry)) {
-          final discountPercent = double.tryParse(flashSale['discount']?.toString() ?? '0') ?? 0;
-          if (discountPercent > 0) {
-            flashSaleDiscount = subTotal * (discountPercent / 100);
-            if (kDebugMode) debugPrint('✅ Flash sale discount applied: ${discountPercent}% = ₹$flashSaleDiscount');
-          }
-        } else {
-          // Flash sale expired, clear local data
+        final dynamic decoded = jsonDecode(flashSaleData);
+        if (decoded is! Map) throw const FormatException('Invalid flash sale payload');
+        final sale = Map<String, dynamic>.from(decoded);
+        final expiry = DateTime.tryParse(sale['expiry']?.toString() ?? '');
+        if (expiry == null || !DateTime.now().isBefore(expiry)) {
           await ScopedSharedPreferences.remove('active_flash_sale');
-          if (kDebugMode) debugPrint('⏰ Flash sale expired during sale, cleared');
+        } else {
+          final pct = (double.tryParse(sale['discount']?.toString() ?? '0') ?? 0).clamp(0, 100);
+          final singleCategory = sale['category']?.toString().trim().toLowerCase() ?? '';
+          final categories = (sale['categories'] as List?)?.map((e) => e.toString().trim().toLowerCase()).toSet() ?? <String>{};
+          if (singleCategory.isNotEmpty) categories.add(singleCategory);
+          final productIds = (sale['product_ids'] as List?)?.map((e) => e.toString()).toSet() ?? <String>{};
+          final skus = (sale['skus'] as List?)?.map((e) => e.toString().trim().toLowerCase()).toSet() ?? <String>{};
+          final products = await LocalStorageService.loadBackendProducts();
+          double eligible = 0;
+
+          for (final entry in entries) {
+            final name = entry['item']?.text?.trim() ?? '';
+            final barcode = entry['barcode']?.text?.trim() ?? '';
+            final qty = double.tryParse(entry['qty']?.text?.trim() ?? '1') ?? 1;
+            final price = double.tryParse(entry['price']?.text?.trim() ?? '0') ?? 0;
+            final line = math.max(0, qty * price);
+            if (line <= 0) continue;
+            final product = products.cast<Map<String, dynamic>>().firstWhere(
+              (p) => p['id']?.toString() == barcode ||
+                     p['product_id']?.toString() == barcode ||
+                     p['sku']?.toString().toLowerCase() == barcode.toLowerCase() ||
+                     p['product_name']?.toString().toLowerCase() == name.toLowerCase(),
+              orElse: () => <String, dynamic>{},
+            );
+            final id = product['id']?.toString() ?? product['product_id']?.toString() ?? barcode;
+            final sku = product['sku']?.toString().toLowerCase() ?? barcode.toLowerCase();
+            final category = product['category']?.toString().trim().toLowerCase() ?? '';
+            final eligibleLine = productIds.isNotEmpty
+                ? productIds.contains(id)
+                : skus.isNotEmpty
+                    ? skus.contains(sku)
+                    : categories.isNotEmpty
+                        ? categories.contains(category)
+                        : true;
+            if (eligibleLine) eligible += line;
+          }
+          flashSaleDiscount = eligible * (pct / 100);
+          if (kDebugMode) debugPrint('✅ Scoped Flash Sale discount: $pct% = ₹$flashSaleDiscount');
         }
       }
     } catch (e) {
       if (kDebugMode) debugPrint('⚠️ Error applying flash sale discount: $e');
     }
-
     if (mounted && flashSaleDiscount != _flashSaleDiscount) {
-      setState(() {
-        _flashSaleDiscount = flashSaleDiscount;
-      });
+      setState(() => _flashSaleDiscount = flashSaleDiscount);
       calculateTotal();
     }
   }

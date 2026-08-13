@@ -33,7 +33,6 @@ class SyncQueueManager {
     'update_invoice_unpaid',
     'record_khata_payment',
     'decrease_stock',
-    'delete_product',
     'create_purchase_order',
     'update_purchase_order_status',
   };
@@ -104,9 +103,6 @@ class SyncQueueManager {
       case 'decrease_stock':
         return data['product_id'] != null ||
             data['product_name'] != null;
-
-      case 'delete_product':
-        return data['id'] != null || data['product_id'] != null;
 
       default:
         return true;

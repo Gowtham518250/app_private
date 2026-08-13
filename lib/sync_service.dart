@@ -546,6 +546,10 @@ class SyncService {
               success = await _createLocalProductItem(data);
               break;
 
+            case 'delete_product':
+              success = await _deleteProductItem(data);
+              break;
+
             case 'create_purchase_order':
               success = await _createPurchaseOrderItem(data);
               break;
@@ -914,9 +918,19 @@ static Future<bool> _createLocalProductItem(Map<String, dynamic> data) async {
       final payload = data['payload'];
       if (payload is! Map) return false;
 
+      final raw = Map<String, dynamic>.from(payload);
+      final apiPayload = <String, dynamic>{
+        'product_name': raw['product_name'] ?? raw['name'] ?? '',
+        'sku': raw['sku'] ?? raw['barcode'] ?? '',
+        'unit_price': raw['unit_price'] ?? raw['price'] ?? 0,
+        'current_stock': raw['current_stock'] ?? raw['stock'] ?? raw['quantity'] ?? 0,
+        'min_stock': raw['min_stock'] ?? 10,
+        'category': raw['category'] ?? 'General',
+      };
+
       final res = await ApiClient.postJson(
         '${ApiClient.inventoryPrefix}/products?user_id=$userId',
-        Map<String, dynamic>.from(payload),
+        apiPayload,
         headers: {'Authorization': 'Bearer $token'},
       ).timeout(const Duration(seconds: 15));
 
@@ -938,6 +952,25 @@ static Future<bool> _createLocalProductItem(Map<String, dynamic> data) async {
     }
   }
 
+
+
+static Future<bool> _deleteProductItem(Map<String, dynamic> data) async {
+    try {
+      final token = await SecureTokenStorage.getToken() ?? '';
+      if (token.isEmpty) return false;
+      final id = int.tryParse(data['id']?.toString() ?? '');
+      final userId = data['user_id'];
+      if (id == null || id <= 0) return false;
+      final res = await ApiClient.deleteJson(
+        '${ApiClient.inventoryPrefix}/products/$id?user_id=$userId',
+        headers: {'Authorization': 'Bearer $token'},
+      ).timeout(const Duration(seconds: 15));
+      return res.statusCode == 200 || res.statusCode == 204 || res.statusCode == 404;
+    } catch (e) {
+      if (kDebugMode) debugPrint('❌ Error syncing product deletion: $e');
+      return false;
+    }
+  }
 
 static Future<bool> _createPurchaseOrderItem(Map<String, dynamic> data) async {
     try {

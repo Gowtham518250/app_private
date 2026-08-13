@@ -81,7 +81,7 @@ class _DayClosingPageState extends State<DayClosingPage> {
         final method = s['payment_method']?.toString().toUpperCase().trim() ?? 'CASH';
         final status = s['payment_status']?.toString().toUpperCase().trim() ?? 'PAID';
 
-        if (status == 'BORROW') {
+        if (status == 'BORROW' || method == 'BORROW' || method == 'CREDIT' || method == 'KHATA') {
           _totalBorrow += total;
         } else if (method == 'CASH' || method == 'CASH PAYMENT' || method.isEmpty || method == 'CASH_PAYMENT') {
           _totalCash += total;
