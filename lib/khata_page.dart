@@ -479,8 +479,16 @@ class _KhataPageState extends State<KhataPage> with SingleTickerProviderStateMix
 
     if (success) {
       _showToast('WhatsApp reminder opened for $name!');
-    } else {
-      _showToast('Could not launch WhatsApp app');
+      return;
+    }
+    // Reliable fallback when the native WhatsApp intent is unavailable.
+    final digits = phone.replaceAll(RegExp(r'[^0-9]'), '');
+    final normalized = digits.startsWith('91') ? digits : '91$digits';
+    final fallback = Uri.parse('https://wa.me/$normalized?text=${Uri.encodeComponent('Hello $name, your pending balance is ₹${balance.toStringAsFixed(2)} at $shopName.')}' );
+    try {
+      await launchUrl(fallback, mode: LaunchMode.externalApplication);
+    } catch (_) {
+      _showToast('Could not launch WhatsApp or browser');
     }
   }
 

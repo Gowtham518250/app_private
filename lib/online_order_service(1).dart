@@ -4,9 +4,8 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'notification_service.dart';
-import 'api_client.dart';
-import 'secure_token_storage.dart';
 import 'payment_event.dart';
+import 'api_client.dart';
 
 /// Online orders: analytics, UPI matching, notifications helpers.
 class OnlineOrderService {
@@ -40,73 +39,78 @@ class OnlineOrderService {
     }
   }
 
-  /// Online metrics from the canonical FastAPI owner-order source.
-  /// Firestore remains available for customer-store UPI configuration, but
-  /// owner analytics must come from the same backend that drives order status.
+  /// Online metrics from the same backend order API used by the owner order
+  /// screen. The previous implementation queried a separate Firestore
+  /// collection, so an order accepted/converted by the FastAPI store could
+  /// correctly exist in the app while this dashboard still reported 0.
   static Future<Map<String, dynamic>> getAnalytics(String shopId) async {
     if (shopId.isEmpty || shopId == '0') {
-      return {'pending': 0, 'todayCount': 0, 'todayRevenue': 0.0, 'paidCount': 0, 'totalCount': 0};
+      return {'pending': 0, 'todayCount': 0, 'totalCount': 0, 'todayRevenue': 0.0, 'paidCount': 0};
     }
 
-    try {
-      final token = await SecureTokenStorage.getToken() ?? '';
-      if (token.isEmpty) {
-        return {'pending': 0, 'todayCount': 0, 'todayRevenue': 0.0, 'paidCount': 0, 'totalCount': 0};
-      }
+    final today = DateTime.now();
+    final startOfDay = DateTime(today.year, today.month, today.day);
+    final statuses = const ['PENDING', 'ACCEPTED', 'DISPATCHED', 'DELIVERED'];
+    final byId = <String, Map<String, dynamic>>{};
 
-      const statuses = <String>['PENDING', 'ACCEPTED', 'DISPATCHED', 'DELIVERED'];
-      final ordersById = <String, Map<String, dynamic>>{};
+    try {
       for (final status in statuses) {
         try {
-          final response = await ApiClient.getJson(
-            '/store/owner/orders?status=$status',
-            headers: {'Authorization': 'Bearer $token'},
-          ).timeout(const Duration(seconds: 10));
+          final response = await ApiClient.getJson('/store/owner/orders?status=$status')
+              .timeout(const Duration(seconds: 8));
           if (response.statusCode != 200) continue;
           final body = jsonDecode(response.body);
           final raw = body is Map ? body['orders'] : body;
           if (raw is! List) continue;
-          for (final item in raw) {
-            if (item is! Map) continue;
-            final order = Map<String, dynamic>.from(item);
-            final id = (order['order_id'] ?? order['id'] ?? '').toString();
-            if (id.isNotEmpty) ordersById[id] = order;
+          for (final value in raw) {
+            if (value is! Map) continue;
+            final order = Map<String, dynamic>.from(value);
+            final id = (order['order_id'] ?? order['id'] ?? '').toString().trim();
+            if (id.isNotEmpty) byId[id] = {...(byId[id] ?? const <String, dynamic>{}), ...order};
           }
         } catch (e) {
           if (kDebugMode) debugPrint('getAnalytics $status: $e');
         }
       }
 
-      final now = DateTime.now();
-      final today = DateTime(now.year, now.month, now.day);
-      int pending = 0;
-      int todayCount = 0;
-      int paidCount = 0;
-      double todayRevenue = 0.0;
+      var pending = 0;
+      var todayCount = 0;
+      var paidCount = 0;
+      double todayRevenue = 0;
 
-      for (final order in ordersById.values) {
-        final status = (order['status'] ?? order['order_status'] ?? '').toString().toUpperCase();
+      for (final d in byId.values) {
+        final status = (d['status'] ?? '').toString().toUpperCase();
         if (status == 'PENDING') pending++;
-        final rawDate = order['created_at'] ?? order['timestamp'] ?? order['placed_at'];
-        final dt = rawDate == null ? null : DateTime.tryParse(rawDate.toString())?.toLocal();
-        if (dt != null && DateTime(dt.year, dt.month, dt.day) == today && status != 'REJECTED') {
+        if (status == 'REJECTED' || status == 'CANCELLED') continue;
+
+        final rawTime = d['timestamp'] ?? d['created_at'] ?? d['createdAt'] ?? d['order_date'];
+        DateTime? orderTime;
+        if (rawTime is Timestamp) orderTime = rawTime.toDate();
+        else if (rawTime != null) orderTime = DateTime.tryParse(rawTime.toString());
+        if (orderTime != null && orderTime.isBefore(startOfDay)) continue;
+
+        if (orderTime != null) {
           todayCount++;
-          todayRevenue += (order['total_amount'] as num?)?.toDouble() ?? double.tryParse(order['total_amount']?.toString() ?? '0') ?? 0.0;
-          final paymentStatus = (order['payment_status'] ?? '').toString().toUpperCase();
-          if (paymentStatus == 'PAID' || status == 'DELIVERED') paidCount++;
+          final rawAmount = d['total_amount'] ?? d['total'] ?? d['grand_total'];
+          final amount = rawAmount is num ? rawAmount.toDouble() : double.tryParse(rawAmount?.toString() ?? '0') ?? 0.0;
+          todayRevenue += amount;
+          if ((d['payment_status'] ?? '').toString().toLowerCase() == 'paid') paidCount++;
         }
       }
 
       return {
         'pending': pending,
         'todayCount': todayCount,
+        'totalCount': byId.values.where((d) {
+          final st = (d['status'] ?? '').toString().toUpperCase();
+          return st != 'REJECTED' && st != 'CANCELLED';
+        }).length,
         'todayRevenue': todayRevenue,
         'paidCount': paidCount,
-        'totalCount': ordersById.length,
       };
     } catch (e) {
       if (kDebugMode) debugPrint('getAnalytics: $e');
-      return {'pending': 0, 'todayCount': 0, 'todayRevenue': 0.0, 'paidCount': 0, 'totalCount': 0};
+      return {'pending': 0, 'todayCount': 0, 'totalCount': 0, 'todayRevenue': 0.0, 'paidCount': 0};
     }
   }
 

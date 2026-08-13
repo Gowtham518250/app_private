@@ -81,7 +81,6 @@ class _AttendancePageState extends State<AttendancePage>
     }
 
     await _loadStaff();
-    await OfflineAttendanceService.reconcileFromBackend();
     await _fetch();
   }
 
@@ -131,6 +130,10 @@ class _AttendancePageState extends State<AttendancePage>
   Future<void> _fetch() async {
     setState(() => _loading = true);
     try {
+      // Reconcile from the backend before deciding today's state. Local data is
+      // a cache; after app-data clearing the server record must restore the
+      // completed check-in/check-out state.
+      await OfflineAttendanceService.reconcileFromBackend();
       // Local-first: render persisted attendance immediately, even offline.
       final localRecords = await OfflineAttendanceService.loadLocalRecords();
       if (mounted && localRecords.isNotEmpty) {
@@ -235,8 +238,8 @@ class _AttendancePageState extends State<AttendancePage>
     final myRecord = _records.where((r) {
       // Backend returns attendance_date as "2026-07-21" string — normalize both sides
       final recDate = (r['attendance_date'] ?? '').toString().split('T').first.trim();
-      final empId = r['employee_id'];
-      // Handle both int and string employee_id from backend JSON
+      final empId = r['employee_id'] ?? r['worker_id'];
+      // Backend may identify the owner/worker with either field. Normalize both.
       final empIdMatch = empId == _userId || empId.toString() == _userId.toString();
       return empIdMatch && recDate == today;
     }).firstOrNull;
@@ -327,7 +330,7 @@ class _AttendancePageState extends State<AttendancePage>
       Map<String, dynamic>? myRecord;
       for (final r in _records) {
         final recDate = (r['attendance_date'] ?? '').toString().split('T').first.trim();
-        final empId = r['employee_id'];
+        final empId = r['employee_id'] ?? r['worker_id'];
         if ((empId == _userId || empId.toString() == _userId.toString()) && recDate == today) {
           myRecord = Map<String, dynamic>.from(r as Map);
           break;
@@ -368,7 +371,7 @@ class _AttendancePageState extends State<AttendancePage>
     // ✅ FIX: Normalize date and employee_id comparison (backend may return string ID)
     final myRecord = _records.where((r) {
       final recDate = (r['attendance_date'] ?? '').toString().split('T').first.trim();
-      final empId = r['employee_id'];
+      final empId = r['employee_id'] ?? r['worker_id'];
       final empIdMatch = empId == _userId || empId.toString() == _userId.toString();
       return empIdMatch && recDate == today;
     }).firstOrNull;

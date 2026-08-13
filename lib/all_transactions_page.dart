@@ -11,6 +11,7 @@ import 'local_storage_service.dart';
 import 'sales_dedup_helper.dart';
 import 'invoices_page.dart';
 import 'khata_page.dart';
+import 'sync_queue_manager.dart';
 
 class AllTransactionsPage extends StatefulWidget {
   const AllTransactionsPage({super.key});
@@ -35,12 +36,13 @@ class _AllTransactionsPageState extends State<AllTransactionsPage>
   List<Map<String, dynamic>> _onlineTransactions = [];
   List<Map<String, dynamic>> _khataTransactions = [];
   List<Map<String, dynamic>> _invoiceTransactions = [];
+  List<Map<String, dynamic>> _paidCustomers = [];
 
   @override
   void initState() {
     super.initState();
     AllTransactionsPage._state = this;
-    _tabController = TabController(length: 5, vsync: this);
+    _tabController = TabController(length: 6, vsync: this);
     _loadAllTransactions();
   }
 
@@ -177,13 +179,41 @@ class _AllTransactionsPageState extends State<AllTransactionsPage>
         debugPrint('⚠️ Failed to load invoices: $e');
       }
 
-      // Combine all
-      _allTransactions = [
-        ..._cashTransactions,
-        ..._onlineTransactions,
-        ..._khataTransactions,
-        ..._invoiceTransactions,
-      ];
+      // Combine by business transaction id. A backend invoice and its local
+      // sale are the SAME transaction and must not count twice.
+      final combinedById = <String, Map<String, dynamic>>{};
+      void addUnique(List<Map<String, dynamic>> items) {
+        for (final item in items) {
+          final key = (item['id'] ?? '').toString().trim();
+          if (key.isEmpty) continue;
+          final existing = combinedById[key];
+          if (existing == null) {
+            combinedById[key] = item;
+          } else {
+            combinedById[key] = {...existing, ...item, 'raw': item['raw'] ?? existing['raw']};
+          }
+        }
+      }
+      addUnique(_cashTransactions);
+      addUnique(_onlineTransactions);
+      addUnique(_khataTransactions);
+      addUnique(_invoiceTransactions);
+      _allTransactions = combinedById.values.toList();
+
+      _paidCustomers = _invoiceTransactions.where((invoice) {
+        final status = invoice['status']?.toString().toUpperCase() ?? '';
+        return status == 'PAID';
+      }).map((invoice) {
+        return {
+          'id': invoice['id'],
+          'customer': invoice['customer'] ?? 'Unknown Customer',
+          'customer_phone': invoice['customer_phone'] ?? '',
+          'amount': invoice['amount'] ?? 0.0,
+          'date': invoice['paid_date'] ?? invoice['invoice_date'] ?? invoice['date'],
+          'invoice_number': invoice['id'],
+          'status': 'PAID',
+        };
+      }).toList();
 
       // Sort by date
       _allTransactions.sort((a, b) {
@@ -224,6 +254,7 @@ class _AllTransactionsPageState extends State<AllTransactionsPage>
             Tab(text: '💳 Online (${_onlineTransactions.length})'),
             Tab(text: '📔 Khata (${_khataTransactions.length})'),
             Tab(text: '🧾 Invoice (${_invoiceTransactions.length})'),
+            Tab(text: '✅ Paid Customers (${_paidCustomers.length})'),
           ],
         ),
       ),
@@ -261,6 +292,7 @@ class _AllTransactionsPageState extends State<AllTransactionsPage>
                           _buildTransactionList(_onlineTransactions, 'Online Transactions'),
                           _buildTransactionList(_khataTransactions, 'Khata Ledger'),
                           _buildTransactionList(_invoiceTransactions, 'Invoices'),
+                          _buildPaidCustomersList(),
                         ],
                       ),
                     ),
@@ -271,6 +303,31 @@ class _AllTransactionsPageState extends State<AllTransactionsPage>
         backgroundColor: const Color(0xFFF59E0B),
         child: const Icon(Icons.refresh),
       ),
+    );
+  }
+
+  Widget _buildPaidCustomersList() {
+    if (_paidCustomers.isEmpty) {
+      return const Center(child: Text('No paid customers', style: TextStyle(color: Colors.white70)));
+    }
+    return ListView.builder(
+      padding: const EdgeInsets.all(12),
+      itemCount: _paidCustomers.length,
+      itemBuilder: (context, index) {
+        final c = _paidCustomers[index];
+        final date = DateTime.tryParse(c['date']?.toString() ?? '')?.toLocal();
+        final dateText = date == null ? 'Unknown date' : DateFormat('dd MMM yyyy, hh:mm a').format(date);
+        return Card(
+          color: Colors.grey[900],
+          child: ListTile(
+            leading: const CircleAvatar(backgroundColor: Color(0xFF10B981), child: Icon(Icons.person, color: Colors.white)),
+            title: Text(c['customer']?.toString() ?? 'Unknown Customer', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600)),
+            subtitle: Text('${c['customer_phone'] ?? 'No phone'}\nInvoice: ${c['invoice_number'] ?? '-'}\nPaid: $dateText', style: const TextStyle(color: Colors.white70)),
+            isThreeLine: true,
+            trailing: Text('₹${(c['amount'] as num?)?.toStringAsFixed(2) ?? '0.00'}', style: const TextStyle(color: Color(0xFF10B981), fontWeight: FontWeight.bold)),
+          ),
+        );
+      },
     );
   }
 
@@ -567,8 +624,15 @@ class _AllTransactionsPageState extends State<AllTransactionsPage>
         details.add(_detailRow('Customer', txn['customer'].toString()));
       }
       if (txn['items'] != null && (txn['items'] as List).isNotEmpty) {
-        final itemCount = (txn['items'] as List).length;
-        details.add(_detailRow('Items', '$itemCount item(s)'));
+        final items = txn['items'] as List;
+        final names = items.map((e) {
+          if (e is! Map) return '';
+          final raw = (e['product_name'] ?? e['product'] ?? e['name'] ?? e['description'] ?? '').toString().trim();
+          if (raw.isEmpty || raw.toLowerCase() == 'product' || raw.startsWith('sale_')) return '';
+          return raw;
+        }).where((n) => n.isNotEmpty).toSet().join(', ');
+        final itemCount = items.length;
+        details.add(_detailRow('Items', names.isEmpty ? '$itemCount item(s)' : names));
       }
     } else if (type.contains('online') || type.contains('upi') || type.contains('card')) {
       if (txn['customer'] != null) {
@@ -786,22 +850,37 @@ class _AllTransactionsPageState extends State<AllTransactionsPage>
       }
 
       // 4. Sync to backend
+      final paidDate = DateTime.now().toUtc().toIso8601String();
       final token = await SecureTokenStorage.getToken();
+      bool backendConfirmed = false;
       if (token != null && token.isNotEmpty) {
         try {
-          await ApiClient.postJson(
+          final response = await ApiClient.postJson(
             '/api/invoices/$invoiceNum/mark-paid/',
             {
               'payment_status': 'PAID',
-              'paid_date': DateTime.now().toIso8601String(),
+              'paid_date': paidDate,
               'customer_phone': customerPhone,
               'amount': amount,
+              'paid_amount': amount,
             },
             headers: {'Authorization': 'Bearer $token'},
           ).timeout(const Duration(seconds: 10));
+          backendConfirmed = response.statusCode >= 200 && response.statusCode < 300;
         } catch (e) {
           if (kDebugMode) debugPrint('⚠️ Backend sync failed: $e');
         }
+      }
+      if (!backendConfirmed) {
+        await SyncQueueManager.enqueue('update_invoice_paid', {
+          'operation_id': 'PAID_$invoiceNum',
+          'idempotency_key': 'PAID_$invoiceNum',
+          'invoice_number': invoiceNum,
+          'payment_status': 'PAID',
+          'paid_amount': amount,
+          'paid_date': paidDate,
+          'customer_phone': customerPhone,
+        });
       }
 
       // 5. ✅ Refresh both views

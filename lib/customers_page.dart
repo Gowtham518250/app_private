@@ -716,16 +716,22 @@ class _CustomersPageState extends State<CustomersPage> {
     final whatsappUrl = 'https://wa.me/91$phone?text=$encodedMsg';
     
     try {
-      if (await canLaunchUrl(Uri.parse(whatsappUrl))) {
-        await launchUrl(Uri.parse(whatsappUrl), mode: LaunchMode.externalApplication);
-      } else {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('❌ Could not launch WhatsApp')),
-        );
+      final appUrl = Uri.parse('whatsapp://send?phone=91$phone&text=$encodedMsg');
+      final webUrl = Uri.parse(whatsappUrl);
+      if (await canLaunchUrl(appUrl)) {
+        await launchUrl(appUrl, mode: LaunchMode.externalApplication);
+        return;
       }
+      // Fallback: WhatsApp Web also works when the native app URI isn't
+      // exposed by Android package visibility or WhatsApp is not installed.
+      if (await canLaunchUrl(webUrl)) {
+        await launchUrl(webUrl, mode: LaunchMode.externalApplication);
+        return;
+      }
+      await launchUrl(webUrl, mode: LaunchMode.externalApplication);
     } catch (e) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('❌ WhatsApp not installed or error occurred')),
+        SnackBar(content: Text('Could not open WhatsApp. Use this link manually if needed: $whatsappUrl')),
       );
     }
   }

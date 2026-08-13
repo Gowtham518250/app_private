@@ -322,13 +322,15 @@ Total: ₹${totalSales.toStringAsFixed(2)}
 
     try {
       if (await canLaunchUrl(whatsappUri)) {
-        return await launchUrl(whatsappUri, mode: LaunchMode.externalApplication);
-      } else if (await canLaunchUrl(webUri)) {
-        return await launchUrl(webUri, mode: LaunchMode.externalApplication);
-      } else {
-        debugPrint('$_tag Could not launch WhatsApp for phone: $cleanPhone');
-        return false;
+        final opened = await launchUrl(whatsappUri, mode: LaunchMode.externalApplication);
+        if (opened) return true;
       }
+      // Some Android builds report false from canLaunchUrl for HTTPS even
+      // though a browser is available. Try the web fallback directly.
+      final openedWeb = await launchUrl(webUri, mode: LaunchMode.externalApplication);
+      if (openedWeb) return true;
+      debugPrint('$_tag Could not launch WhatsApp/browser for phone: $cleanPhone');
+      return false;
     } catch (e) {
       debugPrint('$_tag WhatsApp launch error: $e');
       return false;

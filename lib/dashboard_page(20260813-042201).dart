@@ -217,8 +217,7 @@ class _DashboardPageState extends State<DashboardPage>
   // Performance optimization: Cache today's metrics to avoid recalculation
   double? _cachedTodaySales;
   int? _cachedTodayOrders;
-  int? _cachedTodayOnlineOrders; // Cache today's online orders
-  int? _cachedTotalOnlineOrders; // Canonical backend total online orders
+  int? _cachedTodayOnlineOrders; // 🔒 NEW: Cache today's online orders
   DateTime? _lastMetricsCacheDate;
   // Soundbox & Welcome Card state
   bool _soundboxActive = false;
@@ -1005,18 +1004,48 @@ class _DashboardPageState extends State<DashboardPage>
   Future<void> _loadOnlineStoreStats() async {
     if (!_isOnlineStoreActive) return;
     try {
-      final prefs = await SharedPreferences.getInstance();
-      final shopId = (prefs.getInt('user_id') ?? prefs.getInt('userId') ?? 0).toString();
-      final metrics = await OnlineOrderService.getAnalytics(shopId);
-      if (!mounted) return;
-      setState(() {
-        _onlinePendingOrders = (metrics['pending'] as num?)?.toInt() ?? 0;
-        _onlineTodayOrders = (metrics['todayCount'] as num?)?.toInt() ?? 0;
-        _onlineTodayRevenue = (metrics['todayRevenue'] as num?)?.toDouble() ?? 0.0;
-        _onlinePaidCount = (metrics['paidCount'] as num?)?.toInt() ?? 0;
-        _cachedTodayOnlineOrders = _onlineTodayOrders;
-        _cachedTotalOnlineOrders = (metrics['totalCount'] as num?)?.toInt() ?? 0;
-      });
+      final res = await ApiClient.getJson('/store/owner/orders');
+      if (res.statusCode == 200) {
+        final body = json.decode(res.body);
+        final List orders = body['orders'] ?? [];
+        int pending = 0;
+        int todayCount = 0;
+        double todayRev = 0.0;
+        int paid = 0;
+        
+        final now = DateTime.now();
+        final today = DateTime(now.year, now.month, now.day);
+        
+        for (final o in orders) {
+          final status = o['status']?.toString().toUpperCase() ?? '';
+          if (status == 'PENDING') {
+            pending++;
+          }
+          
+          if (o['created_at'] != null) {
+            try {
+              final createdAt = DateTime.parse(o['created_at']);
+              final orderDate = DateTime(createdAt.year, createdAt.month, createdAt.day);
+              if (orderDate == today) {
+                todayCount++;
+                todayRev += (o['total_amount'] as num?)?.toDouble() ?? 0.0;
+                if (status == 'DELIVERED') {
+                  paid++;
+                }
+              }
+            } catch (_) {}
+          }
+        }
+        
+        if (mounted) {
+          setState(() {
+            _onlinePendingOrders = pending;
+            _onlineTodayOrders = todayCount;
+            _onlineTodayRevenue = todayRev;
+            _onlinePaidCount = paid;
+          });
+        }
+      }
     } catch (e) {
       if (kDebugMode) debugPrint('⚠️ Failed to load online stats: $e');
     }
@@ -1361,30 +1390,34 @@ class _DashboardPageState extends State<DashboardPage>
             ];
           }
           final processedItems = rawLineItems.map((s) {
-            final rawName = (s['product_name'] ?? s['product'] ?? s['name'] ?? s['description'] ?? '').toString().trim();
-            final displayName = rawName.isEmpty || rawName.toLowerCase() == 'product'
-                ? 'Unknown Product'
-                : AnalyticsEngine.formatProductName(rawName);
             return {
-              'product_id': s['product_id'] ?? s['id'],
-              'product_name': displayName,
-              'product': displayName,
+              'product_name': (s['product_name'] ?? s['product'] ?? s['name'] ?? s['title'] ?? '').toString().trim(),
+              'product': (s['product_name'] ?? s['product'] ?? s['name'] ?? s['title'] ?? '').toString().trim(),
               'price': s['price'] ?? s['unit_price'] ?? 0,
               'quantity': s['quantity'] ?? s['qty'] ?? 1,
               'total': s['total'] ?? s['line_total'] ?? 0,
             };
           }).toList();
 
+          final source = (firstItem['source'] ?? firstItem['order_source'] ?? firstItem['channel'] ?? '').toString().toUpperCase();
+          final orderId = firstItem['order_id'] ?? firstItem['online_order_id'] ?? firstItem['order'];
           currentLocal.add({
             'sale_id': id,
             'invoice_number': id,
-            'date': firstItem['date'] ?? firstItem['created_at'] ?? firstItem['invoice_date'],
+            'date': firstItem['date'] ?? firstItem['created_at'] ?? firstItem['invoice_date'] ?? firstItem['business_date'],
+            'created_at': firstItem['created_at'] ?? firstItem['createdAt'],
+            'business_date': firstItem['business_date'] ?? firstItem['invoice_date'] ?? firstItem['date'],
             'items': processedItems,
-            'customer_name': firstItem['customer_name'] ?? '',
-            'customer_phone': firstItem['customer_phone'] ?? '',
+            'customer_name': firstItem['customer_name'] ?? firstItem['customer'] ?? '',
+            'customer_phone': firstItem['customer_phone'] ?? firstItem['phone'] ?? '',
             'total': firstItem['totalAmount']?.toString() ?? firstItem['total']?.toString() ?? firstItem['total_amount']?.toString(),
-            'payment_method': firstItem['payment_method'] ?? 'CASH',
+            'total_amount': firstItem['total_amount'] ?? firstItem['totalAmount'] ?? firstItem['total'],
+            'paid_amount': firstItem['paid_amount'] ?? firstItem['amount_paid'] ?? 0,
+            'payment_method': firstItem['payment_method'] ?? firstItem['paymentMode'] ?? 'CASH',
             'payment_status': firstItem['payment_status'] ?? 'PAID',
+            'source': source.isNotEmpty ? source : (orderId != null ? 'ONLINE' : 'OFFLINE'),
+            if (orderId != null) 'order_id': orderId,
+            if (orderId != null) 'online_order_id': orderId,
             'sync_status': 'synced',
           });
           added = true;
@@ -2143,10 +2176,11 @@ class _DashboardPageState extends State<DashboardPage>
   // ═══════════════════════════════════════════════════════════════════════
   // KPI CARDS - Show FILTERED PERIOD data (based on selected time filter)
   // ═══════════════════════════════════════════════════════════════════════
-  double get totalSales => engine.totalSales; // Lifetime total for headline KPI
-  int get totalTransactions => engine.totalTransactions; // Lifetime total for headline KPI
-  double get averageSale => engine.filteredAverageSale; // Filtered period
-  int get uniqueProducts => engine.filteredUniqueProducts; // Filtered period
+  double get totalSales => engine.totalSales; // ALL-TIME total; period filters are analytics-only
+  int get totalTransactions =>
+      engine.totalTransactions; // ALL-TIME order/transaction count
+  double get averageSale => engine.averageSale; // ALL-TIME average sale
+  int get uniqueProducts => engine.uniqueProducts; // ALL-TIME unique products
   List<Map<String, dynamic>> get recentSales =>
       engine.filteredSalesCache; // Filtered bills
 
@@ -2475,7 +2509,7 @@ class _DashboardPageState extends State<DashboardPage>
     );
   }
 
-  List<Map<String, dynamic>> _flattenLocalSales(List<dynamic> localHistory) {
+  List<Map<String, dynamic>> _flattenLocalSales(List<dynamic> localHistory, {Map<String, String> productNamesById = const {}}) {
     final List<Map<String, dynamic>> flattened = [];
     final List<Map<String, dynamic>> pending = [];
     final Set<String> seenFingerprints = {};
@@ -2518,9 +2552,16 @@ class _DashboardPageState extends State<DashboardPage>
         final double t =
             double.tryParse(tx['total']?.toString() ?? '0') ?? (p * q);
             
-        final String prodName = (tx['product_name'] ?? tx['product'] ?? tx['item'] ?? tx['title'] ?? tx['name'] ?? '').toString().trim();
-        if (prodName.isEmpty || prodName.toLowerCase() == 'unknown' || prodName.toLowerCase() == 'unknown item' || prodName.toLowerCase() == 'cloud item') {
-             continue; // Skip synthetic invalid records
+        final productId = (tx['product_id'] ?? tx['id'] ?? '').toString().trim();
+        String prodName = (tx['product_name'] ?? tx['product'] ?? tx['item'] ?? tx['title'] ?? tx['name'] ?? '').toString().trim();
+        if (AnalyticsEngine.isPlaceholderProductName(prodName) && productId.isNotEmpty) {
+          prodName = productNamesById[productId] ?? prodName;
+        }
+        // Keep the sale even when the catalog name is temporarily unavailable.
+        // A missing product name must never make a real bill disappear from
+        // dashboard totals/transactions.
+        if (AnalyticsEngine.isPlaceholderProductName(prodName)) {
+          prodName = productId.isNotEmpty ? 'Item #$productId' : 'Unresolved Item';
         }
 
         // 🔧 FIX: Use invoice_number as primary key (not date+product)
@@ -2538,6 +2579,25 @@ class _DashboardPageState extends State<DashboardPage>
           'business_date': date,
           'sale_id': invoiceNumber,
           'invoice_number': invoiceNumber,
+          'customer_name': tx['customer_name'] ?? tx['customer'] ?? 'Cash Customer',
+          'customer_phone': tx['customer_phone'] ?? tx['phone'],
+          'payment_method': tx['payment_method'] ?? 'CASH',
+          'payment_status': tx['payment_status'] ?? 'UNPAID',
+          'source': tx['source'] ?? tx['order_source'] ?? ((tx['order_id'] ?? tx['online_order_id']) != null ? 'ONLINE' : 'OFFLINE'),
+          if (tx['order_id'] != null) 'order_id': tx['order_id'],
+          if (tx['online_order_id'] != null) 'online_order_id': tx['online_order_id'],
+          'items': [
+            {
+              'product_name': prodName,
+              'product_id': productId,
+              'quantity': q,
+              'qty': q,
+              'unit_price': p,
+              'price': p,
+              'line_total': t,
+              'total': t,
+            }
+          ],
           'is_local': true,
         });
         continue;
@@ -2599,23 +2659,23 @@ class _DashboardPageState extends State<DashboardPage>
                     item['item'] ??
                     item['product'] ??
                     item['description'] ??
-                    'Unknown')
+                    '')
                 .toString()
                 .trim();
         String bCode = (item['product_id'] ?? item['barcode'] ?? '')
             .toString()
             .trim();
-
-        // Final fallback format (Title Case)
-        final displayProd = AnalyticsEngine.formatProductName(prod);
-        
-        if (displayProd.isEmpty || displayProd.toLowerCase() == 'unknown' || displayProd.toLowerCase() == 'unknown item') {
-             continue; // Skip synthetic invalid records
+        if (AnalyticsEngine.isPlaceholderProductName(prod) && bCode.isNotEmpty) {
+          prod = productNamesById[bCode] ?? prod;
         }
+        final formattedDisplayProd = AnalyticsEngine.formatProductName(prod);
+        final safeDisplayProd = formattedDisplayProd == 'Unknown'
+            ? (bCode.isNotEmpty ? 'Item #$bCode' : 'Unresolved Item')
+            : formattedDisplayProd;
 
         // [STRICT MODE] Fallback for untracked items to ensure grouping doesn't break
         if (bCode.isEmpty) {
-          bCode = 'UNKNOWN_${displayProd.hashCode}';
+          bCode = 'UNKNOWN_${safeDisplayProd.hashCode}';
         }
 
         final double parsedPrice = price;
@@ -2626,11 +2686,11 @@ class _DashboardPageState extends State<DashboardPage>
         if (seenFingerprints.contains(fingerprint)) continue;
         seenFingerprints.add(fingerprint);
         
-        if (kDebugMode) debugPrint('SALE DISPLAYED:\ninvoice_number: $invoiceNumber\nproduct_name: $displayProd\nquantity: $parsedQty\nprice: $parsedPrice');
+        if (kDebugMode) debugPrint('SALE DISPLAYED:\ninvoice_number: $invoiceNumber\nproduct_name: $safeDisplayProd\nquantity: $parsedQty\nprice: $parsedPrice');
 
         flattened.add({
-          'product': displayProd,
-          'product_name': displayProd,
+          'product': safeDisplayProd,
+          'product_name': safeDisplayProd,
           'product_id': bCode,
           'quantity': parsedQty,
           'price': parsedPrice,
@@ -2644,6 +2704,13 @@ class _DashboardPageState extends State<DashboardPage>
           '_bill_id': invoiceNumber, // ← CORE DEDUPLICATION ANCHOR (invoice_number)
           '_item_idx': idx, // ← CORE DEDUPLICATION OFFSET
           'invoice_number': invoiceNumber, // ← Explicit invoice_number field
+          'customer_name': tx['customer_name'] ?? tx['customer'] ?? 'Cash Customer',
+          'customer_phone': tx['customer_phone'] ?? tx['phone'],
+          'payment_method': tx['payment_method'] ?? 'CASH',
+          'source': tx['source'] ?? tx['order_source'] ?? ((tx['order_id'] ?? tx['online_order_id']) != null ? 'ONLINE' : 'OFFLINE'),
+          if (tx['order_id'] != null) 'order_id': tx['order_id'],
+          if (tx['online_order_id'] != null) 'online_order_id': tx['online_order_id'],
+          'items': [item],
         });
       }
     }
@@ -2712,9 +2779,21 @@ class _DashboardPageState extends State<DashboardPage>
       );
       // #endregion
       
+      final productNamesById = <String, String>{};
+      try {
+        final localProducts = await LocalStorageService.loadLocalProducts();
+        for (final entry in localProducts.entries) {
+          final value = entry.value;
+          if (value is! Map) continue;
+          final id = (value['id'] ?? value['product_id'] ?? entry.key).toString().trim();
+          final name = (value['product_name'] ?? value['name'] ?? value['title'] ?? '').toString().trim();
+          if (id.isNotEmpty && !AnalyticsEngine.isPlaceholderProductName(name)) productNamesById[id] = name;
+        }
+      } catch (_) {}
+
       List<Map<String, dynamic>> localSalesFlattened = [];
       try {
-        localSalesFlattened = _flattenLocalSales(history);
+        localSalesFlattened = _flattenLocalSales(history, productNamesById: productNamesById);
       } catch (e) {
         debugPrint('Local sales decode error: $e');
         localSalesFlattened = [];
@@ -2738,16 +2817,8 @@ class _DashboardPageState extends State<DashboardPage>
             );
           }
 
-          // --- SMART VIEW: If Today is empty but we have past data, show an indication ---
-          if (engine.filteredTotalSales == 0 && engine.totalSales > 0) {
-            if (kDebugMode)
-              debugPrint(
-                'dY\' Pro Tip: Today is empty, but history exists (₹${engine.totalSales}). Switching to Month view.',
-              );
-            _selectedTimeFilter =
-                2; // Auto-switch to Month for better first-impression
-            _recalculateAnalytics();
-          }
+          // Keep the selected analytics period stable. Lifetime dashboard KPIs
+          // must never silently switch the user's Today/Week/Month filter.
           // dYs" CHECK LOW STOCK (Local & Backend)
           _dailyHealthScoreLoading = true;
           _checkLowStock();
@@ -4550,7 +4621,7 @@ class _DashboardPageState extends State<DashboardPage>
       },
       {
         'lbl': 'Online Orders', // 🔒 CHANGED: From "Avg Order" to "Online Orders"
-        'val': '${_cachedTotalOnlineOrders ?? engine.totalOnlineOrders}',
+        'val': '${engine.totalOnlineOrders}', // 🔒 NEW: Show online orders count
         'chg': gText,
       },
       {
@@ -9777,9 +9848,9 @@ class _DashboardPageState extends State<DashboardPage>
     final dateStr = '${now.day} ${_monthShort(now.month)} ${now.year}';
     
     // Use cached metrics to avoid recalculation on every rebuild
-    final todaySales = engine.todaySalesValue;
-    final todayOrders = engine.todayTransactionsValue;
-    final todayOnlineOrders = engine.todayOnlineOrders;
+    final todaySales = engine.totalSales;
+    final todayOrders = engine.totalTransactions;
+    final todayOnlineOrders = engine.totalOnlineOrders;
     final lowStockCount = _lowStockProducts.length;
     
     return Container(
@@ -9862,11 +9933,11 @@ class _DashboardPageState extends State<DashboardPage>
               Row(
                 children: [
                   Expanded(
-                    child: _buildMetricCard('Today Sales', '₹${_formatCompactNumber(todaySales)}', Icons.attach_money, const Color(0xFF10B981)), // 🔒 CHANGED: "Today's Revenue" to "Total Sales"
+                    child: _buildMetricCard('Total Sales', '₹${_formatCompactNumber(todaySales)}', Icons.attach_money, const Color(0xFF10B981)), // 🔒 CHANGED: "Today's Revenue" to "Total Sales"
                   ),
                   const SizedBox(width: 8),
                   Expanded(
-                    child: _buildMetricCard('Today Orders', todayOrders.toString(), Icons.shopping_cart, const Color(0xFF3B82F6)), // 🔒 CHANGED: "Today's Orders" to "Total Bills"
+                    child: _buildMetricCard('Total Bills', todayOrders.toString(), Icons.shopping_cart, const Color(0xFF3B82F6)), // 🔒 CHANGED: "Today's Orders" to "Total Bills"
                   ),
                 ],
               ),
@@ -9874,7 +9945,7 @@ class _DashboardPageState extends State<DashboardPage>
               Row(
                 children: [
                   Expanded(
-                    child: _buildMetricCard('Today Online Orders', todayOnlineOrders.toString(), Icons.language, const Color(0xFF6366F1)), // 🔒 NEW: Added Online Orders
+                    child: _buildMetricCard('Online Orders', todayOnlineOrders.toString(), Icons.language, const Color(0xFF6366F1)), // 🔒 NEW: Added Online Orders
                   ),
                   const SizedBox(width: 8),
                   Expanded(
@@ -12504,36 +12575,31 @@ class _DashboardPageState extends State<DashboardPage>
     
     if (pendingCount > 0 && preserveSyncQueue) {
       if (!mounted) return;
-      _showLogoutLoadingDialog(context, 'Trying to sync pending data...');
+      _showLogoutLoadingDialog(context, 'Syncing pending data...');
       try {
         await SyncService.processQueueSafe();
       } catch (e) {
-        if (kDebugMode) debugPrint('⚠️ Logout sync attempt failed: $e');
+        if (kDebugMode) debugPrint('⚠️ Logout pre-sync failed; preserving queue: $e');
       } finally {
         if (mounted) Navigator.pop(context);
       }
 
       final remaining = await SyncQueueManager.getQueueSize();
       if (remaining > 0 && mounted) {
-        final decision = await showDialog<bool>(
+        final choice = await showDialog<bool>(
           context: context,
           builder: (ctx) => AlertDialog(
-            title: const Text('Pending data'),
+            title: const Text('Pending sync data'),
             content: Text(
-              '$remaining item(s) still need synchronization. They will remain safely in the encrypted, user-scoped outbox and retry after the next login.
-
-You can logout now without losing the pending records.',
+              '$remaining item(s) could not be synced right now. Your local queue will be preserved and can sync after the next login. You can safely logout without deleting those records.',
             ),
             actions: [
               TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('CANCEL')),
-              ElevatedButton(
-                onPressed: () => Navigator.pop(ctx, true),
-                child: const Text('LOGOUT SAFELY'),
-              ),
+              ElevatedButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('LOGOUT & SYNC LATER')),
             ],
           ),
-        ) ?? false;
-        if (!decision) return;
+        );
+        if (choice != true) return;
       }
     }
 

@@ -50,10 +50,27 @@ class _DayClosingPageState extends State<DayClosingPage> {
     final now = DateTime.now();
     final todayStr = "${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}";
 
+    DateTime? localSaleDate(dynamic raw) {
+      if (raw == null) return null;
+      final value = raw.toString().trim();
+      if (value.isEmpty) return null;
+      final parsed = DateTime.tryParse(value);
+      if (parsed == null) return null;
+      // Backend timestamps may be explicit UTC or naive UTC. Convert those
+      // timestamps to device-local time before deciding which business day
+      // Daily Closing belongs to.
+      if (value.endsWith('Z') || RegExp(r'[+-]\d{2}:?\d{2}$').hasMatch(value)) {
+        return parsed.toLocal();
+      }
+      return parsed;
+    }
+
     setState(() {
       _todaySales = allSales.where((s) {
-        final date = s['created_at'] ?? s['sale_date'] ?? '';
-        return date.toString().startsWith(todayStr);
+        final rawDate = s['created_at'] ?? s['createdAt'] ?? s['business_date'] ??
+            s['sale_date'] ?? s['invoice_date'] ?? s['date'];
+        final date = localSaleDate(rawDate);
+        return date != null && date.year == now.year && date.month == now.month && date.day == now.day;
       }).map((e) => Map<String, dynamic>.from(e as Map)).toList().cast<Map<String, dynamic>>();
 
       _totalCash = 0;
@@ -422,7 +439,7 @@ class _DayClosingPageState extends State<DayClosingPage> {
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Could not open WhatsApp automatically. You can use the Share/WhatsApp button from your phone.')),
+          const SnackBar(content: Text('Could not open WhatsApp. Is it installed?')),
         );
       }
     }

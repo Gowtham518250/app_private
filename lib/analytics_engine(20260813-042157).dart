@@ -4,10 +4,18 @@ import 'financial_math.dart';
 
 class AnalyticsEngine {
   // ── Helper: Format product name for display (Standard Title Case) ──────────────
+  static bool isPlaceholderProductName(String raw) {
+    final value = raw.trim().toLowerCase();
+    if (value.isEmpty) return true;
+    if (const {'product', 'unknown', 'unknown item', 'cloud item', 'item', 'invoice'}
+        .contains(value)) return true;
+    if (RegExp(r'^sale[_ -]?\d+', caseSensitive: false).hasMatch(value)) return true;
+    return false;
+  }
+
   static String formatProductName(String raw) {
-    if (raw.isEmpty) return 'Unknown';
+    if (isPlaceholderProductName(raw)) return 'Unknown';
     String name = raw.toString().trim();
-    
     return name.split(' ').map((word) {
       if (word.isEmpty) return '';
       return word[0].toUpperCase() + word.substring(1).toLowerCase();
@@ -71,18 +79,25 @@ class AnalyticsEngine {
   }
 
   // FIX-A: Filter-aware display getters for KPI cards
-  /// Period-filtered metrics for analytics screens.
   double get displayRevenue {
-    return filteredTotalSales;
+    switch (selectedTimeFilter) {
+      case 0:
+        return todayRevenue;  // Today
+      case 1:
+      case 2:
+      case 3:
+        return filteredTotalSales;  // Week/Month/Year
+      default:
+        return filteredTotalSales;
+    }
   }
 
   int get displayTransactions {
-    return filteredTotalTransactions;
+    if (selectedTimeFilter == 0) {
+      return todayTransactionsCount;  // Today
+    }
+    return filteredTotalTransactions;  // Week/Month/Year
   }
-
-  /// Lifetime metrics for dashboard headline KPIs.
-  double get lifetimeRevenue => totalSales;
-  int get lifetimeTransactions => totalTransactions;
 
   /// Gross invoiced value for the current filter.
   double get displayInvoiced => displayRevenue;
@@ -104,7 +119,20 @@ class AnalyticsEngine {
   /// Parse sale date with multiple format support and force Indian Time (IST)
   DateTime getLocalDate(Map<String, dynamic> sale) {
     try {
-      final str = (sale['business_date'] ?? sale['sale_date'] ?? sale['invoice_date'] ?? sale['date'] ?? '').toString().trim();
+      // Prefer a timestamp-bearing field. `business_date` is sometimes stored as
+      // YYYY-MM-DD only; using that field first silently discards the sale time
+      // and makes Best Hour/period analytics wrong.
+      String str = (sale['business_date'] ?? '').toString().trim();
+      final hasTime = str.contains('T') || RegExp(r'\d{2}:\d{2}').hasMatch(str);
+      if (str.isEmpty || !hasTime) {
+        for (final field in const ['created_at', 'createdAt', 'sale_date', 'invoice_date', 'date']) {
+          final candidate = (sale[field] ?? '').toString().trim();
+          if (candidate.isNotEmpty) {
+            str = candidate;
+            if (candidate.contains('T') || RegExp(r'\d{2}:\d{2}').hasMatch(candidate)) break;
+          }
+        }
+      }
       if (str.isEmpty) return DateTime(1970);
       
       if (kDebugMode) debugPrint('🔍 Date parsing: "$str", is_local: ${sale['is_local']}, available fields: ${sale.keys.join(', ')}');
@@ -142,28 +170,6 @@ class AnalyticsEngine {
       if (kDebugMode) debugPrint('❌ Date parsing error: $e');
       return DateTime(1970);
     }
-  }
-
-  /// Timestamp used for intraday charts such as Best Hour. Prefer the real
-  /// creation timestamp; business_date is often date-only and would otherwise
-  /// collapse every sale into 00:00 (or midnight), producing a fake Best Hour.
-  DateTime getEventDate(Map<String, dynamic> sale) {
-    final value = sale['created_at'] ?? sale['updated_at'] ?? sale['timestamp'] ??
-        sale['createdAt'] ?? sale['sale_timestamp'] ?? sale['invoice_timestamp'];
-    if (value != null && value.toString().trim().isNotEmpty) {
-      final parsed = _parseFlexibleDate(value.toString());
-      if (parsed != null) return parsed;
-    }
-    return getLocalDate(sale);
-  }
-
-  DateTime? _parseFlexibleDate(String str) {
-    final parsed = DateTime.tryParse(str.trim());
-    if (parsed == null) return null;
-    final hasExplicitZone = str.endsWith('Z') || RegExp(r'[+-]\d{2}:?\d{2}$').hasMatch(str);
-    return hasExplicitZone
-        ? parsed.toUtc().add(const Duration(hours: 5, minutes: 30))
-        : DateTime(parsed.year, parsed.month, parsed.day, parsed.hour, parsed.minute, parsed.second, parsed.millisecond, parsed.microsecond);
   }
 
   DateTime? _tryGetBusinessDate(Map<String, dynamic> sale) {
@@ -300,6 +306,16 @@ class AnalyticsEngine {
     return byKey.values.toList();
   }
 
+  bool _isOnlineTransaction(Map<String, dynamic> transaction) {
+    final source = (transaction['source'] ?? transaction['order_source'] ?? transaction['channel'] ?? '')
+        .toString().toUpperCase().trim();
+    if (source == 'ONLINE' || source == 'WEB' || source == 'APP' || source == 'ECOMMERCE') return true;
+    if (transaction['order_id'] != null || transaction['online_order_id'] != null) return true;
+    final payment = (transaction['payment_method'] ?? transaction['paymentMode'] ?? '')
+        .toString().toUpperCase().trim();
+    return payment == 'ONLINE' || payment == 'UPI' || payment == 'CARD';
+  }
+
   /// 🚀 Production analytics: one canonical transaction pass.
   /// Revenue is gross invoice/sale value. Collected cash is tracked separately.
   void recalculateAnalytics(List<dynamic> newSales, int timeFilter) {
@@ -400,24 +416,23 @@ class AnalyticsEngine {
         }
       }
 
-      final eventDt = getEventDate(transaction);
       if (day == todayDate) {
         todayRevenue += gross;
         todayKeys.add(key);
-        todayHourRevenue[eventDt.hour] = (todayHourRevenue[eventDt.hour] ?? 0.0) + gross;
+        todayHourRevenue[dt.hour] = (todayHourRevenue[dt.hour] ?? 0.0) + gross;
       } else if (day == yesterdayDate) {
         yesterdayRevenue += gross;
         yesterdayKeys.add(key);
-        yesterdayHourRevenue[eventDt.hour] = (yesterdayHourRevenue[eventDt.hour] ?? 0.0) + gross;
+        yesterdayHourRevenue[dt.hour] = (yesterdayHourRevenue[dt.hour] ?? 0.0) + gross;
       } else if (day == prevDayDate) {
         previousDayRevenue += gross;
       }
 
-      final source = (transaction['source'] ?? transaction['order_source'] ?? 'OFFLINE').toString().toUpperCase();
-      if (source == 'ONLINE' || source == 'WEB' || source == 'APP') onlineKeys.add(key);
+      if (_isOnlineTransaction(transaction)) onlineKeys.add(key);
 
-      final lines = transaction['items'] ?? transaction['line_items'];
-      if (lines is List) {
+      final rawLines = transaction['items'] ?? transaction['line_items'];
+      final List<dynamic> lines = rawLines is List ? rawLines : <dynamic>[transaction];
+      if (lines.isNotEmpty) {
         final seenLines = <String>{};
         for (final rawLine in lines) {
           if (rawLine is! Map) continue;
@@ -458,10 +473,7 @@ class AnalyticsEngine {
     filteredTotalSales = filtered.fold(0.0, (sum, t) => sum + _toDouble(t['gross_revenue']));
     filteredTotalTransactions = filtered.length;
     filteredAverageSale = filtered.isEmpty ? 0.0 : filteredTotalSales / filtered.length;
-    filteredOnlineOrders = filtered.where((t) {
-      final source = (t['source'] ?? t['order_source'] ?? 'OFFLINE').toString().toUpperCase();
-      return source == 'ONLINE' || source == 'WEB' || source == 'APP';
-    }).map((t) => t['transaction_key'].toString()).toSet().length;
+    filteredOnlineOrders = filtered.where(_isOnlineTransaction).map((t) => t['transaction_key'].toString()).toSet().length;
 
     totalSales = sortedTransactions.fold(0.0, (sum, t) => sum + _toDouble(t['gross_revenue']));
     totalTransactions = sortedTransactions.length;
@@ -471,17 +483,19 @@ class AnalyticsEngine {
     yesterdayTransactionsCount = yesterdayKeys.length;
     todayOnlineOrders = filtered.where((t) {
       final dt = _tryGetBusinessDate(t);
-      final source = (t['source'] ?? t['order_source'] ?? 'OFFLINE').toString().toUpperCase();
-      return dt != null && DateTime(dt.year, dt.month, dt.day) == todayDate &&
-          (source == 'ONLINE' || source == 'WEB' || source == 'APP');
+      return dt != null && DateTime(dt.year, dt.month, dt.day) == todayDate && _isOnlineTransaction(t);
     }).map((t) => t['transaction_key'].toString()).toSet().length;
 
     final productKeys = <String>{};
     final filteredProductKeys = <String>{};
     productAnalyticsCache = {};
     void addProductAnalytics(Map<String, dynamic> transaction, bool includeFiltered) {
-      final lines = transaction['items'] ?? transaction['line_items'];
-      if (lines is! List) return;
+      final rawLines = transaction['items'] ?? transaction['line_items'];
+      // Dashboard/legacy records may be flattened to one product row. Treat
+      // that row as a line item instead of dropping it from product analytics.
+      final List<dynamic> lines = rawLines is List
+          ? rawLines
+          : <dynamic>[transaction];
       final seenLines = <String>{};
       for (final rawLine in lines) {
         if (rawLine is! Map) continue;
@@ -489,9 +503,11 @@ class AnalyticsEngine {
         final lk = lineKey(item);
         if (!seenLines.add(lk)) continue;
         final id = (item['product_id'] ?? item['id'] ?? item['barcode'] ?? '').toString().trim();
-        final rawName = (item['product_name'] ?? item['product'] ?? item['item'] ?? item['description'] ?? 'Unknown').toString();
+        final rawName = (item['product_name'] ?? item['product'] ?? item['item'] ?? item['description'] ?? '').toString().trim();
         final key = id.isNotEmpty && id != '0' ? id : FormatHelper.normalizeName(rawName);
         final name = formatProductName(rawName);
+        // Never manufacture the literal "Product" or a sale/invoice id as a
+        // product. Those values are internal fallbacks, not business names.
         if (key.isEmpty || name == 'Unknown') continue;
         final q = _toDouble(item['quantity'] ?? item['qty']);
         final value = _toDouble(item['line_total'] ?? item['total_with_tax'] ?? item['total']) > 0
