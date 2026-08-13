@@ -57,6 +57,7 @@ import 'analytics_engine.dart';
 import 'app_bottom_nav.dart';
 import 'payment_announcement_service.dart';
 import 'online_store_service.dart';
+import 'online_order_service.dart';
 import 'low_stock_alerts_service.dart';
 import 'payment_detection_service.dart';
 import 'package:record/record.dart' as record;
@@ -12520,11 +12521,8 @@ class _DashboardPageState extends State<DashboardPage>
           builder: (ctx) => AlertDialog(
             title: const Text('Pending data'),
             content: Text(
-              '$remaining item(s) still need synchronization. They will remain safely in the encrypted, user-scoped outbox and retry after the next login.
-
-You can logout now without losing the pending records.',
-            ),
-            actions: [
+              '${remaining.toString()} item(s) still need synchronization. They will remain safely in the encrypted, user-scoped outbox and retry after the next login.\n\nYou can logout now without losing the pending records.',
+            ),            actions: [
               TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('CANCEL')),
               ElevatedButton(
                 onPressed: () => Navigator.pop(ctx, true),

@@ -50,7 +50,7 @@ class SalesDedupHelper {
   /// differ only by ID (which is exactly what a retry/double-submission
   /// produces — same content, new SALE_<timestamp> id).
   static String billContentFingerprint(Map<String, dynamic> sale) {
-    final day = _dayKey(sale['sale_date'] ?? sale['created_at'] ?? sale['date']);
+    final day = _dayKey(sale['business_date'] ?? sale['sale_date'] ?? sale['created_at'] ?? sale['date']);
     final total = _num(sale['total']).toStringAsFixed(2);
     final items = sale['items'] as List? ?? [];
 
@@ -76,7 +76,7 @@ class SalesDedupHelper {
 
   /// Content-only fingerprint — catches duplicate lines even with different sale_id.
   static String lineContentFingerprint(Map<String, dynamic> line) {
-    final day = _dayKey(line['sale_date'] ?? line['created_at'] ?? line['date']);
+    final day = _dayKey(line['business_date'] ?? line['sale_date'] ?? line['created_at'] ?? line['date']);
     final product = FormatHelper.normalizeName(
       (line['product_name'] ?? line['product'] ?? line['item'] ?? 'unknown').toString(),
     );

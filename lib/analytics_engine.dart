@@ -14,6 +14,35 @@ class AnalyticsEngine {
     }).join(' ');
   }
 
+  /// Returns true when a product name is only an internal/fallback label.
+  bool isPlaceholderProductName(String? raw) {
+    final name = (raw ?? '').trim();
+    if (name.isEmpty) return true;
+    final normalized = name.toLowerCase();
+
+    const generic = {
+      'product',
+      'unknown',
+      'item',
+      'guest',
+      'guest product',
+      'cash product',
+      'n/a',
+      '-',
+      '—',
+    };
+    if (generic.contains(normalized)) return true;
+
+    if (RegExp(r'^sale[_-]', caseSensitive: false).hasMatch(normalized)) {
+      return true;
+    }
+    if (RegExp(r'^(invoice|order|transaction)[_-]', caseSensitive: false)
+        .hasMatch(normalized)) {
+      return true;
+    }
+    return false;
+  }
+
   List<dynamic> sales = [];
   int selectedTimeFilter = 0;
 

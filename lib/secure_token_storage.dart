@@ -117,14 +117,49 @@ class SecureTokenStorage {
     }
   }
   
-  /// Re-encrypt all data with new key
+  /// Re-encrypt all known encrypted secure-storage records for the current
+  /// user before the key itself is replaced. If any record cannot be
+  /// decrypted, rotation aborts so an old key is never discarded while
+  /// encrypted data still depends on it.
   static Future<void> _reencryptData(enc.Key oldKey, enc.Key newKey) async {
-    // This would re-encrypt all stored data with the new key
-    // Implementation depends on what data needs to be re-encrypted
-    if (kDebugMode) {
-      print('🔄 Re-encrypting data with new key...');
+    final userId = await _getUserId();
+    final userSuffix = userId != null && userId > 0 ? '_$userId' : '';
+
+    const logicalKeys = <String>[
+      _kToken,
+      _kCustomerToken,
+      _kRefreshToken,
+      _kTime,
+      _kUser,
+    ];
+
+    for (final logicalKey in logicalKeys) {
+      final scopedKey = '$logicalKey$userSuffix';
+      final combined = await _storage.read(key: scopedKey);
+      if (combined == null || combined.isEmpty) continue;
+
+      final parts = combined.split(':');
+      if (parts.length != 2) {
+        throw StateError('Cannot rotate key: invalid encrypted payload for $scopedKey');
+      }
+
+      final oldIv = enc.IV.fromBase64(parts[0]);
+      final oldCipher = parts[1];
+      final oldEncrypter = enc.Encrypter(enc.AES(oldKey));
+      final plaintext = oldEncrypter.decrypt64(oldCipher, iv: oldIv);
+
+      final newIv = enc.IV.fromSecureRandom(16);
+      final newEncrypter = enc.Encrypter(enc.AES(newKey));
+      final encrypted = newEncrypter.encrypt(plaintext, iv: newIv);
+      await _storage.write(
+        key: scopedKey,
+        value: '${newIv.base64}:${encrypted.base64}',
+      );
     }
-    // Add re-encryption logic here if needed
+
+    if (kDebugMode) {
+      print('✅ Re-encrypted encrypted session records for current user');
+    }
   }
 
   static Future<void> saveUserId(int userId) async {

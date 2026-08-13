@@ -81,7 +81,13 @@ class _AttendancePageState extends State<AttendancePage>
     }
 
     await _loadStaff();
-    await OfflineAttendanceService.reconcileFromBackend();
+    // Backend is authoritative after login/data-clear; reconcile before the
+    // first UI fetch so a stale local state cannot force a false Check In.
+    try {
+      await OfflineAttendanceService.reconcileFromBackend();
+    } catch (e) {
+      if (kDebugMode) debugPrint('⚠️ Attendance reconciliation deferred: $e');
+    }
     await _fetch();
   }
 

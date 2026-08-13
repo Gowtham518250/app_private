@@ -1,7 +1,12 @@
-Edited existing files only; no new Dart feature/service file was introduced.
-1. lib/intelligence_engine.dart — deterministic fraud/anomaly risk assessment.
-2. lib/multi_shop_dashboard.dart — owner-scoped active-shop selection and cross-account protection.
-3. lib/audit_logging_service.dart — user/shop-scoped local audit trail, event IDs, before/after details.
+RETAIL MIND — AUDIT FIX PASS
+Modified:
+- sale_service.dart: local stock validation no longer blocks billing when catalog is unavailable; unknown/unsynced products are not rejected solely because local catalog lacks them.
+- sync_service.dart: legacy sync_sale queue items now normalize to JSON /api/invoices/sync instead of form-data.
+- session_management.dart: local 7-day session expiry is enforced offline as well as online.
+- secure_token_storage.dart: rotateKey now actually re-encrypts known scoped encrypted session records before swapping the key.
+- local_storage_service.dart: saveSales persists the supplied merged list without reading and merging the same Hive list again.
+- sales_dedup_helper.dart: fingerprints use business_date before sale_date.
+- attendance_page.dart: backend reconciliation is explicitly treated as authoritative before initial attendance fetch.
 
-AI Copilot was intentionally not modified.
-Backend was not modified in this bundle because the existing backend already has audit/shop infrastructure and should be changed only after its exact current integration points are verified.
+Removed from the fixed source set:
+- analytics_engine(20260813-042157).dart (duplicate AnalyticsEngine implementation).

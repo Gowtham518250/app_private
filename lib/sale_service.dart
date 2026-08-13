@@ -487,13 +487,12 @@ try {
                 'available_stock': currentStock,
               });
             }
-          } else if (catalogLoaded && productId > 0) {
-            insufficientItems.add({
-              'product_id': productId,
-              'product_name': itemName.isNotEmpty ? itemName : 'Product $productId',
-              'requested_qty': qty,
-              'available_stock': 0,
-            });
+          } else {
+            // Unknown/local-unsynced products cannot be safely rejected solely
+            // because the local catalog is stale or unavailable. Backend
+            // invoice validation remains authoritative when connectivity exists.
+            // Only reject when the product was actually found and confirmed
+            // to have insufficient stock locally.
           }
         }
       }
@@ -508,8 +507,16 @@ try {
         'insufficient_items': insufficientItems,
       };
     } catch (e) {
-      if (kDebugMode) debugPrint('⚠️ Local stock validation error (blocking sale): $e');
-      return {'valid': false, 'message': 'Stock validation unavailable; please retry'};
+      // Local stock is an optimization/safety check, not the authority for
+      // whether a bill may be created. Fresh installs, data clears and a
+      // closed Hive box must never brick billing. The backend invoice-sync
+      // endpoint remains authoritative when available.
+      if (kDebugMode) debugPrint('⚠️ Local stock validation unavailable; allowing sale to proceed: $e');
+      return {
+        'valid': true,
+        'message': 'Stock check skipped (catalog unavailable)',
+        'stock_check_skipped': true,
+      };
     }
   }
 

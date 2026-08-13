@@ -768,22 +768,61 @@ class SyncService {
   }
 
 static Future<bool> _syncSaleItem(Map<String, dynamic> data) async {
+    // Legacy sync_sale queue entries are normalized into the same JSON
+    // invoice-sync contract used by save_sale/create_sale. Never send
+    // form-data to the invoice JSON endpoint.
     try {
-      final prefs = await SharedPreferences.getInstance();
-      final userId = prefs?.getInt('user_id') ?? prefs?.getInt('userId');
-      if (userId != null) data['user_id'] = userId;
-      
-      final token = await SecureTokenStorage.getToken() ?? '';
-      if (token.isEmpty) return false;
-      
-      final Map<String, String> formBody = data.map((k, v) => MapEntry(k, v?.toString() ?? ''));
-      final res = await ApiClient.postForm(ApiClient.salesEndpoint, formBody, headers: {
-        'Authorization': 'Bearer $token',
-      });
-      
-      return res.statusCode == 200 || res.statusCode == 201;
+      final normalized = <String, dynamic>{...data};
+      if (data['payload'] is Map || data['invoice_payload'] is Map) {
+        return _syncSaleBatchItem(data);
+      }
+
+      final rawItems = data['line_items'] ?? data['items'];
+      final lineItems = rawItems is List
+          ? rawItems.whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList()
+          : <Map<String, dynamic>>[];
+
+      final invoiceNumber = (data['invoice_number'] ??
+              data['sale_id'] ??
+              data['id'] ??
+              '')
+          .toString()
+          .trim();
+
+      if (invoiceNumber.isEmpty || lineItems.isEmpty) {
+        if (kDebugMode) {
+          debugPrint('⚠️ sync_sale skipped: missing invoice_number or line_items');
+        }
+        return false;
+      }
+
+      final payload = <String, dynamic>{
+        'invoice_number': invoiceNumber,
+        'offline_id': data['offline_id'] ?? invoiceNumber,
+        'customer_name': data['customer_name'] ?? 'Cash Customer',
+        'customer_phone': data['customer_phone'],
+        'total_amount': data['total_amount'] ?? data['total'] ?? 0,
+        'paid_amount': data['paid_amount'] ?? data['amount_paid'] ?? 0,
+        'payment_status': data['payment_status'] ?? 'PAID',
+        'invoice_date': data['invoice_date'] ??
+            data['business_date'] ??
+            data['sale_date'] ??
+            data['date'],
+        'line_items': lineItems,
+      };
+
+      normalized
+        ..clear()
+        ..addAll({
+          'endpoint': ApiClient.invoicesSync,
+          'payload': payload,
+          'invoice_payload': payload,
+          'sale_id': invoiceNumber,
+        });
+
+      return _syncSaleBatchItem(normalized);
     } catch (e) {
-      if (kDebugMode) debugPrint('❌ Error syncing sale: $e');
+      if (kDebugMode) debugPrint('❌ Error syncing legacy sale queue item: $e');
       return false;
     }
   }

@@ -69,12 +69,16 @@ class SessionManagementService {
         final connectivityResult = await Connectivity().checkConnectivity();
         final isOnline = connectivityResult != ConnectivityResult.none;
 
+        // The local session timestamp is the device-side security boundary.
+        // Offline mode must not disable expiry for sensitive actions. The
+        // server can revoke tokens when online, while the local max-age keeps
+        // an abandoned device from remaining authenticated forever offline.
         if (isOnline) {
           if (kDebugMode) debugPrint('🔔 Session expired (online) - enforcing logout for security');
-          await performSecureLogout(reason: 'Session expired');
         } else {
-          if (kDebugMode) debugPrint('🔔 Session expired (offline) - grace period active');
+          if (kDebugMode) debugPrint('🔔 Session expired (offline) - enforcing local expiry');
         }
+        await performSecureLogout(reason: isOnline ? 'Session expired' : 'Session expired offline');
       } else {
         if (kDebugMode) debugPrint('🔔 Session still valid (${sessionAge.inDays} days old)');
       }
