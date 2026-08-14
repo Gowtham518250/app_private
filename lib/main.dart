@@ -92,7 +92,6 @@ import 'secure_token_storage.dart';
 import 'retail_intelligence_page.dart';
 import 'whatsapp_order_page.dart';
 import 'sync_service.dart';
-import 'sync_queue_manager.dart';
 import 'background_sync_worker.dart';
 import 'automatic_backup_service.dart';
 import 'enhanced_sync_queue.dart';
@@ -129,18 +128,9 @@ import 'error_boundary.dart';
 import 'input_validation_service.dart';
 import 'timeout_config.dart';
 import 'data_validation_service.dart';
-import 'comprehensive_logger.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  
-  // 🚨 COMPREHENSIVE LOGGER INITIALIZATION
-  try {
-    await ComprehensiveLogger.initialize();
-    debugPrint('✅ ComprehensiveLogger initialized');
-  } catch (e) {
-    debugPrint('⚠️ ComprehensiveLogger initialization failed: $e');
-  }
   
   // 🚨 FIREBASE & CRASHLYTICS INITIALIZATION
   bool firebaseInitialized = false;
@@ -187,17 +177,6 @@ void main() async {
         
         // Capture all errors in Crashlytics (production only)
         FlutterError.onError = (FlutterErrorDetails details) {
-          // Log to comprehensive logger
-          ComprehensiveLogger.logErrorWithStack(
-            location: 'FlutterError',
-            error: details.exception.toString(),
-            stackTrace: details.stack ?? StackTrace.empty,
-            context: {
-              'library': details.library,
-              'context': details.context?.toString(),
-            },
-          );
-          
           if (firebaseInitialized) {
             FirebaseCrashlytics.instance.recordFlutterError(details);
           }
@@ -208,13 +187,6 @@ void main() async {
         
         // Capture async errors
         PlatformDispatcher.instance.onError = (Object error, StackTrace stack) {
-          // Log to comprehensive logger
-          ComprehensiveLogger.logErrorWithStack(
-            location: 'AsyncError',
-            error: error.toString(),
-            stackTrace: stack,
-          );
-          
           if (firebaseInitialized) {
             FirebaseCrashlytics.instance.recordError(error, stack);
           }
@@ -310,18 +282,9 @@ void main() async {
   bool hiveRecoveryNeeded = false;
   String? hiveBackupPath;
   bool hiveInitSuccess = false;
-  // Guard so recovery paths never call Hive.initFlutter() a second time on the
-  // same process — Hive throws if already initialized (Bug #14 from audit).
-  bool _hiveInited = false;
-
-  Future<void> safeHiveInit() async {
-    if (_hiveInited) return;
-    await Hive.initFlutter();
-    _hiveInited = true;
-  }
-
+  
   try {
-    await safeHiveInit();
+    await Hive.initFlutter();
     hiveInitSuccess = true;
     debugPrint('✅ Hive initialized successfully');
     
@@ -379,7 +342,7 @@ void main() async {
           
           // Try to recover with fresh Hive initialization
           try {
-            await safeHiveInit();
+            await Hive.initFlutter();
             
             // Verify the fresh initialization works
             final testBox = await Hive.openBox('recovery_test');
@@ -408,7 +371,7 @@ void main() async {
               debugPrint('✅ Rollback successful - data restored from backup');
               
               // Try initialization with restored data
-              await safeHiveInit();
+              await Hive.initFlutter();
               debugPrint('✅ Hive initialized with restored data');
               hiveRecoveryNeeded = false;
               
@@ -427,7 +390,7 @@ void main() async {
         }
       } else {
         debugPrint('⚠️ Hive directory does not exist, creating fresh initialization');
-        await safeHiveInit();
+        await Hive.initFlutter();
         hiveRecoveryNeeded = false;
         debugPrint('✅ Fresh Hive initialization completed');
       }
@@ -455,7 +418,7 @@ void main() async {
           
           // Try to reinitialize with fresh Hive
           try {
-            await safeHiveInit();
+            await Hive.initFlutter();
             
             // Verify fresh initialization
             final testBox = await Hive.openBox('emergency_test');
@@ -475,7 +438,7 @@ void main() async {
                 await hiveDir.delete(recursive: true);
               }
               await emergencyBackup.rename(hiveDir.path);
-              await safeHiveInit();
+              await Hive.initFlutter();
               debugPrint('✅ Rollback from emergency backup successful');
               hiveRecoveryNeeded = false;
             } catch (emergencyRollbackError) {
@@ -486,7 +449,7 @@ void main() async {
           }
         } else {
           // No existing hive directory, create fresh
-          await safeHiveInit();
+          await Hive.initFlutter();
           hiveRecoveryNeeded = false;
           debugPrint('✅ Fresh Hive initialization (no existing data)');
         }
@@ -535,9 +498,6 @@ void main() async {
     try {
       // 1. Move the heavy DB purging here so it doesn't block the UI thread
       await LocalStorageService.validateAndMigrateSchema();
-      // Recover any sale/local transaction that was interrupted by a crash or
-      // force-close before the normal background sync services start.
-      await CrashRecoveryService.instance.initialize();
       await LocalStorageService.purgeLegacyUnscopedHiveBoxes();
       final startupUserId = appPrefs.getInt('user_id') ?? appPrefs.getInt('userId') ?? 0;
       if (startupUserId > 0) {
@@ -702,41 +662,6 @@ class _AppBootSplash extends StatelessWidget {
 
 final GlobalKey<NavigatorState> globalNavigatorKey = GlobalKey<NavigatorState>();
 
-// Route observer for automatic user action tracking
-class LoggingNavigatorObserver extends NavigatorObserver {
-  @override
-  void didPush(Route<dynamic> route, Route<dynamic>? previousRoute) {
-    super.didPush(route, previousRoute);
-    ComprehensiveLogger.logRouteChange(
-      from: previousRoute?.settings.name ?? 'unknown',
-      to: route.settings.name ?? 'unknown',
-      arguments: route.settings.arguments as Map<String, dynamic>?,
-    );
-  }
-
-  @override
-  void didPop(Route<dynamic> route, Route<dynamic>? previousRoute) {
-    super.didPop(route, previousRoute);
-    ComprehensiveLogger.logRouteChange(
-      from: route.settings.name ?? 'unknown',
-      to: previousRoute?.settings.name ?? 'unknown',
-      arguments: previousRoute?.settings.arguments as Map<String, dynamic>?,
-    );
-  }
-
-  @override
-  void didReplace({Route<dynamic>? newRoute, Route<dynamic>? oldRoute}) {
-    super.didReplace(newRoute: newRoute, oldRoute: oldRoute);
-    if (newRoute != null) {
-      ComprehensiveLogger.logRouteChange(
-        from: oldRoute?.settings.name ?? 'unknown',
-        to: newRoute.settings.name ?? 'unknown',
-        arguments: newRoute.settings.arguments as Map<String, dynamic>?,
-      );
-    }
-  }
-}
-
 // New stateful application wrapper checks for stored login token and redirects appropriately.
 class MyApp extends StatefulWidget {
   const MyApp({super.key});
@@ -844,64 +769,31 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
   }
 
   Future<void> _handleAppResumed() async {
+    if (_lastBackgroundTime == null) return;
+    
+    // Create cancel token for this sync operation
     _syncCancelToken = CancelToken();
+    
     try {
-      final backgroundDuration = _lastBackgroundTime == null
-          ? Duration.zero
-          : DateTime.now().difference(_lastBackgroundTime!);
-
-      if (kDebugMode) {
-        debugPrint('▶️ App resumed after ${backgroundDuration.inSeconds}s');
-      }
-
-      // ALWAYS flush the durable queue on resume, even after a short background
-      // period. This is required for true offline-first behavior.
-      await _migrateLegacyOfflineQueue();
-      await SyncService.processQueueSafe();
-
-      // Expensive full refresh is only needed after a long background period.
+      final backgroundDuration = DateTime.now().difference(_lastBackgroundTime!);
+      if (kDebugMode) debugPrint('▶️ App resumed after ${backgroundDuration.inMinutes} minutes');
+      
       if (backgroundDuration.inMinutes > 5) {
-        await _forceFullSync(_syncCancelToken);
-      }
-    } catch (e) {
-      if (e is OperationCancelledException) {
-        if (kDebugMode) debugPrint('⚠️ Resume sync cancelled');
-      } else if (kDebugMode) {
-        debugPrint('⚠️ Resume sync failed: $e');
+        if (kDebugMode) debugPrint('🔄 Long background period detected - forcing full sync');
+        
+        try {
+          await _forceFullSync(_syncCancelToken);
+        } catch (e) {
+          if (e is OperationCancelledException) {
+            if (kDebugMode) debugPrint('⚠️ Sync cancelled due to lifecycle change');
+          } else {
+            if (kDebugMode) debugPrint('⚠️ Force sync failed: $e');
+          }
+        }
       }
     } finally {
       _lastBackgroundTime = null;
       _syncCancelToken = null;
-    }
-  }
-
-  Future<void> _migrateLegacyOfflineQueue() async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      final raw = prefs.getString('offline_sync_queue');
-      if (raw == null || raw.isEmpty) return;
-      final decoded = json.decode(raw);
-      if (decoded is! List || decoded.isEmpty) return;
-
-      for (final rawItem in decoded) {
-        if (rawItem is! Map) continue;
-        final item = Map<String, dynamic>.from(rawItem);
-        if (item['synced'] == true) continue;
-        final action = item['action']?.toString();
-        final data = item['data'];
-        if (action == 'save_sale' && data is Map) {
-          await SyncQueueManager.enqueue('save_sale', {
-            'endpoint': ApiClient.invoicesSync,
-            'payload': Map<String, dynamic>.from(data),
-            'invoice_payload': Map<String, dynamic>.from(data),
-            'sale_id': data['sale_id'] ?? data['invoice_number'],
-            'retry_priority': 'high',
-          });
-        }
-      }
-      await prefs.remove('offline_sync_queue');
-    } catch (e) {
-      if (kDebugMode) debugPrint('⚠️ Legacy queue migration failed: $e');
     }
   }
 
@@ -971,11 +863,99 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
   }
 
   Future<void> _processSyncQueue() async {
-    // Legacy SharedPreferences queue is no longer processed directly.
-    // Migrate any remaining sale entries into SyncQueueManager, then use the
-    // single durable queue processor.
-    await _migrateLegacyOfflineQueue();
-    await SyncService.processQueueSafe();
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final queueRaw = prefs.getString('offline_sync_queue') ?? '[]';
+      
+      // Validate JSON before parsing
+      List<dynamic> queue;
+      try {
+        final decoded = json.decode(queueRaw);
+        if (decoded is List) {
+          queue = decoded;
+        } else {
+          if (kDebugMode) debugPrint('❌ Invalid sync queue format, expected List');
+          return;
+        }
+      } catch (e) {
+        if (kDebugMode) debugPrint('❌ JSON parsing error for sync queue: $e');
+        // Reset corrupted queue
+        await prefs.setString('offline_sync_queue', '[]');
+        return;
+      }
+      
+      if (queue.isEmpty) {
+        if (kDebugMode) debugPrint('✅ No pending sync queue items');
+        return;
+      }
+      
+      if (kDebugMode) debugPrint('📋 Processing ${queue.length} queued items');
+      
+      final token = await SecureTokenStorage.getToken();
+      final List<int> syncedIndices = [];
+      final Map<int, int> retryCount = {}; // Track retry count per item
+      
+      for (int i = 0; i < queue.length; i++) {
+        final item = queue[i];
+        if (item['synced'] == true) continue;
+        
+        final currentRetries = retryCount[i] ?? 0;
+        if (currentRetries >= 3) {
+          if (kDebugMode) debugPrint('❌ Item $i exceeded max retries, skipping');
+          continue;
+        }
+        
+        try {
+          bool syncSuccess = false;
+          
+          if (item['action'] == 'save_customer') {
+            final response = await ApiClient.postJson(
+              ApiClient.customersPrefix,
+              item['data'],
+              headers: {'Authorization': 'Bearer $token'},
+            ).timeout(const Duration(seconds: 10));
+            
+            if (response.statusCode == 200 || response.statusCode == 201) {
+              syncSuccess = true;
+              if (kDebugMode) debugPrint('✅ Synced queued: Customer');
+            }
+          } else if (item['action'] == 'save_sale') {
+            final response = await ApiClient.postJson(
+              '/api/invoices/sync',
+              item['data'],
+              headers: {'Authorization': 'Bearer $token'},
+            ).timeout(const Duration(seconds: 10));
+            
+            if (response.statusCode == 200 || response.statusCode == 201) {
+              syncSuccess = true;
+              if (kDebugMode) debugPrint('✅ Synced queued: Sale');
+            }
+          }
+          
+          if (syncSuccess) {
+            syncedIndices.add(i);
+          } else {
+            retryCount[i] = currentRetries + 1;
+            if (kDebugMode) debugPrint('⚠️ Sync failed for item $i, retry ${retryCount[i]}/3');
+          }
+        } catch (e) {
+          retryCount[i] = currentRetries + 1;
+          if (kDebugMode) debugPrint('⚠️ Failed to sync queued item $i: $e (retry ${retryCount[i]}/3)');
+        }
+      }
+      
+      // Only remove successfully synced items
+      for (final idx in syncedIndices.reversed) {
+        queue.removeAt(idx);
+      }
+      
+      await prefs.setString('offline_sync_queue', json.encode(queue));
+      if (syncedIndices.isNotEmpty) {
+        if (kDebugMode) debugPrint('🔄 Synced ${syncedIndices.length} queued actions');
+      }
+    } catch (e) {
+      if (kDebugMode) debugPrint('❌ Sync queue processing error: $e');
+    }
   }
 
   Future<void> _syncSalesData() async {
@@ -1134,16 +1114,18 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
                   if (booting) return '/_boot';
                   if (!authed) return '/login';
                   final routePrefs = await SharedPreferences.getInstance();
-                  final role = routePrefs.getString('user_role') ?? 'OWNER';
+                  final rawRole = routePrefs.getString('user_role') ?? 'OWNER';
+                  final role = rawRole.trim().toUpperCase();
                   if (role == 'CUSTOMER') return '/nearby-shops';
                   if (role == 'WORKER') return '/attendance';
+                  // OWNER accounts always use the dashboard. Staff Mode is a
+                  // scoped UI mode inside the owner account, not a server role.
                   return '/dashboard';
                 })(),
                 builder: (context, routeSnapshot) {
                   final resolvedRoute = routeSnapshot.data ?? initialRoute;
                   return MaterialApp(
                     navigatorKey: globalNavigatorKey,
-                    navigatorObservers: [LoggingNavigatorObserver()],
                     key: ValueKey<String>(booting ? 'boot' : '${authed}_${resolvedRoute}'),
                     debugShowCheckedModeBanner: false,
                     title: 'RETAIL MIND',
@@ -2049,109 +2031,98 @@ class _LanguageSelector extends StatelessWidget {
     final currentName = currentLang['nativeName'] ?? 'English';
     
     return Container(
-  decoration: BoxDecoration(
-    gradient: LinearGradient(
-      begin: Alignment.topLeft,
-      end: Alignment.bottomRight,
-      colors: [
-        Color(0xFF6366F1).withValues(alpha: 0.32),
-        Color(0xFF8B5CF6).withValues(alpha: 0.18),
-      ],
-    ),
-    borderRadius: BorderRadius.circular(16),
-    border: Border.all(
-      color: const Color(0xFF6366F1),
-      width: 2.2,
-    ),
-    boxShadow: [
-      BoxShadow(
-        color: Color(0xFF6366F1).withValues(alpha: 0.6),
-        blurRadius: 24,
-        spreadRadius: 3,
-      ),
-      BoxShadow(
-        color: Color(0xFF8B5CF6).withValues(alpha: 0.35),
-        blurRadius: 42,
-        spreadRadius: 6,
-      ),
-    ],
-  ),
-  child: PopupMenuButton<String>(
-    onSelected: (String code) {
-      languageProvider.setLanguage(code);
-    },
-    itemBuilder: (BuildContext context) =>
-        LanguageProvider.languages.map((lang) {
-      return PopupMenuItem<String>(
-        value: lang['code']!,
-        child: Row(
-          children: [
-            const Icon(
-              Icons.language,
-              size: 18,
-              color: Colors.blueAccent,
-            ),
-            const SizedBox(width: 12),
-            Text(
-              lang['nativeName']!,
-              style: const TextStyle(
-                fontWeight: FontWeight.w600,
-              ),
-            ),
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [
+            Color(0xFF6366F1).withValues(alpha: 0.32),
+            Color(0xFF8B5CF6).withValues(alpha: 0.18),
           ],
         ),
-      );
-    }).toList(),
-    child: Padding(
-      padding: const EdgeInsets.symmetric(
-        horizontal: 14,
-        vertical: 11,
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          const Icon(
-            Icons.language_rounded,
-            color: Colors.white,
-            size: 22.5,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(
+          color: const Color(0xFF6366F1),
+          width: 2.2,
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: Color(0xFF6366F1).withValues(alpha: 0.6),
+            blurRadius: 24,
+            spreadRadius: 3,
           ),
-          const SizedBox(width: 8),
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(
-                AppLocalizations.of(context).language,
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontSize: 12.5,
-                  fontWeight: FontWeight.w800,
-                  letterSpacing: 0.4,
-                ),
-              ),
-              const SizedBox(height: 1),
-              Text(
-                currentName,
-                style: TextStyle(
-                  color: Colors.white.withValues(alpha: 0.8),
-                  fontSize: 10.5,
-                  fontWeight: FontWeight.w600,
-                  letterSpacing: 0.2,
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(width: 6),
-          Icon(
-            Icons.arrow_drop_down,
-            color: Colors.white.withValues(alpha: 0.85),
-            size: 22,
+          BoxShadow(
+            color: Color(0xFF8B5CF6).withValues(alpha: 0.35),
+            blurRadius: 42,
+            spreadRadius: 6,
           ),
         ],
       ),
-    ),
-  ),
-);
-} // closes build()
-
-} // closes _LanguageSelector
+      child: PopupMenuButton<String>(
+        onSelected: (String code) {
+          languageProvider.setLanguage(code);
+        },
+        itemBuilder: (BuildContext context) => LanguageProvider.languages.map((lang) {
+          return PopupMenuItem<String>(
+            value: lang['code']!,
+            child: Row(
+              children: [
+                const Icon(Icons.language, size: 18, color: Colors.blueAccent),
+                const SizedBox(width: 12),
+                Text(
+                  lang['nativeName']!,
+                  style: const TextStyle(fontWeight: FontWeight.w600),
+                ),
+              ],
+            ),
+          );
+        }).toList(),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(
+                Icons.language_rounded,
+                color: Colors.white,
+                size: 22.5,
+              ),
+              const SizedBox(width: 8),
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    AppLocalizations.of(context).language,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 12.5,
+                      fontWeight: FontWeight.w800,
+                      letterSpacing: 0.4,
+                    ),
+                  ),
+                  const SizedBox(height: 1),
+                  Text(
+                    currentName,
+                    style: TextStyle(
+                      color: Colors.white.withValues(alpha: 0.8),
+                      fontSize: 10.5,
+                      fontWeight: FontWeight.w600,
+                      letterSpacing: 0.2,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(width: 6),
+              Icon(
+                Icons.arrow_drop_down,
+                color: Colors.white.withValues(alpha: 0.85),
+                size: 22,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}

@@ -93,15 +93,12 @@ import 'smart_notifications_service.dart';
 import 'widgets/dashboard/operations_reports_section.dart';
 import 'widgets/dashboard/shop_modules_section.dart';
 import 'widgets/dashboard/compact_quick_actions.dart';
-import 'widgets/dashboard/compact_quick_actions.dart';
 import 'widgets/dashboard/printer_monetization_banner.dart';
 import 'printer_settings_page.dart';
 import 'daily_summary_notification_service.dart';
 import 'screens/owner/online_store_hub_page.dart';
 import 'online_store_manager_page.dart';
 import 'widgets/online_analytics_card.dart';
-import 'package:shared_preferences/shared_preferences.dart';
-import 'widgets/dashboard/compact_quick_actions.dart';
 import 'widgets/error_boundary.dart'; // Phase 3: Dashboard crash protection
 import 'performance_optimizations.dart'; // 🚀 Advanced performance optimizations
 
@@ -201,6 +198,8 @@ class _DashboardPageState extends State<DashboardPage>
   String? _criticalAudioPath;
   bool _useStitchedVoice = false;
   bool _isPermissionsMissing = false;
+  bool _paymentPermissionCheckComplete = false;
+  bool _paymentReminderShowing = false;
   String _upiId = '';
   String _shopType = '';
   String _location = '';
@@ -507,38 +506,278 @@ class _DashboardPageState extends State<DashboardPage>
     RetailGrowthKit.recordAppOpen();
   }
 
-  Future<void> _checkPermissions() async {
-    final notifGranted = await NotificationListenerService.isPermissionGranted();
-    final smsStatus = await Permission.sms.status;
-    final smsGranted = smsStatus.isGranted;
+  Future<void> _checkPermissions({bool showReminderIfMissing = true}) async {
+    // IMPORTANT:
+    // This method ONLY CHECKS permission state.
+    // It must never block billing by automatically opening Android permission dialogs.
+    bool notifGranted = false;
+    bool smsGranted = false;
 
-    if (!notifGranted) {
-      try {
-        await NotificationListenerService.requestPermission();
-      } catch (e) {
-        if (kDebugMode) debugPrint('⚠️ Notification permission request failed: $e');
-      }
+    try {
+      notifGranted = await NotificationListenerService.isPermissionGranted();
+    } catch (e) {
+      if (kDebugMode) debugPrint('⚠️ Notification permission check failed: $e');
     }
 
-    if (!smsGranted) {
-      try {
-        final smsRequest = await Permission.sms.request();
-        if (kDebugMode) debugPrint('📱 SMS permission request result: $smsRequest');
-      } catch (e) {
-        if (kDebugMode) debugPrint('⚠️ SMS permission request failed: $e');
-      }
+    try {
+      smsGranted = (await Permission.sms.status).isGranted;
+    } catch (e) {
+      if (kDebugMode) debugPrint('⚠️ SMS permission check failed: $e');
     }
-
-    final finalNotifGranted = await NotificationListenerService.isPermissionGranted();
-    final finalSmsGranted = (await Permission.sms.status).isGranted;
 
     if (!mounted) return;
 
-    setState(() => _isPermissionsMissing = !(finalNotifGranted && finalSmsGranted));
+    final missing = !(notifGranted && smsGranted);
 
-    if (finalNotifGranted || finalSmsGranted) {
-      await PaymentDetectionService().ensureChannelsRunning();
+    setState(() {
+      _isPermissionsMissing = missing;
+      _paymentPermissionCheckComplete = true;
+    });
+
+    if (!missing && (notifGranted || smsGranted)) {
+      try {
+        await PaymentDetectionService().ensureChannelsRunning();
+      } catch (e) {
+        if (kDebugMode) debugPrint('⚠️ Payment detection channel startup failed: $e');
+      }
+      return;
     }
+
+    if (missing && showReminderIfMissing) {
+      _schedulePaymentDetectionReminder();
+    }
+  }
+
+  Future<void> _schedulePaymentDetectionReminder() async {
+    if (!mounted || !_isPermissionsMissing || _paymentReminderShowing) return;
+
+    // Let the Dashboard paint before showing the reminder so the user can
+    // continue using sales/billing normally even when permissions are missing.
+    await Future<void>.delayed(const Duration(milliseconds: 350));
+    if (!mounted || !_isPermissionsMissing || _paymentReminderShowing) return;
+
+    _paymentReminderShowing = true;
+
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: true,
+      builder: (ctx) {
+        return AlertDialog(
+          backgroundColor: Colors.white,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(24),
+          ),
+          titlePadding: const EdgeInsets.fromLTRB(22, 22, 22, 8),
+          contentPadding: const EdgeInsets.fromLTRB(22, 8, 22, 8),
+          actionsPadding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+          title: Row(
+            children: [
+              Container(
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFEF4444).withValues(alpha: 0.12),
+                  shape: BoxShape.circle,
+                ),
+                child: const Icon(
+                  Icons.notifications_active_rounded,
+                  color: Color(0xFFDC2626),
+                  size: 24,
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text(
+                  'Payment Detection is Disabled',
+                  style: GoogleFonts.poppins(
+                    fontSize: 17,
+                    fontWeight: FontWeight.w800,
+                    color: const Color(0xFF991B1B),
+                  ),
+                ),
+              ),
+            ],
+          ),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'This is a core RETAIL MIND feature. Enable it to automatically detect eligible UPI and bank payment confirmations.',
+                style: GoogleFonts.poppins(
+                  fontSize: 13,
+                  color: const Color(0xFF374151),
+                  height: 1.45,
+                ),
+              ),
+              const SizedBox(height: 14),
+              _buildPaymentPermissionStatusRow(
+                'Notification Access',
+                Icons.notifications_rounded,
+                NotificationListenerService.isPermissionGranted(),
+              ),
+              const SizedBox(height: 8),
+              _buildPaymentPermissionStatusRow(
+                'SMS Access',
+                Icons.sms_rounded,
+                Permission.sms.status.then((s) => s.isGranted),
+              ),
+              const SizedBox(height: 12),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(11),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFFEF2F2),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: const Color(0xFFFECACA)),
+                ),
+                child: Text(
+                  'You can keep recording sales and billing even if this is not enabled. We will remind you again when you return to the Dashboard or resume the app.',
+                  style: GoogleFonts.poppins(
+                    fontSize: 11.5,
+                    color: const Color(0xFF991B1B),
+                    height: 1.4,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(),
+              child: Text(
+                'LATER',
+                style: GoogleFonts.poppins(
+                  color: const Color(0xFF6B7280),
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+            ElevatedButton.icon(
+              onPressed: () async {
+                try {
+                  await NotificationListenerService.requestPermission();
+                } catch (e) {
+                  if (kDebugMode) {
+                    debugPrint('⚠️ Notification permission request failed: $e');
+                  }
+                }
+
+                try {
+                  final status = await Permission.sms.request();
+                  if (kDebugMode) {
+                    debugPrint('📱 SMS permission request result: $status');
+                  }
+                } catch (e) {
+                  if (kDebugMode) {
+                    debugPrint('⚠️ SMS permission request failed: $e');
+                  }
+                }
+
+                if (ctx.mounted) {
+                  Navigator.of(ctx).pop();
+                }
+
+                // Re-check actual OS state after returning from permission flow.
+                await Future<void>.delayed(const Duration(milliseconds: 500));
+                await _checkPermissions(showReminderIfMissing: false);
+
+                if (mounted && _isPermissionsMissing) {
+                  // Still missing -> keep the red Dashboard card and remind again
+                  // on the next Dashboard entry/resume.
+                  _schedulePaymentDetectionReminder();
+                }
+              },
+              icon: const Icon(Icons.lock_open_rounded, size: 18),
+              label: Text(
+                'ENABLE PAYMENT DETECTION',
+                style: GoogleFonts.poppins(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFFDC2626),
+                foregroundColor: Colors.white,
+                elevation: 0,
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 14,
+                  vertical: 12,
+                ),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(11),
+                ),
+              ),
+            ),
+          ],
+        );
+      },
+    );
+
+    _paymentReminderShowing = false;
+
+    // If the dialog was dismissed without enabling permissions, keep the
+    // Dashboard card visible. The next Dashboard/resume check will show it again.
+  }
+
+  Widget _buildPaymentPermissionStatusRow(
+    String label,
+    IconData icon,
+    Future<bool> permissionFuture,
+  ) {
+    return FutureBuilder<bool>(
+      future: permissionFuture,
+      builder: (context, snapshot) {
+        final granted = snapshot.data == true;
+        final color = granted
+            ? const Color(0xFF10B981)
+            : const Color(0xFFEF4444);
+
+        return Container(
+          padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 9),
+          decoration: BoxDecoration(
+            color: granted
+                ? const Color(0xFFECFDF5)
+                : const Color(0xFFFEF2F2),
+            borderRadius: BorderRadius.circular(11),
+            border: Border.all(
+              color: granted
+                  ? const Color(0xFFA7F3D0)
+                  : const Color(0xFFFECACA),
+            ),
+          ),
+          child: Row(
+            children: [
+              Icon(icon, size: 18, color: color),
+              const SizedBox(width: 9),
+              Expanded(
+                child: Text(
+                  label,
+                  style: GoogleFonts.poppins(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                    color: const Color(0xFF374151),
+                  ),
+                ),
+              ),
+              Icon(
+                granted ? Icons.check_circle_rounded : Icons.error_rounded,
+                size: 17,
+                color: color,
+              ),
+              const SizedBox(width: 5),
+              Text(
+                granted ? 'Enabled' : 'Required',
+                style: GoogleFonts.poppins(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w700,
+                  color: color,
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
   }
 
   /// 🔄 BACKEND SYNC: Fetch workers from backend
@@ -596,9 +835,9 @@ class _DashboardPageState extends State<DashboardPage>
             '⚠️ User ID changed ($cachedUserId → $currentUserId), clearing cached shop data',
           );
         // Different user - clear shop data to prevent leakage
-        await prefs.remove('shop_profile_json');
-        await prefs.remove('workers_json');
-        await prefs.remove('shop_name');
+        await ScopedSharedPreferences.remove('shop_profile_json');
+        await ScopedSharedPreferences.remove('workers_json');
+        await ScopedSharedPreferences.remove('shop_name');
         return;
       }
 
@@ -608,7 +847,7 @@ class _DashboardPageState extends State<DashboardPage>
       }
 
       // Load shop profile JSON
-      final shopJson = prefs.getString('shop_profile_json');
+      final shopJson = await ScopedSharedPreferences.getString('shop_profile_json');
       if (shopJson != null && mounted) {
         try {
           setState(() {
@@ -889,80 +1128,12 @@ class _DashboardPageState extends State<DashboardPage>
   }
 
   Future<void> _checkPaymentsConfig() async {
-    // Small delay to ensure UI is ready
-    await Future.delayed(const Duration(seconds: 2));
+    // Permission prompting is controlled by the Dashboard core-feature reminder.
+    // Keep this method as a passive health check so existing initState wiring
+    // remains intact without opening duplicate dialogs.
+    await Future<void>.delayed(const Duration(milliseconds: 200));
     if (!mounted) return;
-
-    final prefs = await SharedPreferences.getInstance();
-    final soundEnabled = prefs.getBool('payment_sound_enabled') ?? true;
-    if (!soundEnabled) return;
-
-    // Check Notification Permission (for PhonePe/GPay)
-    bool hasNotif = await PaymentDetectionService.hasNotificationPermission();
-    if (!hasNotif && mounted) {
-      _showPermissionDialog(
-        title: 'Safe Payment Detection',
-        desc:
-            'Detect payments from PhonePe/GPay instantly. We ONLY monitor payment apps to protect your privacy.',
-        onConfirm: () => PaymentDetectionService.openNotificationSettings(),
-      );
-    }
-  }
-
-  void _showPermissionDialog({
-    required String title,
-    required String desc,
-    required VoidCallback onConfirm,
-  }) {
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-        title: Row(
-          children: [
-            const Icon(
-              Icons.security,
-              semanticLabel: 'Security',
-              color: Colors.indigo,
-            ),
-            const SizedBox(width: 10),
-            Text(
-              title,
-              style: GoogleFonts.poppins(
-                fontSize: 16,
-                fontWeight: FontWeight.bold,
-              ),
-            ),
-          ],
-        ),
-        content: Text(desc, style: GoogleFonts.poppins(fontSize: 14)),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: Text(
-              'LATER',
-              style: GoogleFonts.poppins(color: Colors.grey),
-            ),
-          ),
-          ElevatedButton(
-            onPressed: () {
-              Navigator.pop(context);
-              onConfirm();
-            },
-            style: ElevatedButton.styleFrom(
-              backgroundColor: Colors.indigo,
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(10),
-              ),
-            ),
-            child: Text(
-              'ENABLE NOW',
-              style: GoogleFonts.poppins(color: Colors.white),
-            ),
-          ),
-        ],
-      ),
-    );
+    await _checkPermissions(showReminderIfMissing: true);
   }
 
   Future<void> _loadOnlineStoreStatus() async {
@@ -6920,7 +7091,7 @@ class _DashboardPageState extends State<DashboardPage>
     );
   }
 
-  // ENHANCED PIE CHART - REVENUE DISTRIBUTION (PRICE-WISE)
+  // BEAUTIFUL PIE CHART - REVENUE DISTRIBUTION (BY PRICE / SALE VALUE)
   Widget _buildPieChart() {
     if (filteredSales.isEmpty)
       return _buildEmptyChart(AppLocalizations.of(context).noProductData);
@@ -6929,13 +7100,15 @@ class _DashboardPageState extends State<DashboardPage>
     if (productData == null || productData.isEmpty) {
       return _buildEmptyChart(AppLocalizations.of(context).noProductData);
     }
+    // Sort by revenue (total sale value)
     final products = productData.entries.toList();
     products.sort((a, b) {
-      final bPerc = (b.value['percentage'] as num?)?.toDouble() ?? 0.0;
-      final aPerc = (a.value['percentage'] as num?)?.toDouble() ?? 0.0;
-      return bPerc.compareTo(aPerc);
+      final bVal = (b.value['total'] as num?)?.toDouble() ?? 0.0;
+      final aVal = (a.value['total'] as num?)?.toDouble() ?? 0.0;
+      return bVal.compareTo(aVal);
     });
     final topProducts = products.take(5).toList();
+    final grandTotal = topProducts.fold<double>(0, (s, e) => s + ((e.value['total'] as num?)?.toDouble() ?? 0.0));
 
     return AnimatedBuilder(
       animation: _fadeAnimation,
@@ -6944,243 +7117,225 @@ class _DashboardPageState extends State<DashboardPage>
           opacity: _fadeAnimation.value,
           child: Transform.translate(
             offset: Offset(0, _slideAnimation.value),
-            child: GlassContainer(
-              padding: const EdgeInsets.all(14),
-              borderRadius: BorderRadius.circular(20),
+            child: Container(
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(24),
+                boxShadow: [
+                  BoxShadow(
+                    color: const Color(0xFF6366F1).withValues(alpha: 0.08),
+                    blurRadius: 24,
+                    offset: const Offset(0, 8),
+                  ),
+                ],
+              ),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 14,
-                          vertical: 8,
-                        ),
-                        decoration: BoxDecoration(
-                          color: AppColors.secondary.withValues(alpha: 0.15),
-                          borderRadius: BorderRadius.circular(12),
-                          border: Border.all(
-                            color: AppColors.secondary.withValues(alpha: 0.3),
-                          ),
-                        ),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Icon(
-                              Icons.pie_chart,
-                              semanticLabel: 'Pie Chart',
-                              color: AppColors.secondary,
-                              size: 16,
+                  // ── Header ──────────────────────────────────────────────
+                  Container(
+                    padding: const EdgeInsets.fromLTRB(20, 20, 20, 0),
+                    child: Row(
+                      children: [
+                        Container(
+                          padding: const EdgeInsets.all(10),
+                          decoration: BoxDecoration(
+                            gradient: const LinearGradient(
+                              colors: [Color(0xFF6366F1), Color(0xFF8B5CF6)],
                             ),
-                            const SizedBox(width: 8),
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: const Icon(Icons.pie_chart_rounded, color: Colors.white, size: 18),
+                        ),
+                        const SizedBox(width: 12),
+                        Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
                             Text(
-                              AppLocalizations.of(context).revenueShare,
-                              style: TextStyle(
-                                fontSize: 13,
-                                fontWeight: FontWeight.bold,
-                                color: AppColors.secondary,
+                              'Revenue Split',
+                              style: GoogleFonts.poppins(
+                                fontSize: 16,
+                                fontWeight: FontWeight.w700,
+                                color: const Color(0xFF111827),
+                              ),
+                            ),
+                            Text(
+                              'Top products by sale value',
+                              style: GoogleFonts.poppins(
+                                fontSize: 11,
+                                color: Colors.grey[500],
                               ),
                             ),
                           ],
                         ),
-                      ),
-                      Icon(
-                        Icons.more_horiz,
-                        semanticLabel: 'More Horiz',
-                        color: Colors.grey[500],
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 20),
-                  Text(
-                    AppLocalizations.of(context).topProductsByRevenue,
-                    style: TextStyle(
-                      fontSize: 18,
-                      fontWeight: FontWeight.w800,
-                      color: Theme.of(context).brightness == Brightness.dark
-                          ? Colors.white
-                          : Colors.grey[800],
-                      letterSpacing: -0.5,
-                    ),
-                  ),
-                  const SizedBox(height: 24),
-                  SizedBox(
-                    height: 220,
-                    child: Stack(
-                      children: [
-                        PieChart(
-                          PieChartData(
-                            sectionsSpace: 4,
-                            centerSpaceRadius: 55,
-                            sections: topProducts.asMap().entries.map((entry) {
-                              final isTouched =
-                                  false; // Add touch state logic if needed
-                              final index = entry.key;
-                              final product = entry.value;
-                              final value =
-                                  (product.value['percentage'] as num?)
-                                      ?.toDouble() ??
-                                  0.0;
-                              final color = _getChartColor(index);
-                              return PieChartSectionData(
-                                color: color,
-                                value: value,
-                                title: '${value.toStringAsFixed(0)}%',
-                                radius: isTouched ? 65.0 : 55.0,
-                                titleStyle: const TextStyle(
-                                  fontSize: 13,
-                                  fontWeight: FontWeight.bold,
-                                  color: Colors.white,
-                                  shadows: [
-                                    Shadow(
-                                      color: Colors.black45,
-                                      blurRadius: 4,
-                                    ),
-                                  ],
-                                ),
-                                badgeWidget: _Badge(
-                                  icon: Icons.inventory_2,
-                                  size: 32,
-                                  color: color,
-                                ),
-                                badgePositionPercentageOffset: 1.15,
-                              );
-                            }).toList(),
+                        const Spacer(),
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFFF3F4F6),
+                            borderRadius: BorderRadius.circular(20),
                           ),
-                        ),
-                        Center(
-                          child: Column(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              Text(
-                                '₹${_formatCompactNumber(totalSales)}',
-                                style: TextStyle(
-                                  fontSize: 24,
-                                  fontWeight: FontWeight.w900,
-                                  color:
-                                      Theme.of(context).brightness ==
-                                          Brightness.dark
-                                      ? Colors.white
-                                      : Colors.grey[900],
-                                ),
-                              ),
-                              Text(
-                                AppLocalizations.of(context).total,
-                                style: TextStyle(
-                                  fontSize: 13,
-                                  color: Colors.grey[500],
-                                  fontWeight: FontWeight.w500,
-                                ),
-                              ),
-                            ],
+                          child: Text(
+                            'TOP 5',
+                            style: GoogleFonts.poppins(
+                              fontSize: 10,
+                              fontWeight: FontWeight.w700,
+                              color: const Color(0xFF6366F1),
+                              letterSpacing: 0.5,
+                            ),
                           ),
                         ),
                       ],
                     ),
                   ),
-                  const SizedBox(height: 16),
-                  // Premium Legend
-                  Wrap(
-                    spacing: 16,
-                    runSpacing: 16,
-                    alignment: WrapAlignment.center,
-                    children: topProducts.asMap().entries.map((entry) {
-                      final index = entry.key;
-                      final product = entry.value;
-                      final perc =
-                          (product.value['percentage'] as num?)?.toDouble() ??
-                          0.0;
-                      final val =
-                          (product.value['total'] as num?)?.toDouble() ?? 0.0;
-                      return Container(
-                        width: (MediaQuery.of(context).size.width - 100) / 2,
-                        padding: const EdgeInsets.all(12),
-                        decoration: BoxDecoration(
-                          color: Theme.of(context).brightness == Brightness.dark
-                              ? AppColors.surfaceDark
-                              : Colors.grey[50],
-                          border: Border.all(
-                            color:
-                                Theme.of(context).brightness == Brightness.dark
-                                ? Colors.white10
-                                : Colors.grey[200]!,
-                          ),
-                          borderRadius: BorderRadius.circular(16),
-                        ),
-                        child: Row(
-                          children: [
-                            Container(
-                              width: 12,
-                              height: 12,
-                              decoration: BoxDecoration(
-                                color: _getChartColor(index),
-                                shape: BoxShape.circle,
-                                boxShadow: [
-                                  BoxShadow(
-                                    color: _getChartColor(
-                                      index,
-                                    ).withValues(alpha: 0.4),
-                                    blurRadius: 4,
-                                    spreadRadius: 1,
-                                  ),
-                                ],
-                              ),
-                            ),
-                            const SizedBox(width: 10),
-                            Expanded(
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Text(
-                                    _cleanProductName(product.key, ''),
-                                    style: TextStyle(
-                                      fontSize: 13,
-                                      fontWeight: FontWeight.w700,
-                                      color:
-                                          Theme.of(context).brightness ==
-                                              Brightness.dark
-                                          ? Colors.white
-                                          : Colors.grey[800],
-                                    ),
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                  ),
-                                  const SizedBox(height: 2),
-                                  Row(
-                                    mainAxisAlignment:
-                                        MainAxisAlignment.spaceBetween,
-                                    children: [
-                                      Text(
-                                        '${perc.toStringAsFixed(1)}%',
-                                        style: TextStyle(
-                                          fontSize: 12,
-                                          fontWeight: FontWeight.w600,
-                                          color: _getChartColor(index),
-                                        ),
-                                      ),
-                                      Text(
-                                        '₹${_formatCompactNumber(val)}',
-                                        style: TextStyle(
+                  // ── Donut chart ──────────────────────────────────────────
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                    child: SizedBox(
+                      height: 230,
+                      child: Row(
+                        children: [
+                          // Chart half
+                          Expanded(
+                            flex: 5,
+                            child: Stack(
+                              alignment: Alignment.center,
+                              children: [
+                                PieChart(
+                                  PieChartData(
+                                    sectionsSpace: 3,
+                                    centerSpaceRadius: 58,
+                                    startDegreeOffset: -90,
+                                    sections: topProducts.asMap().entries.map((entry) {
+                                      final index = entry.key;
+                                      final product = entry.value;
+                                      final value = (product.value['total'] as num?)?.toDouble() ?? 0.0;
+                                      final perc = grandTotal > 0 ? (value / grandTotal * 100) : 0.0;
+                                      final color = _getChartColor(index);
+                                      return PieChartSectionData(
+                                        color: color,
+                                        value: value,
+                                        title: perc >= 10 ? '${perc.toStringAsFixed(0)}%' : '',
+                                        radius: 52,
+                                        titleStyle: GoogleFonts.poppins(
                                           fontSize: 11,
-                                          fontWeight: FontWeight.bold,
-                                          color:
-                                              Theme.of(context).brightness ==
-                                                  Brightness.dark
-                                              ? Colors.grey[400]
-                                              : Colors.grey[600],
+                                          fontWeight: FontWeight.w700,
+                                          color: Colors.white,
                                         ),
-                                      ),
-                                    ],
+                                      );
+                                    }).toList(),
                                   ),
-                                ],
+                                  swapAnimationDuration: const Duration(milliseconds: 600),
+                                  swapAnimationCurve: Curves.easeOutCubic,
+                                ),
+                                // Centre label
+                                Column(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Text(
+                                      '₹${_formatCompactNumber(grandTotal)}',
+                                      style: GoogleFonts.poppins(
+                                        fontSize: 20,
+                                        fontWeight: FontWeight.w800,
+                                        color: const Color(0xFF111827),
+                                      ),
+                                    ),
+                                    Text(
+                                      'Total',
+                                      style: GoogleFonts.poppins(
+                                        fontSize: 11,
+                                        color: Colors.grey[500],
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ],
+                            ),
+                          ),
+                          // Legend half
+                          Expanded(
+                            flex: 4,
+                            child: Padding(
+                              padding: const EdgeInsets.only(right: 16),
+                              child: Column(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: topProducts.asMap().entries.map((entry) {
+                                  final index = entry.key;
+                                  final product = entry.value;
+                                  final val = (product.value['total'] as num?)?.toDouble() ?? 0.0;
+                                  final perc = grandTotal > 0 ? (val / grandTotal * 100) : 0.0;
+                                  final color = _getChartColor(index);
+                                  return Padding(
+                                    padding: const EdgeInsets.only(bottom: 10),
+                                    child: Row(
+                                      children: [
+                                        Container(
+                                          width: 10,
+                                          height: 10,
+                                          decoration: BoxDecoration(
+                                            color: color,
+                                            shape: BoxShape.circle,
+                                          ),
+                                        ),
+                                        const SizedBox(width: 8),
+                                        Expanded(
+                                          child: Column(
+                                            crossAxisAlignment: CrossAxisAlignment.start,
+                                            children: [
+                                              Text(
+                                                _cleanProductName(product.key, ''),
+                                                style: GoogleFonts.poppins(
+                                                  fontSize: 11,
+                                                  fontWeight: FontWeight.w600,
+                                                  color: const Color(0xFF374151),
+                                                ),
+                                                maxLines: 1,
+                                                overflow: TextOverflow.ellipsis,
+                                              ),
+                                              Row(
+                                                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                                children: [
+                                                  Text(
+                                                    '₹${_formatCompactNumber(val)}',
+                                                    style: GoogleFonts.poppins(
+                                                      fontSize: 10,
+                                                      fontWeight: FontWeight.w700,
+                                                      color: color,
+                                                    ),
+                                                  ),
+                                                  Text(
+                                                    '${perc.toStringAsFixed(1)}%',
+                                                    style: GoogleFonts.poppins(
+                                                      fontSize: 10,
+                                                      color: Colors.grey[400],
+                                                    ),
+                                                  ),
+                                                ],
+                                              ),
+                                              const SizedBox(height: 3),
+                                              // Mini progress bar
+                                              ClipRRect(
+                                                borderRadius: BorderRadius.circular(4),
+                                                child: LinearProgressIndicator(
+                                                  value: grandTotal > 0 ? (val / grandTotal).clamp(0.0, 1.0) : 0.0,
+                                                  backgroundColor: color.withValues(alpha: 0.12),
+                                                  valueColor: AlwaysStoppedAnimation<Color>(color),
+                                                  minHeight: 4,
+                                                ),
+                                              ),
+                                            ],
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  );
+                                }).toList(),
                               ),
                             ),
-                          ],
-                        ),
-                      );
-                    }).toList(),
+                          ),
+                        ],
+                      ),
+                    ),
                   ),
                 ],
               ),
@@ -7240,7 +7395,7 @@ class _DashboardPageState extends State<DashboardPage>
     );
   }
 
-  // RADAR CHART - QUANTITY DISTRIBUTION (QUANTITY-WISE)
+  // BEAUTIFUL RADAR CHART - MOST SOLD BY QUANTITY
   Widget _buildRadarChart() {
     try {
       if (filteredSales.isEmpty)
@@ -7251,34 +7406,30 @@ class _DashboardPageState extends State<DashboardPage>
         return _buildEmptyChart(AppLocalizations.of(context).noProductData);
       }
 
-      final totalQty = productData.values.fold<int>(0, (sum, p) {
-        final qty = p?['quantity'];
-        if (qty is int) return sum + qty;
-        if (qty is num) return sum + qty.toInt();
-        return sum;
-      });
-
-      final quantityPercentages = <String, double>{};
+      // Build quantity map
+      final qtyMap = <String, int>{};
       productData.forEach((product, data) {
         final qty = data?['quantity'];
         int qtyInt = 0;
-        if (qty is int) {
-          qtyInt = qty;
-        } else if (qty is num) {
-          qtyInt = qty.toInt();
-        }
-        quantityPercentages[product] = totalQty > 0
-            ? (qtyInt / totalQty) * 100
-            : 0.0;
+        if (qty is int) qtyInt = qty;
+        else if (qty is num) qtyInt = qty.toInt();
+        qtyMap[product] = qtyInt;
       });
 
-      var topProducts = quantityPercentages.entries.toList();
+      var topProducts = qtyMap.entries.toList();
       topProducts.sort((a, b) => b.value.compareTo(a.value));
       topProducts = topProducts.take(6).toList();
 
-      // fl_chart RadarChart requires at least 3 data points – pad if needed
+      final totalQty = topProducts.fold<int>(0, (s, e) => s + e.value);
+      final maxQty = topProducts.isNotEmpty ? topProducts.first.value.toDouble() : 1.0;
+
+      // Build percentages for radar (relative to max)
+      final radarEntries = topProducts.map((e) => e.value.toDouble() / maxQty * 100).toList();
+
+      // fl_chart RadarChart requires at least 3 data points
       while (topProducts.length < 3) {
-        topProducts.add(const MapEntry('—', 0.0));
+        topProducts.add(const MapEntry('—', 0));
+        radarEntries.add(0.0);
       }
 
       return AnimatedBuilder(
@@ -7288,182 +7439,220 @@ class _DashboardPageState extends State<DashboardPage>
             opacity: _fadeAnimation.value,
             child: Transform.translate(
               offset: Offset(0, _slideAnimation.value),
-              child: GlassContainer(
-                padding: const EdgeInsets.all(14),
-                borderRadius: BorderRadius.circular(20),
+              child: Container(
+                decoration: BoxDecoration(
+                  color: const Color(0xFF0F172A),
+                  borderRadius: BorderRadius.circular(24),
+                  boxShadow: [
+                    BoxShadow(
+                      color: const Color(0xFF6366F1).withValues(alpha: 0.18),
+                      blurRadius: 28,
+                      offset: const Offset(0, 10),
+                    ),
+                  ],
+                ),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        Container(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 14,
-                            vertical: 8,
-                          ),
-                          decoration: BoxDecoration(
-                            color: AppColors.primary.withValues(alpha: 0.15),
-                            borderRadius: BorderRadius.circular(12),
-                            border: Border.all(
-                              color: AppColors.primary.withValues(alpha: 0.3),
-                            ),
-                          ),
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Icon(
-                                Icons.radar,
-                                semanticLabel: 'Radar',
-                                color: AppColors.primary,
-                                size: 16,
+                    // ── Header ────────────────────────────────────────────
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(20, 20, 20, 0),
+                      child: Row(
+                        children: [
+                          Container(
+                            padding: const EdgeInsets.all(10),
+                            decoration: BoxDecoration(
+                              gradient: const LinearGradient(
+                                colors: [Color(0xFF6366F1), Color(0xFF06B6D4)],
                               ),
-                              const SizedBox(width: 8),
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                            child: const Icon(Icons.radar, color: Colors.white, size: 18),
+                          ),
+                          const SizedBox(width: 12),
+                          Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
                               Text(
-                                AppLocalizations.of(context).volumeAnalysis,
-                                style: TextStyle(
-                                  fontSize: 13,
-                                  fontWeight: FontWeight.bold,
-                                  color: AppColors.primary,
+                                'Volume Radar',
+                                style: GoogleFonts.poppins(
+                                  fontSize: 16,
+                                  fontWeight: FontWeight.w700,
+                                  color: Colors.white,
+                                ),
+                              ),
+                              Text(
+                                'Most sold products by quantity',
+                                style: GoogleFonts.poppins(
+                                  fontSize: 11,
+                                  color: Colors.white38,
                                 ),
                               ),
                             ],
                           ),
-                        ),
-                        Icon(
-                          Icons.more_horiz,
-                          semanticLabel: 'More Horiz',
-                          color: Colors.grey[600],
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 16),
-                    Text(
-                      AppLocalizations.of(context).unitMovementRadar,
-                      style: TextStyle(
-                        fontSize: 18,
-                        fontWeight: FontWeight.w800,
-                        color: const Color(0xFF1F2937),
-                        letterSpacing: -0.5,
+                          const Spacer(),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFF1E293B),
+                              borderRadius: BorderRadius.circular(20),
+                            ),
+                            child: Text(
+                              '$totalQty units',
+                              style: GoogleFonts.poppins(
+                                fontSize: 10,
+                                fontWeight: FontWeight.w700,
+                                color: const Color(0xFF6366F1),
+                              ),
+                            ),
+                          ),
+                        ],
                       ),
                     ),
-                    Text(
-                      'Total items tracked: $totalQty units',
-                      style: TextStyle(fontSize: 13, color: Colors.grey[500]),
-                    ),
-                    const SizedBox(height: 20),
+                    // ── Radar Chart ────────────────────────────────────────
                     SizedBox(
                       height: 240,
-                      child: RadarChart(
-                        RadarChartData(
-                          radarBackgroundColor: Colors.grey[50],
-                          borderData: FlBorderData(show: false),
-                          radarBorderData: const BorderSide(
-                            color: Colors.transparent,
-                          ),
-                          tickCount: 3,
-                          ticksTextStyle: const TextStyle(
-                            color: Colors.transparent,
-                            fontSize: 12,
-                          ),
-                          tickBorderData: BorderSide(
-                            color: AppColors.primary.withValues(alpha: 0.2),
-                          ),
-                          gridBorderData: BorderSide(
-                            color: AppColors.primary.withValues(alpha: 0.15),
-                            width: 1,
-                          ),
-                          radarShape: RadarShape.polygon,
-                          getTitle: (index, angle) {
-                            try {
-                              if (index < topProducts.length) {
-                                final clean = _cleanProductName(
-                                  topProducts[index].key,
-                                  '',
-                                );
-                                return RadarChartTitle(
-                                  text: clean.length > 8
-                                      ? '${clean.substring(0, 7)}..'
-                                      : clean,
-                                  angle: angle,
-                                  positionPercentageOffset: 0.1,
-                                );
-                              }
-                            } catch (_) {}
-                            return RadarChartTitle(
-                              text: '',
-                              angle: angle,
-                              positionPercentageOffset: 0.1,
-                            );
-                          },
-                          titleTextStyle: TextStyle(
-                            color: Colors.grey[600],
-                            fontSize: 11,
-                            fontWeight: FontWeight.w600,
-                          ),
-                          dataSets: [
-                            RadarDataSet(
-                              fillColor: AppColors.primary.withValues(
-                                alpha: 0.25,
-                              ),
-                              borderColor: AppColors.primary,
-                              entryRadius: 4,
-                              dataEntries: topProducts
-                                  .map(
-                                    (e) => RadarEntry(
-                                      value: e.value.clamp(0.0, 100.0),
-                                    ),
-                                  )
-                                  .toList(),
-                              borderWidth: 2,
+                      child: Padding(
+                        padding: const EdgeInsets.all(12),
+                        child: RadarChart(
+                          RadarChartData(
+                            radarBackgroundColor: const Color(0xFF1E293B).withValues(alpha: 0.5),
+                            borderData: FlBorderData(show: false),
+                            radarBorderData: BorderSide(
+                              color: Colors.white.withValues(alpha: 0.06),
                             ),
-                            RadarDataSet(
-                              fillColor: AppColors.info.withValues(alpha: 0.12),
-                              borderColor: AppColors.info.withValues(
-                                alpha: 0.6,
-                              ),
-                              entryRadius: 3,
-                              dataEntries: topProducts
-                                  .map(
-                                    (e) => RadarEntry(
-                                      value: (e.value * 0.65).clamp(0.0, 100.0),
-                                    ),
-                                  )
-                                  .toList(),
-                              borderWidth: 1.5,
+                            tickCount: 4,
+                            ticksTextStyle: const TextStyle(
+                              color: Colors.transparent,
+                              fontSize: 10,
                             ),
-                          ],
+                            tickBorderData: BorderSide(
+                              color: Colors.white.withValues(alpha: 0.06),
+                              width: 1,
+                            ),
+                            gridBorderData: BorderSide(
+                              color: Colors.white.withValues(alpha: 0.08),
+                              width: 1,
+                            ),
+                            radarShape: RadarShape.polygon,
+                            getTitle: (index, angle) {
+                              try {
+                                if (index < topProducts.length) {
+                                  final clean = _cleanProductName(topProducts[index].key, '');
+                                  return RadarChartTitle(
+                                    text: clean.length > 7 ? '${clean.substring(0, 6)}..' : clean,
+                                    angle: angle,
+                                    positionPercentageOffset: 0.12,
+                                  );
+                                }
+                              } catch (_) {}
+                              return RadarChartTitle(text: '', angle: angle);
+                            },
+                            titleTextStyle: GoogleFonts.poppins(
+                              color: Colors.white60,
+                              fontSize: 10,
+                              fontWeight: FontWeight.w600,
+                            ),
+                            dataSets: [
+                              RadarDataSet(
+                                fillColor: const Color(0xFF6366F1).withValues(alpha: 0.35),
+                                borderColor: const Color(0xFF6366F1),
+                                entryRadius: 5,
+                                dataEntries: radarEntries
+                                    .map((v) => RadarEntry(value: v.clamp(0.0, 100.0)))
+                                    .toList(),
+                                borderWidth: 2.5,
+                              ),
+                              RadarDataSet(
+                                fillColor: const Color(0xFF06B6D4).withValues(alpha: 0.15),
+                                borderColor: const Color(0xFF06B6D4).withValues(alpha: 0.7),
+                                entryRadius: 3,
+                                dataEntries: radarEntries
+                                    .map((v) => RadarEntry(value: (v * 0.6).clamp(0.0, 100.0)))
+                                    .toList(),
+                                borderWidth: 1.5,
+                              ),
+                            ],
+                          ),
+                          swapAnimationDuration: const Duration(milliseconds: 800),
+                          swapAnimationCurve: Curves.easeOutQuint,
                         ),
-                        swapAnimationDuration: const Duration(
-                          milliseconds: 800,
-                        ),
-                        swapAnimationCurve: Curves.easeOutQuint,
                       ),
                     ),
-                    const SizedBox(height: 16),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: _buildPremiumMiniCard(
-                            'Highest Mover',
-                            topProducts.isNotEmpty &&
-                                    topProducts.first.key != '—'
-                                ? topProducts.first.key
-                                : 'N/A',
-                            Icons.moving,
-                            AppColors.primary,
-                          ),
-                        ),
-                        const SizedBox(width: 12),
-                        Expanded(
-                          child: _buildPremiumMiniCard(
-                            'Total Volumes',
-                            '$totalQty',
-                            Icons.inventory_2,
-                            AppColors.info,
-                          ),
-                        ),
-                      ],
+                    // ── Quantity bar legend ────────────────────────────────
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
+                      child: Column(
+                        children: topProducts.take(4).toList().asMap().entries.map((entry) {
+                          final index = entry.key;
+                          final product = entry.value;
+                          if (product.key == '—') return const SizedBox.shrink();
+                          final qty = product.value;
+                          final pct = maxQty > 0 ? qty / maxQty : 0.0;
+                          final colors = [
+                            const Color(0xFF6366F1),
+                            const Color(0xFF06B6D4),
+                            const Color(0xFF10B981),
+                            const Color(0xFFF59E0B),
+                          ];
+                          final color = colors[index % colors.length];
+                          return Padding(
+                            padding: const EdgeInsets.only(bottom: 10),
+                            child: Row(
+                              children: [
+                                SizedBox(
+                                  width: 80,
+                                  child: Text(
+                                    _cleanProductName(product.key, ''),
+                                    style: GoogleFonts.poppins(
+                                      fontSize: 10,
+                                      color: Colors.white60,
+                                      fontWeight: FontWeight.w500,
+                                    ),
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                Expanded(
+                                  child: Stack(
+                                    children: [
+                                      Container(
+                                        height: 6,
+                                        decoration: BoxDecoration(
+                                          color: Colors.white.withValues(alpha: 0.06),
+                                          borderRadius: BorderRadius.circular(10),
+                                        ),
+                                      ),
+                                      FractionallySizedBox(
+                                        widthFactor: pct.clamp(0.0, 1.0),
+                                        child: Container(
+                                          height: 6,
+                                          decoration: BoxDecoration(
+                                            gradient: LinearGradient(
+                                              colors: [color, color.withValues(alpha: 0.6)],
+                                            ),
+                                            borderRadius: BorderRadius.circular(10),
+                                          ),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                Text(
+                                  '$qty',
+                                  style: GoogleFonts.poppins(
+                                    fontSize: 10,
+                                    fontWeight: FontWeight.w700,
+                                    color: color,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          );
+                        }).toList(),
+                      ),
                     ),
                   ],
                 ),
@@ -8844,21 +9033,26 @@ class _DashboardPageState extends State<DashboardPage>
   }
 
   Widget _buildPermissionWarning() {
+    if (!_paymentPermissionCheckComplete || !_isPermissionsMissing) {
+      return const SizedBox.shrink();
+    }
+
     return Container(
       width: double.infinity,
       margin: const EdgeInsets.only(bottom: 20),
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
-        color: const Color(
-          0xFFFEF2F2,
-        ).withValues(alpha: 0.9), // Premium light red
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: const Color(0xFFFCA5A5), width: 1.5),
+        color: const Color(0xFFFEF2F2),
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(
+          color: const Color(0xFFEF4444).withValues(alpha: 0.45),
+          width: 1.5,
+        ),
         boxShadow: [
           BoxShadow(
-            color: Colors.red.withValues(alpha: 0.1),
-            blurRadius: 10,
-            offset: const Offset(0, 4),
+            color: const Color(0xFFEF4444).withValues(alpha: 0.10),
+            blurRadius: 14,
+            offset: const Offset(0, 5),
           ),
         ],
       ),
@@ -8866,87 +9060,210 @@ class _DashboardPageState extends State<DashboardPage>
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Container(
-                padding: const EdgeInsets.all(8),
+                padding: const EdgeInsets.all(9),
                 decoration: const BoxDecoration(
                   color: Color(0xFFDC2626),
                   shape: BoxShape.circle,
                 ),
                 child: const Icon(
-                  Icons.voice_over_off_rounded,
-                  semanticLabel: 'Voice Over Off Rounded',
+                  Icons.notifications_active_rounded,
+                  semanticLabel: 'Payment Detection Disabled',
                   color: Colors.white,
-                  size: 20,
+                  size: 21,
                 ),
               ),
               const SizedBox(width: 12),
               Expanded(
-                child: Text(
-                  'Voice is Silent',
-                  style: GoogleFonts.poppins(
-                    fontWeight: FontWeight.bold,
-                    color: const Color(0xFF991B1B),
-                    fontSize: 16,
-                  ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            'Payment Detection Disabled',
+                            style: GoogleFonts.poppins(
+                              fontWeight: FontWeight.w800,
+                              color: const Color(0xFF991B1B),
+                              fontSize: 16,
+                            ),
+                          ),
+                        ),
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 8,
+                            vertical: 4,
+                          ),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFFDC2626),
+                            borderRadius: BorderRadius.circular(999),
+                          ),
+                          child: Text(
+                            'CORE FEATURE',
+                            style: GoogleFonts.poppins(
+                              color: Colors.white,
+                              fontSize: 9,
+                              fontWeight: FontWeight.w800,
+                              letterSpacing: 0.5,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 5),
+                    Text(
+                      'Automatic UPI/payment detection is not fully enabled.',
+                      style: GoogleFonts.poppins(
+                        color: const Color(0xFFB91C1C),
+                        fontSize: 12.5,
+                        height: 1.35,
+                      ),
+                    ),
+                  ],
                 ),
-              ),
-              IconButton(
-                icon: const Icon(
-                  Icons.close,
-                  semanticLabel: 'Close',
-                  size: 18,
-                  color: Color(0xFF991B1B),
-                ),
-                onPressed: () => setState(() => _isPermissionsMissing = false),
               ),
             ],
           ),
-          const SizedBox(height: 8),
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              Expanded(
+                child: _buildPaymentInlineStatus(
+                  'Notification',
+                  Icons.notifications_none_rounded,
+                  NotificationListenerService.isPermissionGranted(),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: _buildPaymentInlineStatus(
+                  'SMS',
+                  Icons.sms_outlined,
+                  Permission.sms.status.then((s) => s.isGranted),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
           Text(
-            'To detect payments reliably, the app needs Notification Access and SMS permission. Please allow both in settings.',
+            'Sales and billing continue normally. This reminder stays on the Dashboard until the required permissions are enabled.',
             style: GoogleFonts.poppins(
-              color: const Color(0xFF991B1B),
-              fontSize: 13,
+              color: const Color(0xFF7F1D1D),
+              fontSize: 11.5,
+              height: 1.4,
             ),
           ),
-          const SizedBox(height: 16),
+          const SizedBox(height: 14),
           SizedBox(
             width: double.infinity,
-            child: ElevatedButton(
+            child: ElevatedButton.icon(
               onPressed: () async {
                 try {
                   await NotificationListenerService.requestPermission();
                 } catch (e) {
-                  if (kDebugMode) debugPrint('⚠️ Notification permission open failed: $e');
+                  if (kDebugMode) {
+                    debugPrint('⚠️ Notification permission request failed: $e');
+                  }
                 }
+
                 try {
-                  await Permission.sms.request();
+                  final status = await Permission.sms.request();
+                  if (kDebugMode) {
+                    debugPrint('📱 SMS permission request result: $status');
+                  }
                 } catch (e) {
-                  if (kDebugMode) debugPrint('⚠️ SMS permission request failed: $e');
+                  if (kDebugMode) {
+                    debugPrint('⚠️ SMS permission request failed: $e');
+                  }
                 }
-                await _checkPermissions();
+
+                await Future<void>.delayed(const Duration(milliseconds: 500));
+                await _checkPermissions(showReminderIfMissing: false);
+
+                if (mounted && _isPermissionsMissing) {
+                  _schedulePaymentDetectionReminder();
+                }
               },
+              icon: const Icon(
+                Icons.lock_open_rounded,
+                size: 18,
+              ),
+              label: Text(
+                'ENABLE PAYMENT DETECTION',
+                style: GoogleFonts.poppins(
+                  fontWeight: FontWeight.w800,
+                  fontSize: 12.5,
+                  letterSpacing: 0.2,
+                ),
+              ),
               style: ElevatedButton.styleFrom(
                 backgroundColor: const Color(0xFFDC2626),
                 foregroundColor: Colors.white,
                 elevation: 0,
+                padding: const EdgeInsets.symmetric(vertical: 13),
                 shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(10),
-                ),
-                padding: const EdgeInsets.symmetric(vertical: 12),
-              ),
-              child: Text(
-                'OPEN PERMISSIONS',
-                style: GoogleFonts.poppins(
-                  fontWeight: FontWeight.bold,
-                  letterSpacing: 1,
+                  borderRadius: BorderRadius.circular(11),
                 ),
               ),
             ),
           ),
         ],
       ),
+    );
+  }
+
+  Widget _buildPaymentInlineStatus(
+    String label,
+    IconData icon,
+    Future<bool> permissionFuture,
+  ) {
+    return FutureBuilder<bool>(
+      future: permissionFuture,
+      builder: (context, snapshot) {
+        final granted = snapshot.data == true;
+        final color = granted
+            ? const Color(0xFF10B981)
+            : const Color(0xFFEF4444);
+
+        return Container(
+          padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 8),
+          decoration: BoxDecoration(
+            color: granted
+                ? const Color(0xFFECFDF5)
+                : const Color(0xFFFFE4E6),
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(
+              color: granted
+                  ? const Color(0xFFA7F3D0)
+                  : const Color(0xFFFDA4AF),
+            ),
+          ),
+          child: Row(
+            children: [
+              Icon(icon, size: 16, color: color),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  label,
+                  style: GoogleFonts.poppins(
+                    fontSize: 10.5,
+                    fontWeight: FontWeight.w600,
+                    color: const Color(0xFF374151),
+                  ),
+                ),
+              ),
+              Icon(
+                granted ? Icons.check_circle_rounded : Icons.error_rounded,
+                size: 15,
+                color: color,
+              ),
+            ],
+          ),
+        );
+      },
     );
   }
 
@@ -9780,10 +10097,10 @@ class _DashboardPageState extends State<DashboardPage>
     final now = DateTime.now();
     final dateStr = '${now.day} ${_monthShort(now.month)} ${now.year}';
     
-    // Use cached metrics to avoid recalculation on every rebuild
-    final todaySales = engine.todaySalesValue;
-    final todayOrders = engine.todayTransactionsValue;
-    final todayOnlineOrders = engine.todayOnlineOrders;
+    // Using calculate total functions
+    final totalSales = _calculateTotalSales();
+    final totalOrders = _calculateTotalOrders();
+    final totalOnlineOrders = _calculateTotalOnlineOrders();
     final lowStockCount = _lowStockProducts.length;
     
     return Container(
@@ -9860,17 +10177,17 @@ class _DashboardPageState extends State<DashboardPage>
             ),
           ),
           const SizedBox(height: 12),
-          // Today's Metrics Row (2x2 grid for 4 cards)
+          // Total's Metrics Row (2x2 grid for 4 cards)
           Column(
             children: [
               Row(
                 children: [
                   Expanded(
-                    child: _buildMetricCard('Today Sales', '₹${_formatCompactNumber(todaySales)}', Icons.attach_money, const Color(0xFF10B981)), // 🔒 CHANGED: "Today's Revenue" to "Total Sales"
+                    child: _buildMetricCard('Total Sales', '₹${_formatCompactNumber(totalSales)}', Icons.attach_money, const Color(0xFF10B981)), // 🔒 CHANGED: "Today's Revenue" to "Total Sales"
                   ),
                   const SizedBox(width: 8),
                   Expanded(
-                    child: _buildMetricCard('Today Orders', todayOrders.toString(), Icons.shopping_cart, const Color(0xFF3B82F6)), // 🔒 CHANGED: "Today's Orders" to "Total Bills"
+                    child: _buildMetricCard('Total Orders', totalOrders.toString(), Icons.shopping_cart, const Color(0xFF3B82F6)), // 🔒 CHANGED: "Today's Orders" to "Total Bills"
                   ),
                 ],
               ),
@@ -9878,7 +10195,7 @@ class _DashboardPageState extends State<DashboardPage>
               Row(
                 children: [
                   Expanded(
-                    child: _buildMetricCard('Today Online Orders', todayOnlineOrders.toString(), Icons.language, const Color(0xFF6366F1)), // 🔒 NEW: Added Online Orders
+                    child: _buildMetricCard('Total Online Orders', totalOnlineOrders.toString(), Icons.language, const Color(0xFF6366F1)), // 🔒 NEW: Added Online Orders
                   ),
                   const SizedBox(width: 8),
                   Expanded(
@@ -9928,17 +10245,11 @@ class _DashboardPageState extends State<DashboardPage>
     );
   }
   
-  double _calculateTodaySales() {
-    final now = DateTime.now();
-    final today = DateTime(now.year, now.month, now.day);
+  double _calculateTotalSales() {
     final Map<String, double> invoiceTotals = {};
 
     for (final sale in sales) {
       try {
-        final saleDate = _getLocalDate(sale);
-        final saleDateOnly = DateTime(saleDate.year, saleDate.month, saleDate.day);
-        if (saleDateOnly != today) continue;
-
         final invoiceKey = sale['invoice_number']?.toString() ??
             sale['sale_id']?.toString() ??
             sale['_bill_id']?.toString() ??
@@ -9957,17 +10268,11 @@ class _DashboardPageState extends State<DashboardPage>
     return invoiceTotals.values.fold(0.0, (sum, v) => sum + v);
   }
   
-  int _calculateTodayOrders() {
-    final now = DateTime.now();
-    final today = DateTime(now.year, now.month, now.day);
+  int _calculateTotalOrders() {
     final Set<String> invoiceKeys = {};
 
     for (final sale in sales) {
       try {
-        final saleDate = _getLocalDate(sale);
-        final saleDateOnly = DateTime(saleDate.year, saleDate.month, saleDate.day);
-        if (saleDateOnly != today) continue;
-
         final invoiceKey = sale['invoice_number']?.toString() ??
             sale['sale_id']?.toString() ??
             sale['_bill_id']?.toString() ??
@@ -9981,27 +10286,24 @@ class _DashboardPageState extends State<DashboardPage>
     return invoiceKeys.length;
   }
 
-  int _calculateTodayOnlineOrders() {
-    final now = DateTime.now();
-    final today = DateTime(now.year, now.month, now.day);
+  int _calculateTotalOnlineOrders() {
     final Set<String> onlineInvoices = {};
 
     for (final sale in sales) {
       try {
-        final saleDate = _getLocalDate(sale);
-        final saleDateOnly = DateTime(saleDate.year, saleDate.month, saleDate.day);
-        if (saleDateOnly != today) continue;
-
-        final String source = (sale['source'] ?? sale['order_source'] ?? 'OFFLINE').toString().toUpperCase();
-        if (source != 'ONLINE' && source != 'WEB' && source != 'APP') continue;
-
         final invoiceKey = sale['invoice_number']?.toString() ??
             sale['sale_id']?.toString() ??
             sale['_bill_id']?.toString() ??
             sale['id']?.toString() ??
             sale['created_at']?.toString() ??
             '';
-        if (invoiceKey.isNotEmpty) onlineInvoices.add(invoiceKey);
+            
+        final String source = (sale['source'] ?? sale['order_source'] ?? 'OFFLINE').toString().toUpperCase();
+        
+        // Count as online if source is online OR if invoice starts with ONL
+        if (source == 'ONLINE' || source == 'WEB' || source == 'APP' || invoiceKey.toUpperCase().startsWith('ONL')) {
+          if (invoiceKey.isNotEmpty) onlineInvoices.add(invoiceKey);
+        }
       } catch (_) {}
     }
 
@@ -12935,6 +13237,70 @@ class _DashboardPageState extends State<DashboardPage>
             children: [
               // 0. GREETING HEADER
               _buildGreetingHeader(),
+
+              // 0.01 FIRST LOGIN PROFILE PROMPT
+              if (shopName.isEmpty || shopName == 'My Shop' || shopName == 'AI Shop Pro') ...[
+                Container(
+                  margin: const EdgeInsets.only(bottom: 16),
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFEFF6FF),
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(color: const Color(0xFFBFDBFE)),
+                  ),
+                  child: Row(
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.all(10),
+                        decoration: const BoxDecoration(
+                          color: Color(0xFFDBEAFE),
+                          shape: BoxShape.circle,
+                        ),
+                        child: const Icon(Icons.person_add_alt_1, color: Color(0xFF2563EB), size: 24),
+                      ),
+                      const SizedBox(width: 16),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              'Complete Customer Profile',
+                              style: GoogleFonts.poppins(
+                                fontSize: 14,
+                                fontWeight: FontWeight.w700,
+                                color: const Color(0xFF1E3A8A),
+                              ),
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              'Please fill your profile details to get started.',
+                              style: GoogleFonts.poppins(
+                                fontSize: 12,
+                                color: const Color(0xFF3B82F6),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      ElevatedButton(
+                        onPressed: () => Navigator.pushNamed(context, '/shop-profile'),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: const Color(0xFF2563EB),
+                          foregroundColor: Colors.white,
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                          elevation: 0,
+                        ),
+                        child: Text(
+                          'Fill Now',
+                          style: GoogleFonts.poppins(fontSize: 12, fontWeight: FontWeight.w600),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
 
               // 0.05 UNSYNCED SALES WARNING — the only real defense against
               // OS-level "Clear app data" wiping local-only sales: make sure

@@ -1,8 +1,8 @@
 import 'dart:ui';
+import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
-import 'dart:convert';
 import 'api_client.dart';
 import 'app_localizations.dart';
 import 'package:provider/provider.dart';
@@ -26,6 +26,8 @@ class _ForgotPasswordPageState extends State<ForgotPasswordPage>
   bool _isLoading = false;
   int _currentStep = 1; // 1: Email, 2: OTP, 3: New Password
   String _errorMessage = '';
+  bool _otpVerified = false;
+  String? _resetAuthorizationToken;
 
   late AnimationController _bgController;
   late AnimationController _glowController;
@@ -86,29 +88,51 @@ class _ForgotPasswordPageState extends State<ForgotPasswordPage>
     setState(() {
       _isLoading = true;
       _errorMessage = '';
+      _otpVerified = false;
+      _resetAuthorizationToken = null;
     });
 
     try {
-      final result = await OTPService.sendOTPToEmail(email);
+      final result = await OTPService.sendOTPToEmail(
+        email,
+        title: '🔐 Retail Mind Password Reset',
+        bodyText:
+            'Use the 6-digit OTP below. Also open the secure confirmation link in this email before the password can be changed.',
+      );
+
+      if (!mounted) return;
+
       if (result['success'] == true) {
         setState(() {
           _currentStep = 2;
           _errorMessage = '';
         });
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              'OTP sent to $email. Open the email and confirm your mailbox first.',
+            ),
+          ),
+        );
       } else {
-        setState(() => _errorMessage = result['message']?.toString() ?? 'Unable to send reset code');
+        setState(() {
+          _errorMessage =
+              result['message']?.toString() ?? 'Failed to send OTP';
+        });
       }
     } catch (e) {
-      setState(() => _errorMessage = AppLocalizations.of(context).connectionError);
+      if (mounted) setState(() => _errorMessage = 'Failed to send OTP: $e');
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }
   }
 
   Future<void> _verifyOtp() async {
+    final email = _emailController.text.trim();
     final otp = _otpController.text.trim();
-    if (otp.length < 6) {
-      setState(() => _errorMessage = 'Please enter a valid 6-digit OTP');
+
+    if (!RegExp(r'^\d{6}$').hasMatch(otp)) {
+      setState(() => _errorMessage = 'Please enter the 6-digit OTP');
       return;
     }
 
@@ -118,14 +142,31 @@ class _ForgotPasswordPageState extends State<ForgotPasswordPage>
     });
 
     try {
-      final result = await OTPService.verifyOTP(_emailController.text.trim(), otp);
+      final result = await OTPService.verifyOTP(email, otp);
+
+      if (!mounted) return;
+
       if (result['success'] == true) {
-        setState(() => _currentStep = 3);
+        _resetAuthorizationToken = result['token']?.toString();
+        setState(() {
+          _otpVerified = _resetAuthorizationToken != null &&
+              _resetAuthorizationToken!.isNotEmpty;
+          _currentStep = _otpVerified ? 3 : 2;
+          _errorMessage = _otpVerified
+              ? ''
+              : 'Secure reset authorization was not issued.';
+        });
       } else {
-        setState(() => _errorMessage = result['message']?.toString() ?? 'Invalid OTP');
+        setState(() {
+          _otpVerified = false;
+          _errorMessage =
+              result['message']?.toString() ?? 'OTP verification failed';
+        });
       }
-    } catch (_) {
-      setState(() => _errorMessage = AppLocalizations.of(context).connectionError);
+    } catch (e) {
+      if (mounted) {
+        setState(() => _errorMessage = 'OTP verification failed: $e');
+      }
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }
@@ -135,8 +176,18 @@ class _ForgotPasswordPageState extends State<ForgotPasswordPage>
     final pass = _passwordController.text.trim();
     final confirm = _confirmPasswordController.text.trim();
 
-    if (pass.isEmpty || pass.length < 6) {
-      setState(() => _errorMessage = 'Password must be at least 6 characters');
+    if (!_otpVerified || _resetAuthorizationToken == null) {
+      setState(() => _errorMessage =
+          'Verify the OTP and email confirmation before resetting your password.');
+      return;
+    }
+
+    if (pass.length < 8 ||
+        !RegExp(r'[A-Z]').hasMatch(pass) ||
+        !RegExp(r'[a-z]').hasMatch(pass) ||
+        !RegExp(r'\d').hasMatch(pass)) {
+      setState(() => _errorMessage =
+          'Password must be at least 8 characters and contain uppercase, lowercase, and a number.');
       return;
     }
     if (pass != confirm) {
@@ -150,19 +201,32 @@ class _ForgotPasswordPageState extends State<ForgotPasswordPage>
     });
 
     try {
+      // The backend's existing /auth/reset-password endpoint accepts the
+      // short-lived one-time reset token issued by the hardened challenge.
       final response = await ApiClient.postForm('/auth/reset-password', {
-        'email': _emailController.text.trim(),
-        'otp': _otpController.text.trim(),
-        'new_password': pass,
+        'token': _resetAuthorizationToken!,
+        'password': pass,
       });
+
+      if (!mounted) return;
+
       if (response.statusCode == 200) {
-        setState(() => _currentStep = 4); // Success stage
+        await OTPService.clearResetState();
+        setState(() => _currentStep = 4);
       } else {
-        final data = json.decode(response.body);
-        setState(() => _errorMessage = data['detail']?.toString() ?? 'Reset failed');
+        Map<String, dynamic> data = {};
+        try {
+          final decoded = json.decode(response.body);
+          if (decoded is Map<String, dynamic>) data = decoded;
+        } catch (_) {}
+        setState(() => _errorMessage =
+            data['detail']?.toString() ?? 'Reset failed. Please request a new code.');
       }
     } catch (_) {
-      setState(() => _errorMessage = AppLocalizations.of(context).connectionError);
+      if (mounted) {
+        setState(() => _errorMessage =
+            AppLocalizations.of(context).connectionError);
+      }
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }
@@ -202,7 +266,7 @@ class _ForgotPasswordPageState extends State<ForgotPasswordPage>
                         boxShadow: [
                           BoxShadow(
                             color: const Color(0xFF6366F1)
-                                .withValues(alpha: 0.18 * _glowAnim.value),
+                                .withOpacity(0.18 * _glowAnim.value),
                             blurRadius: 120,
                             spreadRadius: 60,
                           )
@@ -224,7 +288,7 @@ class _ForgotPasswordPageState extends State<ForgotPasswordPage>
                         boxShadow: [
                           BoxShadow(
                             color: const Color(0xFF8B5CF6)
-                                .withValues(alpha: 0.15 * _glowAnim.value),
+                                .withOpacity(0.15 * _glowAnim.value),
                             blurRadius: 100,
                             spreadRadius: 50,
                           )
@@ -400,7 +464,7 @@ class _ForgotPasswordPageState extends State<ForgotPasswordPage>
               ),
               boxShadow: [
                 BoxShadow(
-                  color: const Color(0xFF6366F1).withValues(alpha: 0.45 * _glowAnim.value),
+                  color: const Color(0xFF6366F1).withOpacity(0.45 * _glowAnim.value),
                   blurRadius: 35,
                   spreadRadius: 6,
                 )
@@ -511,6 +575,38 @@ class _ForgotPasswordPageState extends State<ForgotPasswordPage>
         ),
 
         _buildError(),
+        Container(
+          margin: const EdgeInsets.only(bottom: 18),
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(
+            color: const Color(0xFF10B981).withValues(alpha: 0.10),
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(
+              color: const Color(0xFF10B981).withValues(alpha: 0.25),
+            ),
+          ),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Icon(
+                Icons.verified_user_rounded,
+                color: Color(0xFF10B981),
+                size: 20,
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  'Open the secure confirmation link in the same email first. Then enter the 6-digit OTP here. Both checks are required before a password-reset token is issued.',
+                  style: GoogleFonts.poppins(
+                    color: Colors.white.withValues(alpha: 0.72),
+                    fontSize: 12,
+                    height: 1.45,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
         _buildInputField(
           controller: _otpController,
           hint: 'Enter 6-digit OTP',
@@ -543,7 +639,7 @@ class _ForgotPasswordPageState extends State<ForgotPasswordPage>
       children: [
         _buildHeader(
           'New Password',
-          'Create a strong password for your shop account',
+          'Use 8+ characters with uppercase, lowercase, and a number',
           Icons.vpn_key_rounded,
         ),
         _buildError(),

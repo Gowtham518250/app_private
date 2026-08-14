@@ -884,6 +884,18 @@ class ApiClient {
         // OFFLINE-FIRST: Don't force logout on refresh failure
         // User stays logged in with local session
         if (kDebugMode) debugPrint('⚠️ Refresh failed (offline or server error) - keeping local session');
+        
+        // However, if the refresh failed with an Auth error (401/403),
+        // autoLogin() in SessionManagementService would have cleared the local tokens.
+        // We MUST notify the app to log the user out to prevent a zombie state where sales crash.
+        final hasLocalSession = await SecureTokenStorage.isSessionValid();
+        if (!hasLocalSession) {
+          if (kDebugMode) debugPrint('🔴 Refresh failure was an Auth Error (tokens cleared). Triggering session expiry...');
+          if (!_sessionExpiredController.isClosed) {
+            _sessionExpiredController.add(true);
+          }
+        }
+        
         // Return the original 401 response instead of forcing logout
         // The calling code can handle the 401 appropriately
       }

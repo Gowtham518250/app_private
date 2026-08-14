@@ -30,6 +30,7 @@ import 'payment_announcement_service.dart';
 import 'payment_detection_service.dart';
 import 'payment_event.dart';
 import 'voice_billing_assistant.dart';
+import 'roman_indian_voice_normalizer.dart';
 import 'bill_generator_service.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:path/path.dart' as p;
@@ -883,6 +884,10 @@ class _SalesEntryPageState extends State<SalesEntryPage>
   Future<void> _processVoiceCommand(String text) async {
     String command = text.toLowerCase().trim();
     if (command.isEmpty) return;
+
+    // Normalize Romanized Indian speech, regional number words, and unit variants
+    // before the existing sales parser interprets quantity/price/product.
+    command = RomanIndianVoiceNormalizer.normalize(command, locale: _speechInputLang);
 
     // Check for special voice commands first
     if (_handleSpecialVoiceCommands(command)) {

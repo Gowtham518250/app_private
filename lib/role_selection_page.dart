@@ -7,6 +7,9 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'otp_service.dart';
 import 'visual_widgets.dart';
 import 'customer_login_page.dart';
+import 'api_client.dart';
+import 'secure_token_storage.dart';
+import 'scoped_shared_preferences.dart';
 import 'security_service.dart';
 
 class RoleSelectionPage extends StatefulWidget {
@@ -49,82 +52,154 @@ class _RoleSelectionPageState extends State<RoleSelectionPage> with TickerProvid
     super.dispose();
   }
 
-  Future<void> _selectSalesman() async {
-    final prefs = await SharedPreferences.getInstance();
-    final String? workersJson =
-        prefs.getString('workers_json') ?? prefs.getString('workers');
-    
-    // If no workers exist, just let them in as generic staff
-    if (workersJson == null || workersJson.isEmpty || workersJson == '[]') {
-      await prefs.setBool('is_staff_mode', true);
-      await prefs.setString('active_staff_name', 'Counter 1');
-      if (!mounted) return;
-      Navigator.pushReplacementNamed(context, '/dashboard');
+  Future<void> _selectStaff() async {
+    final scopedPrefs = await SharedPreferences.getInstance();
+    final userId = scopedPrefs.getInt('user_id') ?? scopedPrefs.getInt('userId') ?? 0;
+    if (userId <= 0) {
+      if (mounted) {
+        setState(() => _error = 'Owner session is missing. Please log in again.');
+      }
       return;
     }
 
-    // Show PIN Dialog for Staff Identity
-    final controller = TextEditingController();
-    final result = await showDialog<String>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: const Color(0xFF1E293B),
-        title: Text('Staff Login', style: GoogleFonts.poppins(color: Colors.white, fontWeight: FontWeight.bold)),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text('Enter your 4-digit Staff PIN', style: GoogleFonts.poppins(color: Colors.grey)),
-            const SizedBox(height: 20),
-            TextField(
-              controller: controller,
-              keyboardType: TextInputType.number,
-              obscureText: true,
-              maxLength: 4,
-              textAlign: TextAlign.center,
-              style: GoogleFonts.poppins(color: Colors.white, fontSize: 28, letterSpacing: 10, fontWeight: FontWeight.bold),
-              decoration: InputDecoration(
-                counterText: '',
-                border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
-                filled: true,
-                fillColor: Colors.black26,
-              ),
+    List<dynamic> workers = [];
+    try {
+      final token = await SecureTokenStorage.getToken() ?? '';
+      final response = await ApiClient.getJson(
+        '/api/attendance/workers?user_id=$userId',
+        headers: token.isNotEmpty ? {'Authorization': 'Bearer $token'} : null,
+      ).timeout(const Duration(seconds: 8));
+
+      if (response.statusCode == 200) {
+        final decoded = jsonDecode(response.body);
+        if (decoded is List) {
+          workers = decoded;
+          await ScopedSharedPreferences.setString('workers_json', jsonEncode(decoded));
+        }
+      }
+    } catch (e) {
+      final cached = await ScopedSharedPreferences.getString('workers_json');
+      if (cached != null && cached.trim().isNotEmpty) {
+        try {
+          final decoded = jsonDecode(cached);
+          if (decoded is List) workers = decoded;
+        } catch (_) {}
+      }
+    }
+
+    if (workers.isEmpty) {
+      if (!mounted) return;
+      await showDialog<void>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('No Staff Accounts'),
+          content: const Text(
+            'No staff account is configured for this shop. The owner must create a worker with a staff PIN before Staff Mode can be used.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('OK'),
             ),
           ],
         ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('CANCEL', style: TextStyle(color: Colors.grey))),
-          ElevatedButton(
-            onPressed: () => Navigator.pop(ctx, controller.text),
-            style: ElevatedButton.styleFrom(backgroundColor: Colors.indigoAccent),
-            child: const Text('LOGIN'),
-          ),
-        ],
-      ),
-    );
+      );
+      return;
+    }
 
-    if (result != null && result.isNotEmpty) {
-      final List<dynamic> decoded = json.decode(workersJson);
-      
-      String? matchedStaffName;
-      for (var workerMap in decoded) {
-        if (workerMap['pin'] == result) {
-          matchedStaffName = workerMap['name'];
+    final controller = TextEditingController();
+    try {
+      final result = await showDialog<String>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          backgroundColor: const Color(0xFF1E293B),
+          title: Text(
+            'Staff Login',
+            style: GoogleFonts.poppins(color: Colors.white, fontWeight: FontWeight.bold),
+          ),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                'Enter your 4-digit Staff PIN',
+                style: GoogleFonts.poppins(color: Colors.grey),
+              ),
+              const SizedBox(height: 20),
+              TextField(
+                controller: controller,
+                keyboardType: TextInputType.number,
+                obscureText: true,
+                maxLength: 4,
+                textAlign: TextAlign.center,
+                style: GoogleFonts.poppins(
+                  color: Colors.white,
+                  fontSize: 28,
+                  letterSpacing: 10,
+                  fontWeight: FontWeight.bold,
+                ),
+                decoration: InputDecoration(
+                  counterText: '',
+                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+                  filled: true,
+                  fillColor: Colors.black26,
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('CANCEL', style: TextStyle(color: Colors.grey)),
+            ),
+            ElevatedButton(
+              onPressed: () => Navigator.pop(ctx, controller.text.trim()),
+              style: ElevatedButton.styleFrom(backgroundColor: Colors.indigoAccent),
+              child: const Text('LOGIN'),
+            ),
+          ],
+        ),
+      );
+
+      if (!mounted || result == null || result.length != 4) return;
+
+      Map<String, dynamic>? matchedWorker;
+      for (final item in workers) {
+        if (item is! Map) continue;
+        final pin = item['pin']?.toString().trim() ?? '';
+        if (pin.isNotEmpty && pin == result) {
+          matchedWorker = Map<String, dynamic>.from(item);
           break;
         }
       }
 
-      if (matchedStaffName != null) {
-        await prefs.setBool('is_staff_mode', true);
-        await prefs.setString('active_staff_name', matchedStaffName);
-        if (!mounted) return;
-        Navigator.pushReplacementNamed(context, '/dashboard');
-      } else {
-        if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-          content: Text('❌ Invalid Staff PIN'),
-          backgroundColor: Colors.redAccent,
-        ));
+      if (matchedWorker == null) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('❌ Invalid Staff PIN'),
+              backgroundColor: Colors.redAccent,
+            ),
+          );
+        }
+        return;
       }
+
+      await ScopedSharedPreferences.setBool('is_staff_mode', true);
+      await ScopedSharedPreferences.setString(
+        'active_staff_name',
+        matchedWorker['name']?.toString() ?? 'Staff',
+      );
+      if (matchedWorker['id'] != null) {
+        await ScopedSharedPreferences.setString(
+          'active_staff_worker_id',
+          matchedWorker['id'].toString(),
+        );
+      }
+      // Never change the account role here. Staff Mode is a scoped UI mode
+      // inside the owner's account, not a different authenticated account.
+      if (mounted) Navigator.pushReplacementNamed(context, '/dashboard');
+    } finally {
+      controller.dispose();
     }
   }
 
@@ -198,7 +273,8 @@ class _RoleSelectionPageState extends State<RoleSelectionPage> with TickerProvid
       if (authenticated) {
         // Biometric successful, set owner mode and navigate to dashboard
         final prefs = await SharedPreferences.getInstance();
-        await prefs.setBool('is_staff_mode', false);
+        await prefs.setString('user_role', 'OWNER');
+        await ScopedSharedPreferences.setBool('is_staff_mode', false);
         
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -326,7 +402,8 @@ class _RoleSelectionPageState extends State<RoleSelectionPage> with TickerProvid
 
     if (result['success']) {
       final prefs = await SharedPreferences.getInstance();
-      await prefs.setBool('is_staff_mode', false);
+      await prefs.setString('user_role', 'OWNER');
+      await ScopedSharedPreferences.setBool('is_staff_mode', false);
       if (!mounted) return;
       if (await SecurityService.shouldShowOwnerBiometricGate()) {
         if (!mounted) return;
@@ -337,20 +414,16 @@ class _RoleSelectionPageState extends State<RoleSelectionPage> with TickerProvid
     } else {
       _failedAttempts++;
       if (_failedAttempts >= 3) {
-        // Lock screen after 3 failures — do NOT grant access
+        if (!mounted) return;
         setState(() {
           _sendingOTP = false;
-          _error = 'Too many failed attempts. Please try again later or contact your owner.';
-          _otpController.clear();
+          _isVerifying = false;
+          _error = 'Too many invalid attempts. Owner verification was cancelled. Please request a new OTP.';
         });
-        // Go back to role selection screen (not dashboard)
-        await Future.delayed(const Duration(seconds: 3));
-        if (!mounted) return;
-        Navigator.pop(context);
       } else {
         setState(() {
           _sendingOTP = false;
-          _error = 'Invalid PIN. ${3 - _failedAttempts} attempt(s) remaining.';
+          _error = 'Invalid PIN. ${_failedAttempts == 2 ? "Final attempt." : "Try again."}';
         });
       }
     }
@@ -413,7 +486,7 @@ class _RoleSelectionPageState extends State<RoleSelectionPage> with TickerProvid
                           ),
                           const SizedBox(height: 8),
                           Text(
-                            'Are you the Owner or a Salesman?',
+                            'Are you the Owner or a Staff Member?',
                             textAlign: TextAlign.center,
                             style: GoogleFonts.poppins(
                               color: Colors.white70,
@@ -460,11 +533,11 @@ class _RoleSelectionPageState extends State<RoleSelectionPage> with TickerProvid
         ),
         const SizedBox(height: 20),
         _RoleCard(
-          title: 'I am a Customer',
-          subtitle: 'View Khata, Download Bills, and Make Online Payments.',
-          icon: Icons.people_alt_rounded,
+          title: 'I am Staff / Worker',
+          subtitle: 'Enter your staff PIN for restricted shop access.',
+          icon: Icons.badge_rounded,
           color: Colors.teal,
-          onTap: _sendingOTP ? null : _selectSalesman,
+          onTap: _sendingOTP ? null : _selectStaff,
           isLoading: false,
         ),
       ],

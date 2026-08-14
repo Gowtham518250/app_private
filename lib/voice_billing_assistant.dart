@@ -28,6 +28,7 @@ import 'language_detection_visualizer.dart';
 import 'language_detector.dart';
 import 'product_catalog_service.dart';
 import 'stt_accuracy_config.dart';
+import 'roman_indian_voice_normalizer.dart';
 
 // ─── Language Config ──────────────────────────────────────────────────────────
 
@@ -482,6 +483,8 @@ class MultiLangVoiceParser {
 
     // ✅ PATCH: Normalize STT output before parsing — fixes ~40% of parse failures
     transcript = PhoneticNormalizer.normalize(transcript, lang.code);
+    // Normalize Romanized Indian speech and phonetic unit/number variants before semantic parsing.
+    transcript = RomanIndianVoiceNormalizer.normalize(transcript, locale: lang.code);
 
     // First attempt: Split on commas, "and", "और", "மற்றும்" etc.
     final splitPattern = RegExp(r'[,।]|(?<!\d)\.(?!\d)|\band\b|\bplus\b|\baur\b|और|\binkaa\b|\bmariyum\b|\bmattu\b|మరియు|ಮತ್ತು|ਅਤੇ|\bnext\b|\bitem\b', caseSensitive: false);
