@@ -113,106 +113,97 @@ class SalesDedupHelper {
     return total > 0 || items.isNotEmpty;
   }
 
-  /// Remove duplicate bills; keeps the best copy per fingerprint.
+  /// Remove only true duplicate records. Stable business identities always win;
+  /// content similarity alone must NEVER merge two legitimate sales.
   static List<Map<String, dynamic>> dedupeBills(List<dynamic> raw) {
-    final Map<String, Map<String, dynamic>> byId = {};
-    final Map<String, Map<String, dynamic>> byFingerprint = {};
-    final List<Map<String, dynamic>> cancelled = [];
-    final List<Map<String, dynamic>> finalResult = [];
+    final byIdentity = <String, Map<String, dynamic>>{};
+    final anonymous = <Map<String, dynamic>>[];
+    final cancelled = <Map<String, dynamic>>[];
+
+    String identityOf(Map<String, dynamic> sale) {
+      const fields = <String>[
+        'offline_id',
+        'sale_id',
+        'invoice_number',
+        'backend_id',
+        'invoice_id',
+        'id',
+      ];
+      for (final field in fields) {
+        final value = sale[field]?.toString().trim();
+        if (value != null && value.isNotEmpty && value != 'null' && value != '0') {
+          return '${field.toLowerCase()}:$value';
+        }
+      }
+      return '';
+    }
 
     for (final entry in raw) {
       if (entry is! Map) continue;
       final sale = Map<String, dynamic>.from(entry);
       if (!isValidBill(sale)) continue;
-      if (sale['status']?.toString() == 'CANCELLED') {
+
+      if (sale['status']?.toString().toUpperCase() == 'CANCELLED') {
         cancelled.add(sale);
         continue;
       }
 
-      final saleId = (sale['sale_id'] ?? sale['id'] ?? '').toString();
-      final fp = billContentFingerprint(sale);
-
-      // Strong ID match takes precedence
-      if (saleId.isNotEmpty && saleId.startsWith('SALE_')) {
-        if (byId.containsKey(saleId)) {
-          final existing = byId[saleId]!;
-          if (_preferIncomingBill(existing, sale)) {
-            byId[saleId] = sale;
-            // Update fingerprint mapping as well
-            final oldFp = billContentFingerprint(existing);
-            if (byFingerprint[oldFp] == existing) {
-              byFingerprint.remove(oldFp);
-              byFingerprint[fp] = sale;
-            }
-          }
-          continue;
-        }
+      final identity = identityOf(sale);
+      if (identity.isEmpty) {
+        // Records without any stable ID cannot safely be merged merely because
+        // their contents happen to match. Keep them until a stable identity is
+        // assigned by the sale/sync pipeline.
+        anonymous.add(sale);
+        continue;
       }
 
-      // Fingerprint match (only if we don't have conflicting SALE_ ids)
-      if (byFingerprint.containsKey(fp)) {
-        final existing = byFingerprint[fp]!;
-        final eId = (existing['sale_id'] ?? existing['id'] ?? '').toString();
-        
-        // Prevent merging two explicitly different local sales — but only
-        // when they're far enough apart in time to plausibly be a real
-        // repeat purchase, not a retry/double-tap of the same submission.
-        bool isDistinctSale = false;
-        if (saleId.startsWith('SALE_') && eId.startsWith('SALE_') && saleId != eId) {
-          final tsNew = _saleIdTimestampMicros(saleId);
-          final tsExisting = _saleIdTimestampMicros(eId);
-          if (tsNew != null && tsExisting != null) {
-            final gapSeconds = (tsNew - tsExisting).abs() / 1000000;
-            isDistinctSale = gapSeconds > 30; // >30s apart: treat as a real separate sale
-          } else {
-            isDistinctSale = true; // can't compare timestamps — fall back to old (safe) behavior
+      final existing = byIdentity[identity];
+      if (existing == null) {
+        byIdentity[identity] = sale;
+      } else if (_preferIncomingBill(existing, sale)) {
+        byIdentity[identity] = sale;
+      } else {
+        // Preserve useful fields from a richer copy without creating a second
+        // business transaction.
+        final merged = <String, dynamic>{...existing};
+        for (final entry in sale.entries) {
+          final value = entry.value;
+          final current = merged[entry.key];
+          if (current == null || current.toString().trim().isEmpty) {
+            merged[entry.key] = value;
           }
         }
-        
-        if (!isDistinctSale) {
-          if (_preferIncomingBill(existing, sale)) {
-            byFingerprint[fp] = sale;
-            if (eId.startsWith('SALE_')) byId.remove(eId);
-            if (saleId.startsWith('SALE_')) byId[saleId] = sale;
-          }
-          continue;
-        }
+        byIdentity[identity] = merged;
       }
-
-      // New sale
-      if (saleId.startsWith('SALE_')) {
-        byId[saleId] = sale;
-      }
-      byFingerprint[fp] = sale;
-      finalResult.add(sale); // Keep original order
     }
 
-    // Rebuild final list based on latest references in byId / byFingerprint
-    final uniqueSales = <Map<String, dynamic>>[];
-    
-    for (final fp in byFingerprint.keys) {
-      uniqueSales.add(byFingerprint[fp]!);
-    }
-
-    return [...uniqueSales, ...cancelled];
+    return [...byIdentity.values, ...anonymous, ...cancelled];
   }
 
   /// Remove duplicate flattened lines shown in charts/transactions.
+  /// A content fingerprint is only safe when the line is tied to a stable sale
+  /// identity; anonymous lines are preserved because two real sales may have
+  /// identical content.
   static List<Map<String, dynamic>> dedupeFlattenedLines(List<Map<String, dynamic>> lines) {
     final seen = <String>{};
     final out = <Map<String, dynamic>>[];
 
-    for (int i = 0; i < lines.length; i++) {
-      final line = lines[i];
-      final saleId = (line['sale_id'] ?? line['invoice_number'] ?? '').toString();
-      final fp = lineContentFingerprint(line);
-      // 🔧 FIX: Do NOT include the loop index `i` in the key — every index is
-      // unique by construction, so a key ending in `_$i` can never repeat and
-      // this function was a no-op (it never removed anything). The key must
-      // be based only on sale identity + content so two genuinely identical
-      // lines (same sale, same fingerprint) collapse to one.
-      final compositeKey = saleId.isNotEmpty ? '${saleId}_$fp' : fp;
+    for (final line in lines) {
+      final saleId = (line['sale_id'] ??
+              line['invoice_number'] ??
+              line['offline_id'] ??
+              line['backend_id'] ??
+              '')
+          .toString()
+          .trim();
 
+      if (saleId.isEmpty) {
+        out.add(line);
+        continue;
+      }
+
+      final fp = lineContentFingerprint(line);
+      final compositeKey = '${saleId}_$fp';
       if (seen.contains(compositeKey)) continue;
       seen.add(compositeKey);
       out.add(line);
@@ -235,33 +226,42 @@ class SalesDedupHelper {
     return SalesCleanupResult(before: before, after: after, removed: before - after);
   }
 
-  /// True when [cloud] bill duplicates an existing [local] bill.
-  static bool isDuplicateBill(Map<String, dynamic> cloud, Iterable<Map<String, dynamic>> localBills) {
-    final cloudId = (cloud['sale_id'] ?? cloud['id'] ?? '').toString();
-    final cloudFp = billContentFingerprint(cloud);
+  /// True only when the cloud and local records share a stable business identity.
+  /// Content similarity is NEVER sufficient to declare two sales duplicates.
+  static bool isDuplicateBill(
+    Map<String, dynamic> cloud,
+    Iterable<Map<String, dynamic>> localBills,
+  ) {
+    const fields = <String>[
+      'offline_id',
+      'sale_id',
+      'invoice_number',
+      'backend_id',
+      'invoice_id',
+      'id',
+    ];
 
-    for (final local in localBills) {
-      final localId = (local['sale_id'] ?? local['id'] ?? '').toString();
-      
-      // Strong match
-      if (cloudId.isNotEmpty && localId.isNotEmpty && cloudId == localId) return true;
-      
-      // Content match, but only if they don't have conflicting SALE_ ids
-      // that are far enough apart in time to be a plausible real repeat sale.
-      if (billContentFingerprint(local) == cloudFp) {
-        bool isDistinctSale = false;
-        if (cloudId.startsWith('SALE_') && localId.startsWith('SALE_') && cloudId != localId) {
-          final tsCloud = _saleIdTimestampMicros(cloudId);
-          final tsLocal = _saleIdTimestampMicros(localId);
-          if (tsCloud != null && tsLocal != null) {
-            isDistinctSale = (tsCloud - tsLocal).abs() / 1000000 > 30;
-          } else {
-            isDistinctSale = true;
-          }
-        }
-        if (!isDistinctSale) return true;
+    String normalize(dynamic value) => value?.toString().trim() ?? '';
+
+    final cloudIds = <String>{};
+    for (final field in fields) {
+      final value = normalize(cloud[field]);
+      if (value.isNotEmpty && value != 'null' && value != '0') {
+        cloudIds.add(value);
       }
     }
+    if (cloudIds.isEmpty) return false;
+
+    for (final local in localBills) {
+      for (final field in fields) {
+        final localId = normalize(local[field]);
+        if (localId.isNotEmpty && localId != 'null' && localId != '0' && cloudIds.contains(localId)) {
+          return true;
+        }
+      }
+    }
+
+    // Never use content fingerprints to merge bills with distinct identities.
     return false;
   }
 

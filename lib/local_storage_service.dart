@@ -712,6 +712,8 @@ class LocalStorageService {
     // Callers are responsible for loading/merging the current history when
     // they need an additive update. This method persists exactly the list it
     // receives, avoiding the previous double-merge O(n²) path.
+    // SalesDedupHelper only collapses records sharing a stable business ID;
+    // content-identical sales remain separate legitimate transactions.
     final dedupedSales = SalesDedupHelper.dedupeBills(salesHistory);
     final List<StoredSale> typedSales = dedupedSales.map<StoredSale>((sale) {
       return StoredSale.fromJson(Map<String, dynamic>.from(sale));
@@ -721,6 +723,17 @@ class LocalStorageService {
     if (kDebugMode) {
       debugPrint('💾 [LocalStorage] Replaced sales with ${typedSales.length} deduplicated records for user: $userId');
     }
+  }
+
+  /// Replace the canonical sales snapshot without content-based collapsing.
+  /// Use this only when the caller has already reconciled stable identities.
+  static Future<void> replaceSalesCanonical(List<dynamic> salesHistory) async {
+    if (!await _hasValidUserId()) return;
+    final box = await _getBox(_salesBoxBase, encrypted: true);
+    final typedSales = salesHistory.whereType<Map>().map<StoredSale>((sale) {
+      return StoredSale.fromJson(Map<String, dynamic>.from(sale));
+    }).toList();
+    await box.put('all_sales', typedSales.map((sale) => sale.toJson()).toList());
   }
 
   static Future<List<dynamic>> loadSales() async {

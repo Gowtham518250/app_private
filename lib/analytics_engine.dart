@@ -232,9 +232,22 @@ class AnalyticsEngine {
     }
 
     final date = (sale['business_date'] ?? sale['invoice_date'] ?? sale['sale_date'] ?? '').toString();
+    final created = (sale['created_at'] ?? sale['timestamp'] ?? '').toString();
     final phone = (sale['customer_phone'] ?? sale['phone'] ?? '').toString().trim();
     final total = _toDouble(sale['total_amount'] ?? sale['total']);
-    return 'fallback|$date|$phone|${total.toStringAsFixed(2)}';
+    final items = sale['items'] ?? sale['line_items'];
+    final itemParts = <String>[];
+    if (items is List) {
+      for (final raw in items) {
+        if (raw is! Map) continue;
+        final name = (raw['product_id'] ?? raw['product_name'] ?? raw['product'] ?? raw['item'] ?? '').toString().trim().toLowerCase();
+        final qty = _toDouble(raw['quantity'] ?? raw['qty']).toStringAsFixed(3);
+        final price = _toDouble(raw['unit_price'] ?? raw['price']).toStringAsFixed(2);
+        itemParts.add('$name:$qty:$price');
+      }
+      itemParts.sort();
+    }
+    return 'fallback|$date|$created|$phone|${total.toStringAsFixed(2)}|${itemParts.join(';')}';
   }
 
   Map<String, dynamic> _mergeCanonicalTransaction(

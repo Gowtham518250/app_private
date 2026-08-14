@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../../api_client.dart';
 import '../../visual_widgets.dart';
+import '../../sync_service.dart';
 
 class OnlineOrdersTab extends StatefulWidget {
   const OnlineOrdersTab({super.key});
@@ -116,6 +117,14 @@ class _OnlineOrdersTabState extends State<OnlineOrdersTab>
     setState(() => _pendingSync.remove(orderId));
 
     if (ok) {
+      // ACCEPT may atomically create the backend invoice/sale and inventory
+      // movement. Pull the canonical backend state before refreshing the UI so
+      // dashboard/transactions do not remain on a stale local snapshot.
+      try {
+        await SyncService.downloadUserDataSafe();
+      } catch (e) {
+        debugPrint('Post-accept reconciliation deferred: $e');
+      }
       await _fetchAllOrders();
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Order $action successfully!')),

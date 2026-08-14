@@ -801,114 +801,148 @@ class _AllTransactionsPageState extends State<AllTransactionsPage>
 
   /// 💾 Mark invoice as paid (sync with invoices_page)
   Future<void> _markInvoiceAsPaid(Map<String, dynamic> inv) async {
-    final invoiceNum = inv.containsKey('invoice_number') 
-        ? inv['invoice_number']?.toString() ?? inv['id']?.toString() ?? ''
-        : inv['id']?.toString() ?? '';
-
+    final invoiceNum = (inv['invoice_number'] ?? '').toString().trim();
     if (invoiceNum.isEmpty) return;
 
     try {
-      final customerPhone = inv['customer_phone']?.toString() ?? '';
-      final amount = inv['amount'] as double? ?? 0.0;
+      final total = double.tryParse(
+            (inv['total_amount'] ?? inv['total'] ?? inv['amount'] ?? 0).toString(),
+          ) ??
+          0.0;
+      final alreadyPaid = double.tryParse((inv['paid_amount'] ?? 0).toString()) ?? 0.0;
+      final amountToApply = (total - alreadyPaid).clamp(0.0, double.infinity).toDouble();
+      if (amountToApply <= 0.01) return;
 
-      // 1. Update local invoices
+      final customerPhone = (inv['customer_phone'] ?? inv['phone'] ?? '').toString().trim();
+      final paidDate = DateTime.now().toUtc().toIso8601String();
+
+      // Resolve the canonical numeric server invoice ID. We must settle the
+      // exact invoice; invoice_number is not the backend primary key.
+      int? invoiceId = int.tryParse(
+        (inv['invoice_id'] ?? inv['id'] ?? '').toString(),
+      );
+      final token = await SecureTokenStorage.getToken() ?? '';
+
+      if ((invoiceId == null || invoiceId <= 0) && token.isNotEmpty) {
+        try {
+          final listResponse = await ApiClient.getJson(
+            '${ApiClient.invoicesPrefix}/',
+            headers: {'Authorization': 'Bearer $token'},
+          ).timeout(const Duration(seconds: 10));
+          if (listResponse.statusCode == 200) {
+            final decoded = jsonDecode(listResponse.body);
+            if (decoded is List) {
+              for (final raw in decoded) {
+                if (raw is Map && raw['invoice_number']?.toString() == invoiceNum) {
+                  invoiceId = int.tryParse(raw['id']?.toString() ?? '');
+                  break;
+                }
+              }
+            }
+          }
+        } catch (e) {
+          if (kDebugMode) debugPrint('⚠️ Could not resolve invoice ID online: $e');
+        }
+      }
+
+      // Persist the user action locally first. This keeps the UI deterministic
+      // while offline, but the server payment remains the canonical financial
+      // record and is queued below when it cannot be reached immediately.
       final localInvs = await LocalStorageService.loadLocalInvoices();
       for (var i = 0; i < localInvs.length; i++) {
-        if (localInvs[i]['invoice_number']?.toString() == invoiceNum || 
-            localInvs[i]['id']?.toString() == invoiceNum) {
-          localInvs[i]['payment_status'] = 'PAID';
-          localInvs[i]['status'] = 'PAID';
-          localInvs[i]['paid_date'] = DateTime.now().toIso8601String();
+        final raw = localInvs[i];
+        if (raw is! Map) continue;
+        final local = Map<String, dynamic>.from(raw);
+        final localNum = local['invoice_number']?.toString();
+        final localId = local['id']?.toString();
+        if (localNum == invoiceNum ||
+            (invoiceId != null && localId == invoiceId.toString())) {
+          final localTotal = double.tryParse(
+                (local['total_amount'] ?? local['total'] ?? total).toString(),
+              ) ??
+              total;
+          local['paid_amount'] = localTotal;
+          local['payment_status'] = 'PAID';
+          local['status'] = 'PAID';
+          local['paid_date'] = paidDate;
+          local['updated_at'] = paidDate;
+          localInvs[i] = local;
           break;
         }
       }
       await LocalStorageService.saveLocalInvoices(localInvs);
 
-      // 2. Update sales history
-      final List<dynamic> history = await LocalStorageService.loadSales();
+      final history = await LocalStorageService.loadSales();
       for (var i = 0; i < history.length; i++) {
-        final sId = (history[i]['sale_id'] ?? history[i]['id'] ?? history[i]['invoice_number'] ?? '').toString();
-        if (sId == invoiceNum) {
-          history[i]['payment_status'] = 'PAID';
-          history[i]['status'] = 'PAID';
-          history[i]['paid_amount'] = history[i]['total'] ?? history[i]['total_amount'] ?? 0.0;
+        if (history[i] is! Map) continue;
+        final sale = Map<String, dynamic>.from(history[i] as Map);
+        final saleId =
+            (sale['sale_id'] ?? sale['id'] ?? sale['invoice_number'] ?? '').toString();
+        if (saleId == invoiceNum ||
+            (invoiceId != null && sale['invoice_id']?.toString() == invoiceId.toString())) {
+          final saleTotal = double.tryParse(
+                (sale['total_amount'] ?? sale['total'] ?? total).toString(),
+              ) ??
+              total;
+          sale['paid_amount'] = saleTotal;
+          sale['payment_status'] = 'PAID';
+          sale['status'] = 'PAID';
+          sale['paid_date'] = paidDate;
+          history[i] = sale;
           break;
         }
       }
       await LocalStorageService.saveSales(history);
 
-      // 3. Update khata if customer phone exists
-      if (customerPhone.isNotEmpty && amount > 0) {
-        final khataBalances = await LocalStorageService.loadKhataBalances();
-        if (khataBalances.containsKey(customerPhone)) {
-          khataBalances[customerPhone] = (khataBalances[customerPhone] ?? 0) - amount;
-          if (khataBalances[customerPhone]! < 0) {
-            khataBalances[customerPhone] = 0;
-          }
-          await LocalStorageService.saveKhataBalances(khataBalances);
-        }
-      }
+      final paymentPayload = <String, dynamic>{
+        if (invoiceId != null && invoiceId > 0) 'invoice_id': invoiceId,
+        if (customerPhone.isNotEmpty) 'customer_phone': customerPhone,
+        'amount': amountToApply,
+        'payment_method': (inv['payment_method'] ?? 'CASH').toString().toUpperCase(),
+        'notes': 'Invoice $invoiceNum marked paid from Transactions',
+        'idempotency_key': 'PAID_${invoiceId ?? invoiceNum}',
+      };
 
-      // 4. Sync to backend
-      final paidDate = DateTime.now().toUtc().toIso8601String();
-      final token = await SecureTokenStorage.getToken();
       bool backendConfirmed = false;
-      if (token != null && token.isNotEmpty) {
+      if (token.isNotEmpty && (invoiceId != null || customerPhone.isNotEmpty)) {
         try {
           final response = await ApiClient.postJson(
-            '/api/invoices/$invoiceNum/mark-paid/',
-            {
-              'payment_status': 'PAID',
-              'paid_date': paidDate,
-              'customer_phone': customerPhone,
-              'amount': amount,
-              'paid_amount': amount,
-            },
+            '/api/khata/record-payment',
+            paymentPayload,
             headers: {'Authorization': 'Bearer $token'},
           ).timeout(const Duration(seconds: 10));
           backendConfirmed = response.statusCode >= 200 && response.statusCode < 300;
         } catch (e) {
-          if (kDebugMode) debugPrint('⚠️ Backend sync failed: $e');
+          if (kDebugMode) debugPrint('⚠️ Backend payment sync deferred: $e');
         }
       }
+
       if (!backendConfirmed) {
-        await SyncQueueManager.enqueue('update_invoice_paid', {
-          'operation_id': 'PAID_$invoiceNum',
-          'idempotency_key': 'PAID_$invoiceNum',
-          'invoice_number': invoiceNum,
-          'payment_status': 'PAID',
-          'paid_amount': amount,
-          'paid_date': paidDate,
-          'customer_phone': customerPhone,
-        });
+        await SyncQueueManager.enqueue('record_khata_payment', paymentPayload);
       }
 
-      // 5. ✅ Refresh both views
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('✅ Invoice marked as PAID'),
-            backgroundColor: Color(0xFF10B981),
-            duration: Duration(seconds: 2),
+          SnackBar(
+            content: Text(
+              backendConfirmed
+                  ? '✅ Invoice marked as PAID'
+                  : '✅ Marked PAID — pending server sync',
+            ),
+            backgroundColor: const Color(0xFF10B981),
           ),
         );
       }
-      
-      // Reload this page
+
       await _loadAllTransactions();
-      
-      // Also trigger invoices_page refresh by calling its static method
       InvoicesPage.refreshInvoices();
-      
-      // Also refresh khata page (customer balances)
       KhataPage.refreshKhata();
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('Error: $e'),
+            content: Text('Could not mark invoice paid: $e'),
             backgroundColor: Colors.red,
-            duration: const Duration(seconds: 2),
           ),
         );
       }

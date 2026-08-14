@@ -52,8 +52,8 @@ class _DayClosingPageState extends State<DayClosingPage> {
 
     setState(() {
       _todaySales = allSales.where((s) {
-        final date = s['created_at'] ?? s['sale_date'] ?? '';
-        return date.toString().startsWith(todayStr);
+        final date = s['business_date'] ?? s['sale_date'] ?? s['invoice_date'] ?? s['created_at'] ?? '';
+        return date.toString().split('T').first.startsWith(todayStr);
       }).map((e) => Map<String, dynamic>.from(e as Map)).toList().cast<Map<String, dynamic>>();
 
       _totalCash = 0;

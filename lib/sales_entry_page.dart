@@ -2414,7 +2414,13 @@ class _SalesEntryPageState extends State<SalesEntryPage>
         final dynamic decoded = jsonDecode(flashSaleData);
         if (decoded is! Map) throw const FormatException('Invalid flash sale payload');
         final sale = Map<String, dynamic>.from(decoded);
+        final status = (sale['status'] ?? 'ACTIVE').toString().trim().toUpperCase();
         final expiry = DateTime.tryParse(sale['expiry']?.toString() ?? '');
+        if (status != 'ACTIVE') {
+          await ScopedSharedPreferences.remove('active_flash_sale');
+          if (mounted && _flashSaleDiscount != 0) setState(() => _flashSaleDiscount = 0);
+          return;
+        }
         if (expiry == null || !DateTime.now().isBefore(expiry)) {
           await ScopedSharedPreferences.remove('active_flash_sale');
         } else {

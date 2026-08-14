@@ -30,8 +30,8 @@ android {
 
     signingConfigs {
         create("release") {
-            keyStore = file(System.getProperty("user.home") + "/retail_mind_release.jks")
-            keyStorePassword = "retail_mind_2026"
+            storeFile = file(System.getProperty("user.home") + "/retail_mind_release.jks")
+            storePassword = "retail_mind_2026"
             keyAlias = "retail_mind_key"
             keyPassword = "retail_mind_2026"
         }

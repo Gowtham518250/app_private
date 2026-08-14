@@ -372,7 +372,8 @@ class SalesRestoreService {
         
         if (validLineItems.isNotEmpty) {
           final normalizedLineItems = validLineItems.map((item) {
-            final desc = item['description']?.toString() ?? 'Custom Product';
+            final desc = (item['product_name'] ?? item['name'] ?? item['product'] ?? item['description'] ?? '').toString().trim();
+            final safeDesc = desc.isEmpty ? 'Custom Product' : desc;
             final qty = item['quantity'] is num
               ? item['quantity'] as num
               : num.tryParse(item['quantity']?.toString() ?? '') ?? 1;
@@ -383,10 +384,10 @@ class SalesRestoreService {
               ? item['line_total'] as num
               : qty * price;
             return {
-              'product_name': desc,
-              'product': desc,
-              'name': desc,
-              'item': desc,
+              'product_name': safeDesc,
+              'product': safeDesc,
+              'name': safeDesc,
+              'item': safeDesc,
               'qty': qty.toDouble(),
               'quantity': qty.toDouble(),
               'price': price.toDouble(),
@@ -399,6 +400,7 @@ class SalesRestoreService {
           // Convert invoice to sales history format with sync metadata
           final backendSaleRecord = {
             'sale_id': invoice['invoice_number'],
+            'offline_id': invoice['offline_id'] ?? invoice['invoice_number'],
             'invoice_id': invoice['id'],
             // Keep the invoice business date distinct from insert/update time.
             'business_date': invoice['sale_date'] ?? invoice['invoice_date'] ?? invoice['date'],

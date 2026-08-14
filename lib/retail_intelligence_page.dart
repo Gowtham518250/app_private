@@ -272,6 +272,11 @@ class _FlashSaleTabState extends State<_FlashSaleTab> with SingleTickerProviderS
             setState(() => _activeFlashSale = null);
             if (kDebugMode) debugPrint('⏰ Backend flash sale expired');
           }
+        } else if (res.statusCode == 404 || res.statusCode == 204) {
+          // Backend explicitly says there is no active sale. Do not keep a
+          // stale local discount that can silently discount normal billing.
+          await ScopedSharedPreferences.remove('active_flash_sale');
+          if (mounted) setState(() => _activeFlashSale = null);
         }
       } catch (e) {
         if (kDebugMode) debugPrint('⚠️ Backend flash sale sync failed, using local data: $e');

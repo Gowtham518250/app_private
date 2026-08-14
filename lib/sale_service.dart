@@ -590,15 +590,16 @@ try {
 
     final Map<String, dynamic> saleRecord = {
       'sale_id': saleId,
+      'offline_id': saleId,
       'invoice_number': saleId,
-      'created_at': saleTimestamp,
+      'created_at': existingSale?['created_at'] ?? saleTimestamp,
       'updated_at': saleTimestamp,
       'user_id': userId,
       'sync_status': syncStatus,
       'pending_sync': syncStatus != 'synced',
       'sync_attempts': 0,
       'last_sync_attempt': null,
-      'backend_id': null,
+      'backend_id': existingSale?['backend_id'],
       'is_deleted': false,
       'customer_name': customerName.isNotEmpty ? customerName : 'Guest Customer',
       'customer_phone': customerPhone,

@@ -1004,7 +1004,10 @@ class _DashboardPageState extends State<DashboardPage>
   }
 
   Future<void> _loadOnlineStoreStats() async {
-    if (!_isOnlineStoreActive) return;
+    // Online-order KPIs are business data, not a UI/store-publication flag.
+    // Always reconcile them so existing orders cannot appear as zero merely
+    // because the store toggle/cache is stale.
+
     try {
       final prefs = await SharedPreferences.getInstance();
       final shopId = (prefs.getInt('user_id') ?? prefs.getInt('userId') ?? 0).toString();
@@ -12521,8 +12524,9 @@ class _DashboardPageState extends State<DashboardPage>
           builder: (ctx) => AlertDialog(
             title: const Text('Pending data'),
             content: Text(
-              '${remaining.toString()} item(s) still need synchronization. They will remain safely in the encrypted, user-scoped outbox and retry after the next login.\n\nYou can logout now without losing the pending records.',
-            ),            actions: [
+              '''${remaining.toString()} item(s) still need synchronization. They will remain safely in the encrypted, user-scoped outbox and retry after the next login.\n\nYou can logout now without losing the pending records.''',
+            ),
+            actions: [
               TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('CANCEL')),
               ElevatedButton(
                 onPressed: () => Navigator.pop(ctx, true),
