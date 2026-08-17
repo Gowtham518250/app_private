@@ -8,8 +8,26 @@ import 'package:flutter_background_service_android/flutter_background_service_an
 import 'package:flutter_background_service_ios/flutter_background_service_ios.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:flutter_accessibility_service/flutter_accessibility_service.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'payment_announcement_service.dart';
 import 'payment_detection_service.dart';
+
+Future<void> _ensurePaymentNotificationChannel() async {
+  if (!Platform.isAndroid) return;
+  final plugin = FlutterLocalNotificationsPlugin();
+  final android = plugin.resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
+  if (android == null) return;
+  const channel = AndroidNotificationChannel(
+    'payment_detection_channel',
+    'Payment Detection',
+    description: 'Foreground service notification for payment detection.',
+    importance: Importance.low,
+    playSound: false,
+    enableVibration: false,
+    showBadge: false,
+  );
+  await android.createNotificationChannel(channel);
+}
 
 @pragma('vm:entry-point')
 Future<bool> onStart(ServiceInstance service) async {
@@ -121,6 +139,10 @@ Future<void> initializeBackgroundService() async {
   try {
     final service = FlutterBackgroundService();
 
+    // The background-service plugin requires a custom channel to exist before
+    // configure()/startForeground() when notificationChannelId is supplied.
+    await _ensurePaymentNotificationChannel();
+
     // Check notification permission on Android 13+ to avoid CannotPostForegroundServiceNotificationException
     // We only check the status; we do not call request() from here because this code can run in the background without UI context.
     var isForeground = true;
@@ -157,6 +179,10 @@ Future<void> initializeBackgroundService() async {
         initialNotificationTitle: 'Retail Mind',
         initialNotificationContent: 'Listening for payments...',
         foregroundServiceNotificationId: 888,
+        // Android 14+ / target SDK 34+ requires an explicit FGS type.
+        // Payment-notification monitoring is not data transfer, location, media,
+        // or another predefined category, so use the documented specialUse type.
+        foregroundServiceTypes: [AndroidForegroundType.specialUse],
       ),
       iosConfiguration: IosConfiguration(
         autoStart: true,

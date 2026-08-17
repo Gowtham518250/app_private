@@ -137,7 +137,7 @@ class DashboardPage extends StatefulWidget {
 }
 
 class _DashboardPageState extends State<DashboardPage>
-    with SingleTickerProviderStateMixin, WidgetsBindingObserver, OptimizedStateMixin {
+    with TickerProviderStateMixin, WidgetsBindingObserver, OptimizedStateMixin {
   late final AnimationController _animationController;
   late final ScrollController _scrollController;
   late final AnimationController _paymentDetectionPulseController;
@@ -15492,7 +15492,7 @@ class _MotionCharts extends StatefulWidget {
 }
 
 class _MotionChartsState extends State<_MotionCharts>
-    with SingleTickerProviderStateMixin {
+    with TickerProviderStateMixin {
   late AnimationController _ctrl;
   @override
   void initState() {

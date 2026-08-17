@@ -7,6 +7,8 @@
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.USE_BIOMETRIC" />
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
 
@@ -44,6 +46,16 @@
                 android:name="androidx.work.WorkManagerInitializer"
                 tools:node="remove" />
         </provider>
+
+        <service
+            android:name="id.flutter.flutter_background_service.BackgroundService"
+            android:exported="true"
+            android:foregroundServiceType="specialUse"
+            tools:replace="android:foregroundServiceType">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Continuous payment-notification monitoring for Retail Mind using user-enabled SMS and notification access." />
+        </service>
 
         <service android:name="notification.listener.service.NotificationListener"
                  android:label="Retail Mind Voice Detection"

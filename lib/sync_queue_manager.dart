@@ -36,6 +36,8 @@ class SyncQueueManager {
     'delete_product',
     'create_purchase_order',
     'update_purchase_order_status',
+    'attendance_check_in',
+    'attendance_check_out',
   };
 
   static const int _softQueueLimit = 10000;
@@ -286,9 +288,16 @@ class SyncQueueManager {
             if (rawData is! Map) continue;
 
             if (_businessIdentifier(rawData) == identifier) {
-              // Existing record is already durable. Do not create a second
-              // local operation.
-              return false;
+              // Existing record is already durable. Treat a repeated enqueue
+              // as an idempotent success so UI retries do not report a
+              // persistence failure for an operation that is already safely
+              // stored in the outbox.
+              if (kDebugMode) {
+                debugPrint(
+                  '✅ [SyncQueue] Existing durable operation reused: $action/$identifier',
+                );
+              }
+              return true;
             }
           }
         }
