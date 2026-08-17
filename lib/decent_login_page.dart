@@ -213,6 +213,10 @@ class _DecentLoginPageState extends State<DecentLoginPage>
           await prefs.setString('location', data['location'].toString());
           await ScopedSharedPreferences.setString('location', data['location'].toString());
         }
+        if (data['shop_type'] != null) {
+          await prefs.setString('shop_type', data['shop_type'].toString());
+          await ScopedSharedPreferences.setString('shop_type', data['shop_type'].toString());
+        }
 
         if (kDebugMode) {
           debugPrint('✅ Login successful');

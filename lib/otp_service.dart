@@ -236,55 +236,33 @@ class OTPService {
     try {
       await clearResetState();
 
-      final startResponse = await ApiClient.postJson(
-        '/api/auth-hardened/password-reset/start',
-        {'email': normalizedEmail},
-      );
-
-      if (startResponse.statusCode != 200) {
-        return {
-          'success': false,
-          'message': 'Unable to start the secure password reset. Please try again.',
-        };
-      }
-
-      final startData = jsonDecode(startResponse.body);
-      final challengeId = startData['challenge_id']?.toString() ?? '';
-      final registrationSecret = startData['registration_secret']?.toString() ?? '';
-      final confirmationUrl = startData['confirmation_url']?.toString() ?? '';
-
-      if (challengeId.isEmpty || registrationSecret.isEmpty || confirmationUrl.isEmpty) {
-        return {
-          'success': false,
-          'message': 'Secure reset challenge could not be created.',
-        };
-      }
-
       final otp = _generateSecureOTP();
       final otpHash = _hashOtp(otp);
       final createdAt = DateTime.now().millisecondsSinceEpoch;
 
+      // Frontend owns OTP generation, local verification and email delivery.
       await _storage.write(key: _kEmail, value: normalizedEmail);
       await _storage.write(key: _kOtpHash, value: otpHash);
       await _storage.write(key: _kOtpCreatedAt, value: createdAt.toString());
-      await _storage.write(key: _kChallengeId, value: challengeId);
-      await _storage.write(key: _kRegistrationSecret, value: registrationSecret);
       await _storage.write(key: _kAttempts, value: '0');
 
+      // Backend stores only the reset OTP proof needed for the final password
+      // change. It no longer starts the OTP flow.
       final registerResponse = await ApiClient.postJson(
-        '/api/auth-hardened/password-reset/register-otp',
+        '/auth/store-reset-otp',
         {
-          'challenge_id': challengeId,
-          'registration_secret': registrationSecret,
-          'otp_hash': otpHash,
+          'email': normalizedEmail,
+          'otp': otp,
         },
       );
 
-      if (registerResponse.statusCode != 200) {
+      if (registerResponse.statusCode < 200 ||
+          registerResponse.statusCode >= 300) {
         await clearResetState();
         return {
           'success': false,
-          'message': 'Unable to register the password-reset verification.',
+          'message':
+              'Unable to prepare the password reset. Please try again.',
         };
       }
 
@@ -294,8 +272,7 @@ class OTPService {
         userName: 'Owner',
         title: title ?? '🔐 Password Reset',
         bodyText: bodyText ??
-            'Use the OTP below to reset your Retail Mind owner password. Also confirm the email using the secure button below.',
-        confirmationUrl: confirmationUrl,
+            'Use the 6-digit OTP below to reset your Retail Mind owner password.',
       );
 
       if (!emailSent) {
@@ -303,21 +280,20 @@ class OTPService {
         return {
           'success': false,
           'message':
-              'Failed to send OTP. Check the Gmail SMTP credentials configured for the app.',
+              'Failed to send OTP email. Please check the email service and try again.',
         };
-      }
-
-      if (kDebugMode) {
-        debugPrint('✅ Secure frontend OTP sent to $normalizedEmail');
       }
 
       return {
         'success': true,
-        'message': 'OTP sent. Open the email, confirm the email link, then enter the OTP.',
+        'message': 'OTP sent. Check your email inbox and spam folder.',
       };
     } catch (e) {
-      if (kDebugMode) debugPrint('❌ Secure OTP send failed: $e');
-      return {'success': false, 'message': 'Failed to start password reset: $e'};
+      if (kDebugMode) debugPrint('❌ Password-reset OTP send failed: $e');
+      return {
+        'success': false,
+        'message': 'Failed to send OTP: $e',
+      };
     }
   }
 
@@ -335,15 +311,17 @@ class OTPService {
     final storedEmail = await _storage.read(key: _kEmail);
     final storedHash = await _storage.read(key: _kOtpHash);
     final createdAtRaw = await _storage.read(key: _kOtpCreatedAt);
-    final challengeId = await _storage.read(key: _kChallengeId);
     final attemptsRaw = await _storage.read(key: _kAttempts);
 
-    if (storedEmail == null || storedHash == null || createdAtRaw == null || challengeId == null) {
+    if (storedEmail == null || storedHash == null || createdAtRaw == null) {
       return {'success': false, 'message': 'No OTP pending. Request a new code.'};
     }
 
     if (storedEmail != normalizedEmail) {
-      return {'success': false, 'message': 'The OTP belongs to a different email address.'};
+      return {
+        'success': false,
+        'message': 'The OTP belongs to a different email address.',
+      };
     }
 
     final createdAt = int.tryParse(createdAtRaw);
@@ -352,7 +330,8 @@ class OTPService {
       return {'success': false, 'message': 'Reset verification state is invalid.'};
     }
 
-    if (DateTime.now().millisecondsSinceEpoch - createdAt > _otpValidity.inMilliseconds) {
+    if (DateTime.now().millisecondsSinceEpoch - createdAt >
+        _otpValidity.inMilliseconds) {
       await clearResetState();
       return {'success': false, 'message': 'OTP expired. Request a new code.'};
     }
@@ -360,7 +339,10 @@ class OTPService {
     final attempts = int.tryParse(attemptsRaw ?? '0') ?? 0;
     if (attempts >= _maxLocalAttempts) {
       await clearResetState();
-      return {'success': false, 'message': 'Too many OTP attempts. Request a new code.'};
+      return {
+        'success': false,
+        'message': 'Too many OTP attempts. Request a new code.',
+      };
     }
 
     final enteredHash = _hashOtp(code);
@@ -375,40 +357,9 @@ class OTPService {
       };
     }
 
-    // Local verification succeeded. Now require the independent mailbox
-    // confirmation and let the backend issue the short-lived reset token.
-    final authorizeResponse = await ApiClient.postJson(
-      '/api/auth-hardened/password-reset/authorize',
-      {
-        'challenge_id': challengeId,
-        'email': normalizedEmail,
-        'otp': code,
-      },
-    );
-
-    if (authorizeResponse.statusCode != 200) {
-      try {
-        final data = jsonDecode(authorizeResponse.body);
-        final message = data['detail']?.toString() ?? 'Reset authorization failed';
-        return {'success': false, 'message': message};
-      } catch (_) {
-        return {'success': false, 'message': 'Reset authorization failed'};
-      }
-    }
-
-    final data = jsonDecode(authorizeResponse.body);
-    final resetToken = data['reset_token']?.toString() ?? '';
-    if (resetToken.isEmpty) {
-      return {'success': false, 'message': 'Reset authorization token was not issued.'};
-    }
-
-    await _storage.write(key: _kResetToken, value: resetToken);
-    await _clearOtpOnly();
-
     return {
       'success': true,
-      'message': 'OTP verified and reset authorization granted.',
-      'token': resetToken,
+      'message': 'OTP verified successfully.',
     };
   }
 

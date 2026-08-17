@@ -100,7 +100,17 @@ class _RegisterPageState extends State<RegisterPage>
     if (!mounted) return;
 
     if (result.success) {
-      // Backend authenticated — go straight to shop details / dashboard
+      if (result.isNewUser) {
+        final prefs = await SharedPreferences.getInstance();
+        final userId = prefs.getInt('user_id') ?? prefs.getInt('userId') ?? 0;
+        if (userId > 0) {
+          await prefs.setBool('shop_details_required_$userId', true);
+          await prefs.setBool('shop_details_completed_$userId', false);
+        }
+      }
+
+      // Backend authenticated — new users go to the existing Shop Details page;
+      // existing Google users continue without reopening onboarding.
       Navigator.pushReplacementNamed(
         context,
         result.isNewUser ? '/shop-details' : '/dashboard',
@@ -304,6 +314,13 @@ class _RegisterPageState extends State<RegisterPage>
 
       await prefs.setString('user_name', username);
       await prefs.setString('email', emailController.text.trim());
+
+      // Registration-only onboarding gate. Existing logins must not be sent
+      // back to Shop Details; only a freshly registered account is flagged.
+      if (extractedUserId > 0) {
+        await prefs.setBool('shop_details_required_$extractedUserId', true);
+        await prefs.setBool('shop_details_completed_$extractedUserId', false);
+      }
       
       if (kDebugMode) {
         debugPrint('✅ Registration successful');

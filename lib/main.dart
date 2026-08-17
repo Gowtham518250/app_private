@@ -1124,26 +1124,19 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
 
                   if (role == 'CUSTOMER') return '/nearby-shops';
 
-                  // Hard onboarding gate: an authenticated shop account cannot
-                  // enter protected shop screens until shop details are saved.
-                  final shopDetailsCompleted =
-                      routePrefs.getBool('shop_details_completed_$userId') ??
-                      routePrefs.getBool('shop_details_completed') ??
-                      false;
-                  if (!shopDetailsCompleted) return '/shop-details';
+                  // Shop Details is a registration-only onboarding step.
+                  // Existing authenticated users must never be forced back into
+                  // the form just because a legacy completion flag is missing.
+                  // Registration sets this explicit per-user requirement and
+                  // ShopDetailsPage clears it after a successful save.
+                  final shopDetailsRequired =
+                      routePrefs.getBool('shop_details_required_$userId') ?? false;
+                  if (shopDetailsRequired) return '/shop-details';
 
-                  // Owner account + Staff Mode require identity verification
-                  // for the CURRENT APP PROCESS. Closing/restarting the app
-                  // intentionally requires verification again.
-                  final isStaffMode =
-                      routePrefs.getBool('is_staff_mode') ?? false;
-                  final verificationRole = isStaffMode ? 'STAFF' : 'OWNER';
-                  final verified = await SessionManagementService.isIdentityVerified(
-                    userId: userId,
-                    role: verificationRole,
-                  );
-
-                  if (!verified) return '/identity-verification';
+                  // Identity verification is intentionally handled by the
+                  // explicit login/registration flow (RoleSelectionPage).
+                  // Auto-login after reopening the app should go straight to
+                  // the dashboard; it must not show verification again.
                   if (role == 'WORKER') return '/attendance';
                   return '/dashboard';
                 })(),

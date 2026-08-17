@@ -62,10 +62,10 @@ class _SystemManagementPageState extends State<SystemManagementPage> {
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           Text('Cache Management', style: GoogleFonts.poppins(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold)),
           const SizedBox(height: 16),
-          _btn('View Cache Stats', Icons.analytics, () => _handle('Stats', () => ApiClient.getJson('/cache/api/cache/stats'))),
-          _btn('Warm Product Cache', Icons.inventory, () => _handle('Warm Products', () => ApiClient.postJson('/cache/api/cache/warm/products', {}))),
-          _btn('Warm Analytics Cache', Icons.insights, () => _handle('Warm Analytics', () => ApiClient.postJson('/cache/api/cache/warm/analytics', {}))),
-          _btn('Clear ALL Cache', Icons.delete_forever, () => _handle('Clear Cache', () => http.delete(Uri.parse('${ApiClient.baseUrl}/cache/api/cache/clear-all')), isJson: false), color: Colors.redAccent),
+          _btn('View Cache Stats', Icons.analytics, () => _handle('Stats', () => ApiClient.getJson('/api/cache/stats'))),
+          _btn('Warm Product Cache', Icons.inventory, () => _handle('Warm Products', () => ApiClient.postJson('/api/cache/warm/products', {}))),
+          _btn('Warm Analytics Cache', Icons.insights, () => _handle('Warm Analytics', () => ApiClient.postJson('/api/cache/warm/analytics', {}))),
+          _btn('Clear ALL Cache', Icons.delete_forever, () => _handle('Clear Cache', () => http.delete(Uri.parse('${ApiClient.baseUrl}/api/cache/clear-all')), isJson: false), color: Colors.redAccent),
           
           const SizedBox(height: 32),
           Text('Batch Operations', style: GoogleFonts.poppins(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold)),

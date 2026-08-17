@@ -198,6 +198,14 @@ class _AttendancePageState extends State<AttendancePage>
         return <dynamic>[];
       }));
       for (final workerRecords in workerResults) { allRecords.addAll(workerRecords); }
+
+      // Persist the complete remote history so payroll does not fall to zero
+      // on cold start when the network/auth refresh is temporarily unavailable.
+      if (allRecords.isNotEmpty) {
+        await OfflineAttendanceService.mergeRemoteRecords(
+          allRecords.whereType<Map>().map((r) => Map<String, dynamic>.from(r)).toList(),
+        );
+      }
       
       // IMPORTANT: never replace durable local attendance with a stale/empty
       // cloud response. Immediately after CHECK IN/CHECK OUT the local record

@@ -71,15 +71,13 @@ import 'api_client.dart';
 //          UTR + masked account + bank name → force LIKELY
 //          Catches sophisticated spoofs that look clean but lack depth
 //
-//  FIX-52  NOTIFICATION-ONLY CAP — if source == notification only:
-//          max decision = LIKELY
-//          Require SMS or TCM for CONFIRMED
-//          Prevents notification-only attacks from confirming
+//  FIX-52  NOTIFICATION-ONLY SAFETY CAP — notification-only events stay
+//          LIKELY unless they have a strong independent anchor such as a valid
+//          UTR or an exact local bill match from a verified payment app.
 //
-//  FIX-53  FINAL CONFIRM LOCK — CONFIRMED ONLY IF:
-//          ( score ≥ threshold AND NOT fraud AND 
-//            ( valid UTR OR verified SMS sender OR TCM match ) )
-//          Else: → ALWAYS downgrade to LIKELY
+//  FIX-53  FINAL CONFIRM LOCK — CONFIRMED only when score/fraud checks pass
+//          and there is an independent confirmation anchor (UTR, verified SMS,
+//          TCM match, or the guarded verified-app exact-bill anchor).
 //
 //  FIX-54  SPOOF HEURISTIC BOOST — perfect clean sentence + generic wording
 //          → apply -0.10 penalty
@@ -1300,9 +1298,60 @@ abstract class _VpaValidator {
 abstract class _SenderValidator {
   static final _valid  = RegExp(r'^[A-Za-z0-9\-]{3,20}$');
   static final _digits = RegExp(r'^\d+$');
+
+  // FIX (security, critical): this previously only checked FORMAT — any
+  // alphanumeric, non-numeric sender ID (e.g. a spoofed 'XY-FAKEBK' sent
+  // via any bulk-SMS gateway) passed "legitimacy" with zero identity
+  // verification. This is the exact fraud pattern already used against
+  // UPI sound-box devices in India: send a spoofed "payment received" SMS
+  // timed right after a fake/no payment, and the merchant hands over
+  // goods before checking their real bank balance. Real bank/PSP sender
+  // IDs are DLT-registered 6-character headers with a 2-letter carrier
+  // prefix (e.g. VM-, AX-, BP-, JM-, TX-, VK-) followed by a fixed entity
+  // code. This whitelist checks the ENTITY portion (after the prefix)
+  // against known real banks/PSPs, which a spoofer cannot reuse without
+  // also matching the exact registered code.
+  //
+  // NOTE: this raises the bar significantly but is NOT a cryptographic
+  // guarantee — DLT header spoofing via lax overseas gateways is a known,
+  // ongoing problem industry-wide. Treat detected payments as provisional,
+  // not as proof of settlement (see the confidence-tier flag added below).
+  static final _knownEntityCodes = <String>{
+    // Format: the portion after the 2-char carrier prefix and hyphen.
+    'HDFCBK', 'HDFCBN', 'SBIINB', 'SBIPSG', 'ICICIB', 'ICICIT', 'AXISBK',
+    'AXISBN', 'KOTAKB', 'PNBSMS', 'UNIONB', 'IDFCFB', 'RBLBNK', 'YESBNK',
+    'INDBNK', 'CANBNK', 'BOBIBK', 'PAYTM', 'PHONPE', 'GOOGPY', 'AMZNPY',
+    'BHIMUP', 'CREDCL', 'FRCHRG', 'MOBKWK',
+  };
+
+  static final _dltHeader = RegExp(r'^[A-Za-z]{2}-([A-Za-z0-9]{3,20})$');
+
   static bool isLegitimate(String s) {
     final t = s.trim();
-    return _valid.hasMatch(t) && !_digits.hasMatch(t);
+    if (!_valid.hasMatch(t) || _digits.hasMatch(t)) return false;
+
+    // DLT-format headers (e.g. "VM-HDFCBK") get checked against the known
+    // entity whitelist. Non-DLT-format senders (older/irregular formats
+    // some legitimate banks still use) fall back to the original
+    // format-only check, logged as lower-confidence so the caller can
+    // decide whether to still announce it or flag it for manual review.
+    final m = _dltHeader.firstMatch(t);
+    if (m != null) {
+      final entity = (m.group(1) ?? '').toUpperCase();
+      return _knownEntityCodes.any((k) => entity.contains(k));
+    }
+    return true; // format-valid but not DLT-shaped — lower confidence, not blocked
+  }
+
+  /// Separate, stricter check: true only if the sender matched a KNOWN
+  /// entity code via proper DLT format. Used to tag detections as
+  /// verified vs provisional rather than to gate them outright — gating
+  /// outright would break legitimate banks not yet in the list.
+  static bool isHighConfidence(String s) {
+    final m = _dltHeader.firstMatch(s.trim());
+    if (m == null) return false;
+    final entity = (m.group(1) ?? '').toUpperCase();
+    return _knownEntityCodes.any((k) => entity.contains(k));
   }
 }
 
@@ -1533,6 +1582,11 @@ class _ChannelWatchdog {
   Timer?    _timer;
   void Function(ChannelType, ChannelStatus)? onStatusChange;
 
+  // Public (within-library) read accessors so PaymentDetectionService can
+  // expose heartbeat data to the UI without exposing this private class.
+  DateTime? get lastNotificationTime => _lastNotif;
+  DateTime? get lastSmsTime          => _lastSms;
+
   void recordNotification() => _lastNotif = DateTime.now();
   void recordSms()          => _lastSms   = DateTime.now();
 
@@ -1710,6 +1764,22 @@ abstract class _Scorer {
     required bool       isFailed,
     required String     source,
     required String?    sender,
+    // FIX (security, critical, accuracy-90): distinguishes a REAL known
+    // bank-app package (PaymentApp.bankApp assigned via _AppRegistry's
+    // static package-name whitelist) from an UNREGISTERED package that
+    // _handleNotification's content-based fallback also tags as
+    // PaymentApp.bankApp after only checking payment wording + amount +
+    // a reference-ID-shaped string (see the FIX comment at that call
+    // site). Both previously shared the identical enum value, so a
+    // fabricated notification from any sideloaded/unknown app inherited
+    // the full "trusted app" score boost (+0.10 to +0.40) meant only for
+    // verified official bank/PSP packages — enough on its own to clear
+    // confirmedThreshold (0.70) for a fake "payment received" notification
+    // with zero identity verification. When true, this app instance is
+    // excluded from the trusted-app boost below regardless of its enum
+    // value; it must earn its score purely from UTR/context/bill-match
+    // signals, same as an SMS from an unknown sender.
+    bool isUnverifiedApp = false,
   }) {
     if (isFailed) return 0.0;
     double s = 0.0;
@@ -1752,7 +1822,10 @@ abstract class _Scorer {
       PaymentApp.googlePay, PaymentApp.phonePe, PaymentApp.paytm,
       PaymentApp.amazonPay, PaymentApp.bhim,    PaymentApp.bankApp,
     };
-    final isTrustedApp = trusted.contains(app);
+    // FIX (security, critical, accuracy-90): see param doc above — an
+    // unverified-package fallback match never counts as a trusted app,
+    // even though it carries the PaymentApp.bankApp tag.
+    final isTrustedApp = !isUnverifiedApp && trusted.contains(app);
 
     if (source == 'sms' && PaymentDetectionService._isVerifiedBankSender(sender)) {
       s += 0.20;
@@ -1884,6 +1957,54 @@ class PaymentDetectionService {
   static final PaymentDetectionService _i = PaymentDetectionService._();
   factory PaymentDetectionService() => _i;
   PaymentDetectionService._();
+
+  // ==========================================================================
+  // TEST + HEALTH-INDICATOR PUBLIC API
+  // ==========================================================================
+  // Dart's `_UnderscorePrefixed` classes (e.g. _Classifier, _Extractor,
+  // _AppRegistry) are library-private to THIS FILE — a separate test file
+  // that imports payment_detection_service.dart cannot reach them directly,
+  // even though it can construct a PaymentDetectionService. These
+  // @visibleForTesting wrappers are the intended, minimal public surface
+  // for exercising the real classification/extraction logic from tests,
+  // without loosening privacy for production callers.
+
+  /// Runs the same two-stage classifier used by the live notification/SMS
+  /// pipeline and returns a plain string result ('passed', 'fraud', 'otp',
+  /// 'debit', 'junk') so tests don't need access to the private enum type.
+  @visibleForTesting
+  static String debugClassify(String rawText) {
+    final text = _Normaliser.clean(rawText);
+    return _Classifier.classify(text).name;
+  }
+
+  /// Extracts the amount the same way the live pipeline does. Returns null
+  /// if no confident amount was found (e.g. balance-only messages, or
+  /// messages below PdsConfig.minAmount).
+  @visibleForTesting
+  static double? debugExtractAmount(String rawText) =>
+      _Extractor.amount(_Normaliser.clean(rawText));
+
+  /// Extracts a UTR/reference id the same way the live pipeline does.
+  @visibleForTesting
+  static String? debugExtractReferenceId(String rawText) =>
+      _Extractor.referenceId(_Normaliser.clean(rawText));
+
+  /// Identifies which known payment app a package name maps to. Returns
+  /// 'unknown' for unregistered packages (which, since the content-based
+  /// fallback was added, does NOT mean detection fails for that package —
+  /// see _handleNotification).
+  @visibleForTesting
+  static String debugIdentifyPackage(String packageName) =>
+      _AppRegistry.identify(packageName).name;
+
+  // Watchdog heartbeat, exposed read-only so the dashboard can show a
+  // "last payment detected: Xm ago" health indicator instead of detection
+  // silently going stale with no visible signal anywhere in the UI.
+  DateTime? get lastNotificationSeenAt => _watchdog.lastNotificationTime;
+  DateTime? get lastSmsSeenAt          => _watchdog.lastSmsTime;
+  bool get isNotificationChannelStale  => _watchdog.isStale(ChannelType.notification);
+  bool get isSmsChannelStale           => _watchdog.isStale(ChannelType.sms);
 
   // Deduplication cache for SMS (BUG-S2)
   final List<String> _processedSmsCache = [];
@@ -2060,7 +2181,7 @@ class PaymentDetectionService {
           RegExp(r'\b(bank|account|a\/c|upi|imps|neft|rtgs)\b', caseSensitive: false).hasMatch(cleanText);
       final verifiedSender = _isVerifiedBankSender(sender);
       final hasPayerName = _Extractor.payerName(cleanText) != null && _Extractor.payerName(cleanText)!.isNotEmpty;
-      final hasStrongCtx = _Classifier.hasStructuredPaymentContext(cleanText);
+      final hasStrongCtx = _Classifier.hasStructuredPaymentContext(text);
 
       int structureScore = 0;
       if (validNumericUtr) structureScore++;
@@ -2389,6 +2510,21 @@ class PaymentDetectionService {
         PdsLogger.w('SVC', 'Watchdog: Notif stale — attempting recovery');
         await _startNotificationListener();
       }
+
+      // FIX: SMS channel previously had no self-healing at all here — only
+      // the notification channel was checked/restarted. If the SMS
+      // listener died (permission revoked then re-granted, plugin error,
+      // OS killed the receiver, etc.) it stayed dead with nothing to
+      // notice or recover it.
+      final isSmsOk = await hasSmsPermission();
+      if (!isSmsOk) {
+        _emitStatus(ChannelType.sms, ChannelStatus.permissionDenied);
+      }
+      if (_watchdog.isStale(ChannelType.sms)) {
+        PdsLogger.w('SVC', 'Watchdog: SMS stale — attempting recovery');
+        _isSmsListening = false; // allow _startSmsListener to re-attach
+        await _startSmsListener();
+      }
     });
   }
 
@@ -2716,9 +2852,14 @@ class PaymentDetectionService {
       try { isRemoved = (event as dynamic).hasRemoved == true; } catch (_) {}
       if (isRemoved) return;
 
-      final app = _AppRegistry.identify(pkg);
-      if (app == PaymentApp.unknown) return;
-      if (!_floodGuard.isAllowed('notif:$pkg')) return;
+      var app = _AppRegistry.identify(pkg);
+      // FIX (security, critical, accuracy-90): tracks whether `app` was
+      // assigned via the content-based fallback below (unregistered
+      // package) rather than a real match in _AppRegistry's package-name
+      // whitelist, so downstream scoring never grants it "trusted app"
+      // status. See the matching FIX note on _Scorer.calculate's
+      // `isUnverifiedApp` parameter.
+      bool isUnverifiedApp = false;
 
       final fields = <String>[
         event.title   ?? '',
@@ -2729,27 +2870,61 @@ class PaymentDetectionService {
       ].where((s) => s.isNotEmpty).join(' ');
       if (fields.isEmpty) return;
 
+      if (app == PaymentApp.unknown) {
+        // FIX: any package not in the static _AppRegistry whitelist was
+        // dropped outright, silently, forever — closed via a content-based
+        // fallback below.
+        //
+        // FIX (security, critical): the fallback originally only checked
+        // for payment-context wording + a parseable amount. That means ANY
+        // installed app — including one a scammer talks a merchant into
+        // sideloading — could post a local notification saying "Payment
+        // received ₹5,000" and it would pass. Unlike the SMS path (which
+        // now has a sender-identity whitelist), a notification has no
+        // equivalent trusted-identity signal for an app outside our
+        // registry, so require a real transaction reference number too
+        // (UTR/txn id pattern) in addition to payment-context + amount.
+        // This raises the bar substantially — a scammer's fake app would
+        // now need to fabricate a plausible-looking reference id, not just
+        // a rupee amount and the word "credited".
+        final looksLikePayment = _Classifier.hasPaymentContext(fields) &&
+            _Extractor.amount(fields) != null &&
+            _Extractor.referenceId(fields) != null;
+        if (!looksLikePayment) return;
+        app = PaymentApp.bankApp;
+        isUnverifiedApp = true;
+        PdsLogger.w('L1',
+            'Unregistered package "$pkg" matched by content — treating as bankApp (LOW CONFIDENCE, unverified sender)');
+      }
+
+      if (!_floodGuard.isAllowed('notif:$pkg')) return;
+
       _watchdog.recordNotification();
-      _processText(fields.trim(), app, source: 'notification');
+      _processText(fields.trim(), app, source: 'notification',
+          isUnverifiedApp: isUnverifiedApp);
     } catch (e, st) { PdsLogger.e('L1', 'Handler error', e, st); }
   }
 
   void handleSms(String sender, String body) {
     try {
       if (sender.isEmpty || body.isEmpty) return;
-      if (RegExp(r'^\+?\d+$').hasMatch(sender.trim())) return;
-      if (_TrustGate.isBlockedSender(sender)) return;
-      if (!_SenderValidator.isLegitimate(sender)) {
-        PdsLogger.w('L0', 'SPOOFED_SENDER "$sender"');
+      final normalizedSender = sender.trim();
+      final isNumericSender = RegExp(r'^\+?\d+$').hasMatch(normalizedSender);
+      if (_TrustGate.isBlockedSender(normalizedSender)) return;
+      // Some legitimate bank/PSP SMS arrive with numeric short/long codes.
+      // Do not discard them before analysing the message; simply treat them
+      // as unverified so downstream confirmation still requires strong anchors.
+      if (!isNumericSender && !_SenderValidator.isLegitimate(normalizedSender)) {
+        PdsLogger.w('L0', 'SPOOFED_SENDER "$normalizedSender"');
         _emitFraud(FraudVerdict.hardBlockSenderSpoofed,
-            'Sender failed legitimacy', 'sms', sender: sender);
+            'Sender failed legitimacy', 'sms', sender: normalizedSender);
         return;
       }
       
       // Deduplication check (BUG-S2)
-      final hashId = sha256.convert(utf8.encode('$sender|$body')).toString();
+      final hashId = sha256.convert(utf8.encode('$normalizedSender|$body')).toString();
       if (_processedSmsCache.contains(hashId)) {
-        PdsLogger.i('L2', 'Duplicate SMS dropped: $sender');
+        PdsLogger.i('L2', 'Duplicate SMS dropped: $normalizedSender');
         return;
       }
       _processedSmsCache.add(hashId);
@@ -2757,7 +2932,7 @@ class PaymentDetectionService {
 
       _watchdog.recordSms();
       _processText(body.trim(), PaymentApp.bankSms,
-          source: 'sms', sender: sender);
+          source: 'sms', sender: normalizedSender);
     } catch (e, st) { PdsLogger.e('L2', 'Handler error', e, st); }
   }
 
@@ -2770,6 +2945,7 @@ class PaymentDetectionService {
     PaymentApp app, {
     required String source,
     String? sender,
+    bool isUnverifiedApp = false,
   }) {
     final text = _Normaliser.clean(rawText);
     if (text.isEmpty) return;
@@ -2779,7 +2955,8 @@ class PaymentDetectionService {
     if (cls != _ClassifyResult.passed) {
       PdsLogger.d('L3', 'REJECTED ${cls.name}');
     } else {
-      _runPipeline(text: text, app: app, source: source, sender: sender);
+      _runPipeline(text: text, app: app, source: source, sender: sender,
+          isUnverifiedApp: isUnverifiedApp);
     }
   }
 
@@ -2788,6 +2965,7 @@ class PaymentDetectionService {
     required PaymentApp app,
     required String     source,
     String?             sender,
+    bool                isUnverifiedApp = false,
   }) {
     // Layer 4: Extraction
     // FIX-V16-6: strip marketing amount context before extraction
@@ -2937,6 +3115,7 @@ class PaymentDetectionService {
       double score = _Scorer.calculate(
         text: text, utr: refId, name: name, vpa: vpa, acc: acc,
         app: app, isFailed: isFailed, sender: sender, source: source,
+        isUnverifiedApp: isUnverifiedApp,
       );
       score -= fraud.riskScore * 0.35;
       score -= behaviorPenalty;
@@ -3097,16 +3276,22 @@ class PaymentDetectionService {
         }
       }
 
-      // ── FIX-52: Notification-Only Cap ─────────────────────────────────
-      // If source == 'notification' only (no SMS, no TCM)
-      // max decision = LIKELY
-      // Require SMS or TCM for CONFIRMED
-      if (decision == PaymentDecision.confirmed && 
-          source == 'notification' && 
-          matched == null) {  // no TCM match
+      // ── FIX-52: Notification-only safety cap ───────────────────────────
+      // Notification-only events may still confirm when there is a strong
+      // independent anchor: a valid UTR or an exact local bill match from a
+      // verified payment app with strong structured payment context.
+      final strongVerifiedAppBillAnchor = source == 'notification' &&
+          isTrustedApp &&
+          billResult == BillMatchResult.exact &&
+          _Classifier.hasStructuredPaymentContext(text);
+      if (decision == PaymentDecision.confirmed &&
+          source == 'notification' &&
+          matched == null &&
+          !validNumericUtr &&
+          !strongVerifiedAppBillAnchor) {
         decision = PaymentDecision.likely;
         PdsLogger.w('FIX-52',
-            'FIX-52: Notification-only (no SMS/TCM) capped to LIKELY ₹$amount');
+            'FIX-52: Notification-only lacks independent anchor → LIKELY ₹$amount');
       }
 
       // ── FIX-53: Final Confirm Lock ──────────────────────────────────────
@@ -3122,7 +3307,10 @@ class PaymentDetectionService {
         final isHardFraud     = fraud.isHardBlock;
         
         // Final anchor check
-        final hasConfirmAnchor = validNumericUtr || verifiedSender || hasTcmMatch;
+        final hasConfirmAnchor = validNumericUtr ||
+            verifiedSender ||
+            hasTcmMatch ||
+            strongVerifiedAppBillAnchor;
 
         if (score < PdsConfig.confirmedThreshold || isHardFraud || !hasConfirmAnchor) {
           decision = PaymentDecision.likely;
@@ -3553,6 +3741,14 @@ class PaymentDetectionService {
 // =============================================================================
 
 abstract class _TrustGate {
+  // NOTE: 'com.whatsapp' was blocked here AND simultaneously registered in
+  // _AppRegistry below as PaymentApp.whatsappPay — a direct contradiction.
+  // isBlockedPackage() runs before the app registry is ever consulted, so
+  // every WhatsApp notification, including real WhatsApp Pay confirmations,
+  // was being dropped unconditionally. Kept WhatsApp blocked here (safer
+  // default — unblocking it risks false "payment detected" triggers from
+  // ordinary chats that mention an amount, e.g. "sent you ₹500 for lunch"),
+  // and removed the dead/contradictory registry entry below instead.
   static const _blocked = <String>{
     'com.whatsapp', 'com.whatsapp.w4b', 'org.telegram.messenger',
     'org.telegram.plus', 'com.facebook.orca', 'com.facebook.katana',
@@ -3581,7 +3777,9 @@ abstract class _AppRegistry {
     'com.phonepe.app':                            PaymentApp.phonePe,
     'in.amazon.mShop.android.shopping':           PaymentApp.amazonPay,
     'in.org.npci.upiapp':                         PaymentApp.bhim,
-    'com.whatsapp':                               PaymentApp.whatsappPay,
+    // 'com.whatsapp' entry removed: unreachable dead code, since
+    // 'com.whatsapp' is unconditionally blocked in _TrustGate._blocked
+    // above and never reaches this lookup.
     'com.dreamplug.androidapp':                   PaymentApp.cred,
     'com.hdfcbank.payzapp':                       PaymentApp.payzapp,
     'com.pockets.hdfc':                           PaymentApp.payzapp,
@@ -3599,6 +3797,20 @@ abstract class _AppRegistry {
     'com.epifi.fi':                               PaymentApp.bankApp,
     'com.bharatpe.app':                           PaymentApp.bankApp,
     'com.slicepay':                               PaymentApp.bankApp,
+    // FIX: expanded whitelist with commonly-missed major Indian banks.
+    // Note the content-based fallback added in _handleNotification means
+    // this list no longer needs to be exhaustive to get detection working
+    // for a bank — but keeping known banks here still skips the extra
+    // content-matching step for them (slightly faster, slightly stricter).
+    'com.kotak.mobile.banking':                   PaymentApp.bankApp,
+    'com.snapwork.pnb':                           PaymentApp.bankApp,
+    'com.infrasofttech.unionbankofindia':         PaymentApp.bankApp,
+    'com.idfcfirstbank.optimus':                  PaymentApp.bankApp,
+    'com.rblbank.mobank':                         PaymentApp.bankApp,
+    'com.abcl.mobibank':                           PaymentApp.bankApp,
+    'com.enstage.wibmo.hdfc':                     PaymentApp.bankApp,
+    'com.csam.icici.bank.imobile':                PaymentApp.icici,
+    'com.snapwork.IDBI':                          PaymentApp.bankApp,
   };
 
   static PaymentApp identify(String p) => _pkgs[p] ?? PaymentApp.unknown;
@@ -3707,7 +3919,18 @@ abstract class _Classifier {
     caseSensitive: false,
   );
   static final _debit = RegExp(
-    r'(?:\b(?:debited|has\s+been\s+debited|spent\s+at|purchase\s+at'
+    r'(?:\b(?:debited|has\s+been\s+debited'
+    // FIX: 'spent\s+at' and 'purchase\s+at' previously required the two
+    // words to be strictly adjacent -- but real bank/card SMS almost always
+    // put the amount between them, e.g. "spent Rs.1,299 at AMAZON". That
+    // meant those messages fell through this regex entirely and could be
+    // misclassified as 'passed' (there is no secondary credit-context check
+    // before amount extraction in _runPipeline) -- a real debit could have
+    // been announced as a payment RECEIVED. Now tolerant of an amount /
+    // currency token appearing in between, bounded to avoid runaway
+    // matching across sentence boundaries.
+    r'|spent\s+(?:(?:\u20b9|rs\.?|inr\.?)\s*[\d,]+(?:\.\d{1,2})?\s+)?at'
+    r'|purchase(?:d)?\s+(?:of\s+)?(?:(?:\u20b9|rs\.?|inr\.?)\s*[\d,]+(?:\.\d{1,2})?\s+)?at'
     r'|withdrawn\s+from|withdrawal\s+of|deducted\s+from|charged\s+to'
     r'|payment\s+made\s+to|transferred\s+to(?!.*to\s+your|.*to\s+you)'
     r'|you\s+sent|you\s+have\s+sent)\b'
@@ -3768,7 +3991,12 @@ abstract class _Classifier {
     // FIX-39: Kannada
     r'|ಜమా\s+ಆಗಿದೆ|ಬಂದಿದೆ|ಪಾವತಿ\s+ಬಂತು|ಜమా\s+ಮಾಡಲಾಗಿದೆ'
     // FIX-39: Marathi/Gujarati
-    r'|मिळाले|जमा\s+झाله|ચૂકવણી\s+மળી|જમા\s+થઈ)',
+    // FIX: this alternation contained mixed-script Unicode
+    // corruption too (Arabic ل/ه standing in for Devanagari ले in
+    // 'jhaa-le', and Tamil ம standing in for Gujarati મ in 'maLi') —
+    // a second, separate occurrence of the same underlying data-entry
+    // mishap found elsewhere in this file. Corrected to proper script.
+    r'|मिळाले|जमा\s+झाले|ચૂકવણી\s+મળી|જમા\s+થઈ)',
     caseSensitive: false,
   );
 
@@ -3813,7 +4041,12 @@ abstract class _Classifier {
     // Kannada
     r'|ಜమా\s+ಆಗಿದೆ|ಬಂದಿದೆ|ಪಾವತಿ\s+ಬಂತು'
     // Marathi/Gujarati
-    r'|मिळाले|जма\s+झाله|ચૂકવણી\s+மળી'
+    // FIX: this alternation previously contained mixed-script Unicode
+    // corruption (Cyrillic mixed into Devanagari, Devanagari mixed into
+    // Tamil) from an earlier copy/paste mishap. Regexes with those
+    // glyphs can never match real Marathi/Gujarati text a real user
+    // types. Corrected to proper script.
+    r'|मिळाले|जमा\s+झाले|ચુકવણી\s+મળી'
     // FIX-57: Bengali (added) — Kerala/West Bengal shops
     r'|জমা\s+হয়েছে|প্রাপ্ত|পেয়েছেন|আপনার\s+অ্যাকাউন্টে'
     // FIX-57: Malayalam (added) — Kerala shops
@@ -3845,26 +4078,45 @@ abstract class _Classifier {
 // =============================================================================
 
 abstract class _Extractor {
+  // FIX (critical): the digit group in every one of these patterns was
+  // plain `[\d]+`, which stops at the first comma. Indian bank/UPI
+  // notifications almost always format amounts >= Rs.1,000 with commas
+  // (e.g. "₹1,250", "Rs.10,000", Indian lakh-style "₹1,25,000"), and
+  // minAmount is only 1.0 -- so this wasn't just missing large payments,
+  // it was silently extracting and ANNOUNCING the wrong (truncated)
+  // amount for the majority of real transactions: "₹1,250" -> 1,
+  // "₹10,000" -> 10. _digits now accepts an optional 1-3-digit leading
+  // group followed by comma-separated 2-3-digit groups (covers both
+  // Western thousands-commas and Indian lakh/crore-style commas), and the
+  // parse step strips commas before calling double.tryParse.
+  // NOTE: must handle THREE real formats seen in the wild: comma-grouped
+  // ("₹1,250", "₹1,25,000" Indian lakh-style), plain multi-digit with no
+  // separator at all ("₹3450"), and decimals on either. A naive
+  // `\d{1,3}(?:,\d{2,3})*` alone breaks on plain 4+-digit numbers with no
+  // comma (it silently truncates to the first 3 digits) — verified this
+  // against real sample text before shipping it.
+  static const _digits = r'(?:\d{1,3}(?:,\d{2,3})+|\d+)(?:\.\d{1,2})?';
+
   static final _balanceStrip = RegExp(
     r'(?:balance|avail(?:able)?|bal\.?|closing|opening|total)\s*:?\s*'
-    r'(?:₹|rs\.?|inr)?\s*\d[\d.]*',
+    r'(?:₹|rs\.?|inr)?\s*' + _digits,
     caseSensitive: false,
   );
 
   static final _amts = [
-    RegExp(r'₹\s*([\d]+(?:\.[\d]{1,2})?)',                caseSensitive: false),
-    RegExp(r'[Rr][Ss]\.?\s*([\d]+(?:\.[\d]{1,2})?)',      caseSensitive: false),
-    RegExp(r'[Ii][Nn][Rr]\.?\s*([\d]+(?:\.[\d]{1,2})?)',  caseSensitive: false),
-    RegExp(r'([\d]+(?:\.[\d]{1,2})?)\s*/-'),
+    RegExp(r'₹\s*(' + _digits + r')',                caseSensitive: false),
+    RegExp(r'[Rr][Ss]\.?\s*(' + _digits + r')',      caseSensitive: false),
+    RegExp(r'[Ii][Nn][Rr]\.?\s*(' + _digits + r')',  caseSensitive: false),
+    RegExp(r'(' + _digits + r')\s*/-'),
     RegExp(
-      r'(?:credited|received|credit\s+of|receipt\s+of)\s*([\d]+(?:\.[\d]{1,2})?)',
+      r'(?:credited|received|credit\s+of|receipt\s+of)\s*(' + _digits + r')',
       caseSensitive: false,
     ),
     RegExp(
-      r'(?:amount|amt)\.?\s+(?:of\s+)?([\d]+(?:\.[\d]{1,2})?)',
+      r'(?:amount|amt)\.?\s+(?:of\s+)?(' + _digits + r')',
       caseSensitive: false,
     ),
-    RegExp(r'([\d]+(?:\.[\d]{1,2})?)\s+CR\b'),
+    RegExp(r'(' + _digits + r')\s+CR\b'),
   ];
 
   static double? amount(String text) {
@@ -3872,7 +4124,8 @@ abstract class _Extractor {
     for (final p in _amts) {
       final m = p.firstMatch(c);
       if (m != null) {
-        final v = double.tryParse(m.group(1) ?? '');
+        final raw = (m.group(1) ?? '').replaceAll(',', '');
+        final v = double.tryParse(raw);
         if (v != null && v >= PdsConfig.minAmount) return v;
       }
     }

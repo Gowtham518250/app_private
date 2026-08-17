@@ -153,6 +153,46 @@ class OfflineAttendanceService {
     return true;
   }
 
+  /// Persist a complete remote attendance history into the local cache so
+  /// payroll/history remain available after a cold start or temporary auth/network failure.
+  /// Local pending records always win over remote records for the same worker/date.
+  static Future<void> mergeRemoteRecords(List<Map<String, dynamic>> remoteRecords) async {
+    if (remoteRecords.isEmpty) return;
+    try {
+      final local = await loadLocalRecords();
+      final merged = <String, Map<String, dynamic>>{};
+
+      String keyFor(Map<String, dynamic> r) =>
+          '${r['worker_id'] ?? r['employee_id'] ?? ''}:${r['attendance_date'] ?? ''}';
+
+      for (final record in [...local, ...remoteRecords]) {
+        final key = keyFor(record);
+        if (key == ':') continue;
+        final previous = merged[key];
+        if (previous == null) {
+          merged[key] = Map<String, dynamic>.from(record);
+        } else if (record['local_pending'] == true && previous['local_pending'] != true) {
+          merged[key] = { ...Map<String, dynamic>.from(record) };
+        } else if (previous['local_pending'] == true) {
+          merged[key] = {
+            ...Map<String, dynamic>.from(record),
+            ...previous,
+            'local_pending': true,
+          };
+        } else {
+          merged[key] = {
+            ...previous,
+            ...Map<String, dynamic>.from(record),
+          };
+        }
+      }
+
+      await _saveRecords(merged.values.toList());
+    } catch (e) {
+      if (kDebugMode) debugPrint('⚠️ Failed to cache remote attendance history: $e');
+    }
+  }
+
   static Future<void> reconcileFromBackend() async {
     final uid = await _userId();
     if (uid == null || uid <= 0) return;

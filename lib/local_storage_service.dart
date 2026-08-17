@@ -1247,6 +1247,18 @@ class LocalStorageService {
 
     final invoices = await loadLocalInvoices();
 
+    // Idempotency: replaying the same payment action must never add the
+    // payment twice after a timeout/retry.
+    if (idempotencyKey != null && idempotencyKey.trim().isNotEmpty) {
+      final key = idempotencyKey.trim();
+      final alreadyApplied = invoices.any(
+        (raw) =>
+            raw is Map &&
+            raw['last_payment_idempotency_key']?.toString() == key,
+      );
+      if (alreadyApplied) return;
+    }
+
     // Prefer exact invoice settlement. This makes "Mark Paid" an actual
     // payment-state change instead of simply hiding the customer from the UI.
     if (invoiceId != null && invoiceId.trim().isNotEmpty ||
@@ -1321,6 +1333,60 @@ class LocalStorageService {
 
         invoices[index] = row;
         await saveLocalInvoices(invoices);
+        return;
+      }
+    }
+
+    // Some restored/offline transactions can exist in sales history before
+    // an invoice mirror is available. Persist the payment there too.
+    if (invoiceId != null || invoiceNumber != null) {
+      final sales = await loadSales();
+      final targetIds = {
+        (invoiceId ?? '').trim().toLowerCase(),
+        (invoiceNumber ?? '').trim().toLowerCase(),
+      }..removeWhere((v) => v.isEmpty);
+
+      for (var i = 0; i < sales.length; i++) {
+        final raw = sales[i];
+        if (raw is! Map) continue;
+        final sale = Map<String, dynamic>.from(raw);
+        final saleIds = {
+          (sale['sale_id'] ?? '').toString().trim().toLowerCase(),
+          (sale['invoice_number'] ?? '').toString().trim().toLowerCase(),
+          (sale['invoice_id'] ?? '').toString().trim().toLowerCase(),
+          (sale['id'] ?? '').toString().trim().toLowerCase(),
+        }..removeWhere((v) => v.isEmpty);
+
+        if (saleIds.intersection(targetIds).isEmpty) continue;
+
+        final total = double.tryParse(
+              (sale['total_amount'] ?? sale['total'] ?? 0).toString(),
+            ) ??
+            0.0;
+        final currentPaid = double.tryParse(
+              (sale['paid_amount'] ?? sale['amount_paid'] ?? 0).toString(),
+            ) ??
+            0.0;
+        final newPaid = (currentPaid + amount).clamp(0.0, total).toDouble();
+
+        sale['paid_amount'] = newPaid;
+        sale['payment_status'] = _deriveInvoiceStatus(total, newPaid);
+        sale['status'] = sale['payment_status'];
+        sale['pending_amount'] =
+            (total - newPaid).clamp(0.0, double.infinity).toDouble();
+        sale['last_payment_amount'] = amount;
+        sale['last_payment_method'] = paymentMethod;
+        sale['payment_method'] = paymentMethod;
+        sale['paid_at'] =
+            paymentDate ?? DateTime.now().toUtc().toIso8601String();
+        sale['payment_date'] =
+            paymentDate ?? DateTime.now().toUtc().toIso8601String();
+        if (idempotencyKey != null && idempotencyKey.isNotEmpty) {
+          sale['last_payment_idempotency_key'] = idempotencyKey;
+        }
+        sale['updated_at'] = DateTime.now().toUtc().toIso8601String();
+        sales[i] = sale;
+        await saveSales(sales);
         return;
       }
     }

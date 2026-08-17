@@ -134,20 +134,13 @@ class _ResetPasswordPageState extends State<ResetPasswordPage> {
         return;
       }
 
-      final resetToken = verifyResult['token']?.toString();
-      if (resetToken == null || resetToken.isEmpty) {
-        setState(() {
-          errorMessage =
-              'Secure reset authorization was not issued. Please request a new OTP.';
-        });
-        return;
-      }
-
-      // Canonical hardened reset endpoint. The token is one-time and short-lived.
-      final response = await ApiClient.postForm(
-        '/auth/reset-password',
+      // OTP is generated and verified locally first. The backend then
+      // performs the actual password write and re-validates the OTP.
+      final response = await ApiClient.postJson(
+        '/auth/verify-reset-otp',
         {
-          'token': resetToken,
+          'email': email,
+          'otp': otp,
           'password': newPass,
         },
       );

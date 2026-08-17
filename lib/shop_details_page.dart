@@ -366,6 +366,11 @@ class _ShopDetailsPageState extends State<ShopDetailsPage> {
       await prefs.setString('opening_hour', openingHourController.text.trim());
       await prefs.setString('closing_hour', closingHourController.text.trim());
       await prefs.setBool('shop_details_completed', true);
+      final shopUserId = prefs.getInt('user_id') ?? prefs.getInt('userId') ?? 0;
+      if (shopUserId > 0) {
+        await prefs.setBool('shop_details_completed_$shopUserId', true);
+        await prefs.setBool('shop_details_required_$shopUserId', false);
+      }
       
       // Save logo image as base64
       if (logoBytes != null && logoBytes!.isNotEmpty) {

@@ -1664,22 +1664,22 @@ static Future<Map<String, dynamic>> verifySyncState() async {
 
     if (!online) {
       verificationMessage =
-          'ℹ️ Offline: local=$localCount, '
-          'pending=$pendingCount';
+          '⚠️ Offline: local=$localCount, '
+          'pending=$pendingCount; cloud confirmation is unavailable.';
 
-      verified = true;
+      verified = false;
     } else if (token.isEmpty) {
       verificationMessage =
-          'ℹ️ Online but authentication token unavailable: '
-          'local=$localCount, pending=$pendingCount';
+          '⚠️ Online but authentication token unavailable: '
+          'local=$localCount, pending=$pendingCount; cloud confirmation is unavailable.';
 
-      verified = true;
+      verified = false;
     } else if (backendCount == 0) {
       verificationMessage =
-          'ℹ️ Backend returned no countable records: '
-          'local=$localCount, pending=$pendingCount';
+          '⚠️ Backend returned no countable records: '
+          'local=$localCount, pending=$pendingCount; sync is not verified.';
 
-      verified = true;
+      verified = false;
     } else {
       // Approximate consistency check only.
       //

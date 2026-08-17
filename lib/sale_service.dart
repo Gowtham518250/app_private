@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart';
 import 'dart:async';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:connectivity_plus/connectivity_plus.dart';
 import 'api_client.dart';
 import 'stock_alert_service.dart';
 import 'inventory_management_service.dart';
@@ -32,6 +33,63 @@ class SaleService {
     if (paidPaise > 0) return 'PARTIAL';
     return 'UNPAID';
 }
+
+  /// Returns true only when the device currently has a network transport.
+  /// This is NOT a server-success check; the caller still requires a 2xx ACK.
+  static Future<bool> _hasNetworkTransport() async {
+    try {
+      final dynamic connection = await Connectivity().checkConnectivity();
+      if (connection is List) {
+        if (connection.isEmpty) return false;
+        return connection.any((item) => item != ConnectivityResult.none);
+      }
+      return connection != ConnectivityResult.none;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  static Future<bool> _postInvoiceWithRetry(
+    Map<String, dynamic> invoicePayload,
+  ) async {
+    final token = await SecureTokenStorage.getToken() ?? '';
+    if (token.isEmpty) return false;
+
+    const maxAttempts = 3;
+    for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        final response = await ApiClient.postJson(
+          ApiClient.invoicesSync,
+          invoicePayload,
+          headers: {'Authorization': 'Bearer $token'},
+        ).timeout(const Duration(seconds: 12));
+
+        AgentDebugLog.log(
+          location: 'sale_service.dart:_postInvoiceWithRetry',
+          message: 'INVOICE SYNC ATTEMPT',
+          hypothesisId: 'H2_RETRY',
+          data: {
+            'attempt': attempt,
+            'statusCode': response.statusCode,
+            'invoiceNumber': invoicePayload['invoice_number'],
+          },
+        );
+
+        if (response.statusCode == 200 || response.statusCode == 201) {
+          return true;
+        }
+      } catch (e) {
+        if (kDebugMode) {
+          debugPrint('⚠️ Invoice sync attempt $attempt/$maxAttempts failed: $e');
+        }
+      }
+
+      if (attempt < maxAttempts) {
+        await Future<void>.delayed(Duration(seconds: attempt * 2));
+      }
+    }
+    return false;
+  }
 
   static Future<Map<String, dynamic>> submitSale({
     required String saleId,
@@ -260,58 +318,22 @@ try {
   await InventoryManagementService.deductStockLocally(items, saleId: saleId);
   SyncService.triggerDashboardRefresh();
 
-  try {
-    final token = await SecureTokenStorage.getToken() ?? '';
+  final networkAvailableAtCheckout = await _hasNetworkTransport();
+  
 
-    AgentDebugLog.log(
-      location: 'sale_service.dart:submitSale:pre_post',
-      message: 'SALE SYNC START',
-      hypothesisId: 'H7',
-      data: {
-        'primaryEndpoint': ApiClient.salesEndpoint,
-        'tokenPresent': token.isNotEmpty,
-        'invoiceNumber': saleId,
-        'lineItemCount': lineItems.length,
-      },
-    );
-
-    final response = await ApiClient.postJson(ApiClient.invoicesSync, invoicePayload, headers: {
-      if (token.isNotEmpty) 'Authorization': 'Bearer $token',
-    }).timeout(const Duration(seconds: 15));
-
-    AgentDebugLog.log(
-      location: 'sale_service.dart:submitSale:invoice_response',
-      message: 'INVOICE API RESPONSE',
-      hypothesisId: 'H2',
-      data: {
-        'statusCode': response.statusCode,
-        'bodyPreview': response.body.length > 500 ? response.body.substring(0, 500) : response.body,
-        'saleId': saleId,
-      },
-    );
-
-    if (response.statusCode == 200 || response.statusCode == 201) {
-      backendSuccess = true;
+  if (networkAvailableAtCheckout) {
+    backendSuccess = await _postInvoiceWithRetry(invoicePayload);
+    if (backendSuccess) {
       await _markSaleAsSynced(saleId);
-    } else {
-      if (kDebugMode) debugPrint('⚠️ Sale queued locally; backend returned ${response.statusCode}.');
     }
-  } catch (e, st) {
-    if (kDebugMode) debugPrint('⚠️ Sale stored locally and queued; backend sync deferred: $e');
-    AgentDebugLog.log(
-      location: 'sale_service.dart:submitSale:post_error',
-      message: 'POST FAILED - QUEUED',
-      hypothesisId: 'H2',
-      data: {
-        'error': e.toString(),
-        'stackPreview': st.toString().split('\n').take(5).join(' | '),
-        'saleId': saleId,
-      },
-    );
-  } finally {
-    _pendingSales.remove(saleId);
-    InventoryManagementService.suppressInventoryCallback = false;
+  } else {
+    if (kDebugMode) {
+      debugPrint('🌐 Device is offline; sale remains durable + queued.');
+    }
   }
+
+  _pendingSales.remove(saleId);
+  InventoryManagementService.suppressInventoryCallback = false;
 
   // Kick the durable queue after the foreground attempt. The queue is the source of truth.
   unawaited(SyncService.processQueueSafe());
@@ -337,6 +359,8 @@ try {
     await RetailGrowthKit.recordBillCompleted();
   }
 
+  final bool cloudConfirmed = backendSuccess;
+
   AgentDebugLog.log(
     location: 'sale_service.dart:submitSale:final_result',
     message: 'FINAL RESULT',
@@ -344,20 +368,45 @@ try {
     data: {
       'saleUploadedToBackend': backendSuccess,
       'backendSuccess': backendSuccess,
-      'success': true,
+      'success': cloudConfirmed || !networkAvailableAtCheckout,
       'saleId': saleId,
       'syncStatus': backendSuccess ? 'synced' : 'pending',
+      'cloudConfirmed': cloudConfirmed,
+      'networkAvailableAtCheckout': networkAvailableAtCheckout,
     },
   );
 
+  if (networkAvailableAtCheckout && !backendSuccess) {
+    // IMPORTANT: internet presence is not server acknowledgement.
+    // Keep the sale in the durable outbox, but do not tell checkout that the
+    // cloud committed it. The UI keeps the transaction visible so the owner
+    // does not accidentally create a second sale.
+    return {
+      'success': false,
+      'error': 'SYNC_NOT_CONFIRMED',
+      'message': 'Sale saved on this device, but the server did not confirm it yet. Do not create another bill; automatic sync will retry.',
+      'saleId': saleId,
+      'syncStatus': 'pending',
+      'cloudConfirmed': false,
+      'localSaved': true,
+      'retryQueued': true,
+      'syncCount': 0,
+    };
+  }
+
   return {
     'success': true,
-    'syncCount': items.length,
+    'syncCount': backendSuccess ? items.length : 0,
     'saleId': saleId,
     'syncStatus': backendSuccess ? 'synced' : 'pending',
+    'cloudConfirmed': cloudConfirmed,
+    'localSaved': true,
+    'retryQueued': !backendSuccess,
   };
 
 } catch (e, st) {
+  _pendingSales.remove(saleId);
+  InventoryManagementService.suppressInventoryCallback = false;
   if (kDebugMode) debugPrint('❌ TRANSACTION CRITICAL FAILURE [$context]: $e');
   if (kDebugMode) debugPrint(st.toString());
   AgentDebugLog.log(

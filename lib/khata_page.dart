@@ -127,7 +127,11 @@ class _KhataPageState extends State<KhataPage> with SingleTickerProviderStateMix
       ]) {
         final value = row[field]?.toString().trim().toLowerCase() ?? '';
         if (value.isNotEmpty && value != 'null' && value != '0') {
+          // Preserve the original field alias and add a shared transaction
+          // alias so different representations (invoice_number vs sale_id)
+          // resolve to the same logical invoice.
           values.add('$field:$value');
+          values.add('transaction:$value');
         }
       }
       return values;
@@ -364,11 +368,12 @@ class _KhataPageState extends State<KhataPage> with SingleTickerProviderStateMix
         );
         final paid = paidRaw.clamp(0.0, total).toDouble();
         final status = _deriveStatus(total, paid);
-        final businessDate = row['business_date'] ??
+        final businessDate = row['sale_timestamp'] ??
+            row['created_at'] ??
+            row['business_date'] ??
             row['invoice_date'] ??
             row['sale_date'] ??
-            row['date'] ??
-            row['created_at'];
+            row['date'];
         final invoiceNumber =
             row['invoice_number'] ?? row['number'] ?? row['sale_id'] ?? row['id'];
         final phone =

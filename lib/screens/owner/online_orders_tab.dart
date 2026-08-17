@@ -4,6 +4,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../../api_client.dart';
 import '../../visual_widgets.dart';
 import 'dart:async';
+import 'package:url_launcher/url_launcher_string.dart';
 class OnlineOrdersTab extends StatefulWidget {
   const OnlineOrdersTab({super.key});
 
@@ -27,6 +28,7 @@ class _OnlineOrdersTabState extends State<OnlineOrdersTab>
   // same way the original bug worked, just one stage later. Tracking it
   // explicitly closes that gap.
   List<Map<String, dynamic>> _dispatchedOrders = [];
+  List<Map<String, dynamic>> _deliveredOrders = [];
   bool _isLoading = true;
   // Tracks order ids whose ACCEPT/REJECT call is still being retried in the
   // background, so the UI can show a "syncing" indicator instead of silently
@@ -37,7 +39,7 @@ class _OnlineOrdersTabState extends State<OnlineOrdersTab>
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 3, vsync: this);
+    _tabController = TabController(length: 4, vsync: this);
     _loadShopIdAndOrders();
   }
 
@@ -93,7 +95,7 @@ class _OnlineOrdersTabState extends State<OnlineOrdersTab>
     bool loadedCache = false;
 
     // LOCAL-FIRST: restore all order tabs immediately.
-    for (final status in const ['PENDING', 'ACCEPTED', 'DISPATCHED']) {
+    for (final status in const ['PENDING', 'ACCEPTED', 'DISPATCHED', 'DELIVERED']) {
       final cached = await _loadCachedOrders(prefs, shopId, status);
       if (cached.isEmpty || !mounted) continue;
 
@@ -103,8 +105,10 @@ class _OnlineOrdersTabState extends State<OnlineOrdersTab>
           _pendingOrders = cached;
         } else if (status == 'ACCEPTED') {
           _acceptedOrders = cached;
-        } else {
+        } else if (status == 'DISPATCHED') {
           _dispatchedOrders = cached;
+        } else {
+          _deliveredOrders = cached;
         }
       });
     }
@@ -126,6 +130,7 @@ class _OnlineOrdersTabState extends State<OnlineOrdersTab>
       _fetchOrdersByStatus('PENDING'),
       _fetchOrdersByStatus('ACCEPTED'),
       _fetchOrdersByStatus('DISPATCHED'),
+      _fetchOrdersByStatus('DELIVERED'),
     ]);
 
     if (mounted) setState(() => _isLoading = false);
@@ -150,8 +155,10 @@ class _OnlineOrdersTabState extends State<OnlineOrdersTab>
             _pendingOrders = orders;
           } else if (status == 'ACCEPTED') {
             _acceptedOrders = orders;
-          } else {
+          } else if (status == 'DISPATCHED') {
             _dispatchedOrders = orders;
+          } else {
+            _deliveredOrders = orders;
           }
         });
       }
@@ -172,11 +179,14 @@ class _OnlineOrdersTabState extends State<OnlineOrdersTab>
       _pendingOrders.removeWhere((o) => o['order_id']?.toString() == orderId);
       _acceptedOrders.removeWhere((o) => o['order_id']?.toString() == orderId);
       _dispatchedOrders.removeWhere((o) => o['order_id']?.toString() == orderId);
+      _deliveredOrders.removeWhere((o) => o['order_id']?.toString() == orderId);
 
       if (action == 'ACCEPT') {
         _acceptedOrders.insert(0, {...order, 'status': 'ACCEPTED'});
       } else if (action == 'DISPATCH') {
         _dispatchedOrders.insert(0, {...order, 'status': 'DISPATCHED'});
+      } else if (action == 'DELIVER') {
+        _deliveredOrders.insert(0, {...order, 'status': 'DELIVERED'});
       }
 
       _pendingSync.add(orderId);
@@ -224,6 +234,7 @@ class _OnlineOrdersTabState extends State<OnlineOrdersTab>
         _saveCachedOrders(prefs, shopId, 'PENDING', _pendingOrders),
         _saveCachedOrders(prefs, shopId, 'ACCEPTED', _acceptedOrders),
         _saveCachedOrders(prefs, shopId, 'DISPATCHED', _dispatchedOrders),
+        _saveCachedOrders(prefs, shopId, 'DELIVERED', _deliveredOrders),
       ]);
     } catch (e) {
       debugPrint('⚠️ Online order local cache write failed: $e');
@@ -271,6 +282,7 @@ class _OnlineOrdersTabState extends State<OnlineOrdersTab>
             Tab(text: 'Pending (${_pendingOrders.length})'),
             Tab(text: 'Accepted (${_acceptedOrders.length})'),
             Tab(text: 'Dispatched (${_dispatchedOrders.length})'),
+            Tab(text: 'Delivered (${_deliveredOrders.length})'),
           ],
         ),
       ),
@@ -294,8 +306,67 @@ class _OnlineOrdersTabState extends State<OnlineOrdersTab>
                   emptyText: 'No dispatched orders yet',
                   nextAction: 'DELIVER',
                 ),
+                _buildOrderList(
+                  orders: _deliveredOrders,
+                  emptyText: 'No delivered orders yet',
+                  nextAction: null,
+                ),
               ],
             ),
+    );
+  }
+
+  Widget _buildCustomerActions(Map<String, dynamic> order) {
+    final phone = (order['customer_phone'] ?? '').toString().replaceAll(RegExp(r'[^0-9+]'), '');
+    final address = (order['delivery_address'] ?? order['address'] ?? '').toString().trim();
+
+    Future<void> openMaps() async {
+      if (address.isEmpty) return;
+      final url = 'https://www.google.com/maps/search/?api=1&query=${Uri.encodeComponent(address)}';
+      await launchUrlString(url, mode: LaunchMode.externalApplication);
+    }
+
+    Future<void> callCustomer() async {
+      if (phone.isEmpty) return;
+      await launchUrlString('tel:$phone');
+    }
+
+    Future<void> whatsappCustomer() async {
+      if (phone.isEmpty) return;
+      final digits = phone.replaceFirst(RegExp(r'^\+'), '');
+      final url = 'https://wa.me/$digits';
+      await launchUrlString(url, mode: LaunchMode.externalApplication);
+    }
+
+    return Row(
+      children: [
+        Expanded(
+          child: OutlinedButton.icon(
+            onPressed: address.isEmpty ? null : openMaps,
+            icon: const Icon(Icons.location_on_outlined, size: 18),
+            label: const Text('Location'),
+          ),
+        ),
+        const SizedBox(width: 8),
+        IconButton(
+          tooltip: 'Call customer',
+          onPressed: phone.isEmpty ? null : callCustomer,
+          icon: const Icon(Icons.phone_outlined, color: Colors.blue),
+        ),
+        Tooltip(
+          message: 'WhatsApp',
+          child: IconButton(
+            onPressed: phone.isEmpty ? null : whatsappCustomer,
+            icon: Image.network(
+              'https://upload.wikimedia.org/wikipedia/commons/thumb/6/6b/WhatsApp.svg/64px-WhatsApp.svg.png',
+              width: 24,
+              height: 24,
+              errorBuilder: (_, __, ___) =>
+                  const Icon(Icons.chat_outlined, color: Colors.green),
+            ),
+          ),
+        ),
+      ],
     );
   }
 
@@ -361,6 +432,8 @@ class _OnlineOrdersTabState extends State<OnlineOrdersTab>
                           child: Text('Deliver to: ${order['delivery_address']}',
                               style: const TextStyle(color: Colors.black54, fontSize: 13)),
                         ),
+                      const SizedBox(height: 10),
+                      _buildCustomerActions(order),
                       const SizedBox(height: 16),
                       const Text('Items Requested:', style: TextStyle(color: Colors.black54, fontSize: 14)),
                       const SizedBox(height: 8),

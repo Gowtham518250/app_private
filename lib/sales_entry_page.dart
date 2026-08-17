@@ -2846,9 +2846,18 @@ class _SalesEntryPageState extends State<SalesEntryPage>
         // ✅ CRITICAL: Reset loading BEFORE clearing interface so buttons re-enable
         if (mounted) setState(() { isLoading = false; message = ''; });
         _clearSaleInterface();
-        int syncCount = result['syncCount'] ?? 0;
-        if (syncCount > 0 && mounted) {
-           setState(() => message = '$syncCount items synced to cloud! ✅');
+        final bool cloudConfirmed = result['cloudConfirmed'] == true;
+        final int syncCount = (result['syncCount'] is num)
+            ? (result['syncCount'] as num).toInt()
+            : 0;
+        if (mounted) {
+          setState(() {
+            message = cloudConfirmed
+                ? 'Sale synced to cloud successfully ✅'
+                : (syncCount > 0
+                    ? '$syncCount items queued for sync.'
+                    : 'Sale saved locally. Cloud sync pending.');
+          });
         }
         
         // SHOW SUCCESS DIALOG WITH REAL BILL PDF
@@ -3049,6 +3058,24 @@ class _SalesEntryPageState extends State<SalesEntryPage>
         }
         return true;
       } else {
+        final errorCode = result['error']?.toString() ?? 'UNKNOWN_ERROR';
+        if (errorCode == 'SYNC_NOT_CONFIRMED') {
+          if (mounted) {
+            setState(() {
+              isLoading = false;
+              message = '⚠️ Sale saved on this device, but cloud sync is not confirmed yet. Do not create another bill; it will retry automatically.';
+            });
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('⚠️ Sale saved locally. Server confirmation is pending — do not bill this customer again.'),
+                backgroundColor: Color(0xFFD97706),
+                duration: Duration(seconds: 6),
+                behavior: SnackBarBehavior.floating,
+              ),
+            );
+          }
+          return false;
+        }
         throw Exception(result['error'] ?? 'Unknown Error');
       }
     } catch (e) {

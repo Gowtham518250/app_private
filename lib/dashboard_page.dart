@@ -597,6 +597,43 @@ class _DashboardPageState extends State<DashboardPage>
         debugPrint('⚠️ Failed to signal background service restart: $e');
       }
     }
+
+    // FIX (critical): the restart signal above only re-attaches listeners —
+    // it does nothing to stop Android from killing the background isolate
+    // once the app is backgrounded, because the service was never promoted
+    // to a real foreground service. Request POST_NOTIFICATIONS (required
+    // for foreground mode on Android 13+) and battery-optimization
+    // exemption (OEMs like Xiaomi/Oppo/Vivo/Samsung kill background
+    // processes even in foreground mode unless whitelisted) here, then
+    // promote the service now that both should be granted.
+    try {
+      final notifStatus = await Permission.notification.status;
+      if (!notifStatus.isGranted) {
+        await Permission.notification.request();
+      }
+    } catch (e) {
+      if (kDebugMode) debugPrint('⚠️ POST_NOTIFICATIONS request failed: $e');
+    }
+
+    try {
+      final batteryOk = await PaymentDetectionService.isBatteryOptimizationIgnored();
+      if (!batteryOk) {
+        await PaymentDetectionService.requestBatteryExemption();
+      }
+    } catch (e) {
+      if (kDebugMode) debugPrint('⚠️ Battery exemption request failed: $e');
+    }
+
+    try {
+      FlutterBackgroundService().invoke('setAsForeground');
+      if (kDebugMode) {
+        debugPrint('⬆️ Signaled background isolate to promote to foreground service');
+      }
+    } catch (e) {
+      if (kDebugMode) {
+        debugPrint('⚠️ Failed to signal foreground promotion: $e');
+      }
+    }
   }
 
   Future<void> _schedulePaymentDetectionReminder() async {
@@ -9425,6 +9462,78 @@ class _DashboardPageState extends State<DashboardPage>
     );
   }
 
+  /// Small, non-intrusive health chip shown once permissions are granted.
+  /// Reads the watchdog heartbeat that PaymentDetectionService already
+  /// tracked internally but never exposed to the UI before. Green if a
+  /// payment was detected recently or the app just started (nothing to
+  /// compare against yet); amber if a channel has gone stale, meaning
+  /// detection has likely silently stopped working (background service
+  /// killed by the OS, permission silently revoked, etc.) and the merchant
+  /// would otherwise have zero indication of that.
+  Widget _buildDetectionHealthIndicator() {
+    final pds = PaymentDetectionService();
+    final notifStale = pds.isNotificationChannelStale;
+    final smsStale = pds.isSmsChannelStale;
+    final isStale = notifStale && smsStale;
+
+    if (!isStale) return const SizedBox.shrink();
+
+    final lastNotif = pds.lastNotificationSeenAt;
+    final lastSms = pds.lastSmsSeenAt;
+    final mostRecent = [lastNotif, lastSms]
+        .whereType<DateTime>()
+        .fold<DateTime?>(null, (a, b) => a == null || b.isAfter(a) ? b : a);
+
+    String subtitle;
+    if (mostRecent == null) {
+      subtitle = 'No payment detected yet since detection was enabled';
+    } else {
+      final mins = DateTime.now().difference(mostRecent).inMinutes;
+      subtitle = mins < 60
+          ? 'Last payment detected $mins min ago'
+          : 'Last payment detected ${(mins / 60).floor()}h ago — this may mean detection has stopped';
+    }
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      decoration: BoxDecoration(
+        color: Colors.orange.withValues(alpha: 0.10),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: Colors.orange.withValues(alpha: 0.35)),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.warning_amber_rounded, color: Colors.orange, size: 20),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Payment detection may have stopped',
+                  style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13),
+                ),
+                Text(subtitle, style: TextStyle(fontSize: 12, color: Colors.grey[700])),
+              ],
+            ),
+          ),
+          TextButton(
+            onPressed: () {
+              PaymentDetectionService().ensureChannelsRunning();
+              try {
+                FlutterBackgroundService().invoke('restart_payment_detection');
+                FlutterBackgroundService().invoke('setAsForeground');
+              } catch (_) {}
+              setState(() {});
+            },
+            child: const Text('Retry', style: TextStyle(fontSize: 12)),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildPaymentInlineStatus(
     String label,
     IconData icon,
@@ -13451,6 +13560,16 @@ class _DashboardPageState extends State<DashboardPage>
               // 0.001 PAYMENT DETECTION SETUP — keep this visible and highlighted
               // until the OS reports that every required permission is enabled.
               if (!_isStaffMode && _isPermissionsMissing) _buildPermissionWarning(),
+
+              // 0.002 PAYMENT DETECTION HEALTH — shown once permissions are
+              // granted. Previously, once the permission banner disappeared,
+              // a merchant had no way to know if detection quietly stopped
+              // working (OS killed the background service, channel went
+              // stale, etc.) — it just silently failed forever. This surfaces
+              // the watchdog heartbeat that already existed internally but
+              // was never rendered anywhere.
+              if (!_isStaffMode && !_isPermissionsMissing && _paymentPermissionCheckComplete)
+                _buildDetectionHealthIndicator(),
 
               // 0.01 FIRST LOGIN PROFILE PROMPT
               if (shopName.isEmpty || shopName == 'My Shop' || shopName == 'AI Shop Pro') ...[

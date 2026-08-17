@@ -86,6 +86,23 @@ Future<bool> onStart(ServiceInstance service) async {
     } catch (e) {
       debugPrint('⚠️ Accessibility status check failed: $e');
     }
+
+    // FIX (critical, part 2): lets the UI isolate promote this service to a
+    // real foreground service the moment POST_NOTIFICATIONS is granted,
+    // instead of requiring a full app reinstall to stop being killed by
+    // Android. Without this, a service that started in background-only
+    // mode on first launch (before permission was granted) stays
+    // non-foreground — and therefore killable — forever.
+    if (service is AndroidServiceInstance) {
+      service.on('setAsForeground').listen((event) {
+        debugPrint('⬆️ Background isolate: promoting to foreground service');
+        service.setAsForegroundService();
+      });
+      service.on('setAsBackground').listen((event) {
+        service.setAsBackgroundService();
+      });
+    }
+
     debugPrint('✅ Background payment services initialized');
   } catch (e) {
     debugPrint('⚠️ Background service init error: $e');
@@ -124,10 +141,21 @@ Future<void> initializeBackgroundService() async {
       androidConfiguration: AndroidConfiguration(
         onStart: onStart,
         autoStart: true,
-        isForegroundMode: false, // Hardcoded to false to prevent CannotPostForegroundServiceNotificationException
+        // FIX (critical): this was hardcoded to `false` regardless of the
+        // `isForeground` value computed just above (which was dead code —
+        // computed then ignored). Running as a non-foreground service means
+        // Android has no persistent notification to justify keeping the
+        // process alive, so within minutes of the app leaving the
+        // foreground (screen off, app swiped away, OEM battery manager
+        // sweep on Xiaomi/Oppo/Vivo/Samsung, etc.) the OS kills this
+        // isolate outright — silently, with no exception anywhere to catch.
+        // This is why detection stops after backgrounding even with the
+        // restart-bridge fix in place: that bridge restarts a process
+        // Android is about to kill anyway.
+        isForegroundMode: isForeground,
         notificationChannelId: 'payment_detection_channel',
         initialNotificationTitle: 'Retail Mind',
-        initialNotificationContent: 'Starting payment listener...',
+        initialNotificationContent: 'Listening for payments...',
         foregroundServiceNotificationId: 888,
       ),
       iosConfiguration: IosConfiguration(
