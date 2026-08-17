@@ -34,6 +34,7 @@ import 'gift_card_page.dart';
 import 'visual_widgets.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:notification_listener_service/notification_listener_service.dart';
+import 'package:flutter_background_service/flutter_background_service.dart';
 import 'language_provider.dart';
 import 'tutorial_service.dart';
 import 'security_service.dart';
@@ -571,10 +572,29 @@ class _DashboardPageState extends State<DashboardPage>
     _paymentDetectionPulseController.value = 1.0;
 
     try {
+      // This only starts channels on the UI isolate's own
+      // PaymentDetectionService instance (a no-op today since that
+      // instance's .start() is never called on this isolate). The real,
+      // long-lived detection engine runs in the separate background
+      // service isolate (payment_background_service_mobile.dart), which
+      // has its own independent instance and does not know permissions
+      // just changed. Tell it explicitly to restart so it re-attaches its
+      // notification/SMS listeners with the now-granted permissions.
       await PaymentDetectionService().ensureChannelsRunning();
     } catch (e) {
       if (kDebugMode) {
         debugPrint('⚠️ Payment detection channel startup failed: $e');
+      }
+    }
+
+    try {
+      FlutterBackgroundService().invoke('restart_payment_detection');
+      if (kDebugMode) {
+        debugPrint('🔁 Signaled background isolate to restart payment detection');
+      }
+    } catch (e) {
+      if (kDebugMode) {
+        debugPrint('⚠️ Failed to signal background service restart: $e');
       }
     }
   }

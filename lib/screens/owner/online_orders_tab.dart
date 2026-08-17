@@ -47,21 +47,87 @@ class _OnlineOrdersTabState extends State<OnlineOrdersTab>
     super.dispose();
   }
 
-  Future<void> _loadShopIdAndOrders() async {
-    final prefs = await SharedPreferences.getInstance();
-    setState(() {
-      _shopId = (prefs.getInt('user_id') ?? 0).toString();
-    });
-    await _fetchAllOrders();
+  String _ordersCacheKey(int shopId, String status) =>
+      'online_orders_cache_${shopId}_$status';
+
+  Future<List<Map<String, dynamic>>> _loadCachedOrders(
+    SharedPreferences prefs,
+    int shopId,
+    String status,
+  ) async {
+    final raw = prefs.getString(_ordersCacheKey(shopId, status));
+    if (raw == null || raw.isEmpty) return <Map<String, dynamic>>[];
+
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! List) return <Map<String, dynamic>>[];
+      return decoded
+          .whereType<Map>()
+          .map((e) => Map<String, dynamic>.from(e))
+          .toList();
+    } catch (_) {
+      return <Map<String, dynamic>>[];
+    }
   }
 
-  Future<void> _fetchAllOrders() async {
-    setState(() => _isLoading = true);
+  Future<void> _saveCachedOrders(
+    SharedPreferences prefs,
+    int shopId,
+    String status,
+    List<Map<String, dynamic>> orders,
+  ) async {
+    await prefs.setString(
+      _ordersCacheKey(shopId, status),
+      jsonEncode(orders),
+    );
+  }
+
+  Future<void> _loadShopIdAndOrders() async {
+    final prefs = await SharedPreferences.getInstance();
+    final shopId = prefs.getInt('user_id') ?? 0;
+
+    if (mounted) {
+      setState(() => _shopId = shopId.toString());
+    }
+
+    bool loadedCache = false;
+
+    // LOCAL-FIRST: restore all order tabs immediately.
+    for (final status in const ['PENDING', 'ACCEPTED', 'DISPATCHED']) {
+      final cached = await _loadCachedOrders(prefs, shopId, status);
+      if (cached.isEmpty || !mounted) continue;
+
+      loadedCache = true;
+      setState(() {
+        if (status == 'PENDING') {
+          _pendingOrders = cached;
+        } else if (status == 'ACCEPTED') {
+          _acceptedOrders = cached;
+        } else {
+          _dispatchedOrders = cached;
+        }
+      });
+    }
+
+    // Show cached orders immediately; refresh the server in the background.
+    if (mounted && loadedCache) {
+      setState(() => _isLoading = false);
+    }
+
+    await _fetchAllOrders(showLoading: !loadedCache);
+  }
+
+  Future<void> _fetchAllOrders({bool showLoading = true}) async {
+    if (showLoading && mounted) {
+      setState(() => _isLoading = true);
+    }
+
     await Future.wait([
       _fetchOrdersByStatus('PENDING'),
       _fetchOrdersByStatus('ACCEPTED'),
       _fetchOrdersByStatus('DISPATCHED'),
     ]);
+
     if (mounted) setState(() => _isLoading = false);
   }
 
@@ -71,6 +137,13 @@ class _OnlineOrdersTabState extends State<OnlineOrdersTab>
       if (res.statusCode == 200) {
         final body = json.decode(res.body);
         final orders = List<Map<String, dynamic>>.from(body['orders'] ?? []);
+
+        final prefs = await SharedPreferences.getInstance();
+        final shopId = int.tryParse(_shopId) ?? 0;
+        if (shopId > 0) {
+          await _saveCachedOrders(prefs, shopId, status, orders);
+        }
+
         if (!mounted) return;
         setState(() {
           if (status == 'PENDING') {
@@ -99,16 +172,18 @@ class _OnlineOrdersTabState extends State<OnlineOrdersTab>
       _pendingOrders.removeWhere((o) => o['order_id']?.toString() == orderId);
       _acceptedOrders.removeWhere((o) => o['order_id']?.toString() == orderId);
       _dispatchedOrders.removeWhere((o) => o['order_id']?.toString() == orderId);
+
       if (action == 'ACCEPT') {
         _acceptedOrders.insert(0, {...order, 'status': 'ACCEPTED'});
       } else if (action == 'DISPATCH') {
         _dispatchedOrders.insert(0, {...order, 'status': 'DISPATCHED'});
       }
-      // REJECT and DELIVER both move the order to a final state this screen
-      // doesn't track a list for — it correctly drops out of view, unlike
-      // the original bug where every action caused that same disappearance.
+
       _pendingSync.add(orderId);
     });
+
+    // Persist the optimistic state before waiting for the network.
+    unawaited(_persistCurrentOrderCaches());
 
     final ok = await _sendOrderAction(orderId, action);
 
@@ -121,6 +196,8 @@ class _OnlineOrdersTabState extends State<OnlineOrdersTab>
         SnackBar(content: Text('Order $action successfully!')),
       );
     } else {
+      await _persistCurrentOrderCaches();
+
       // Keep the order visible (still marked as "syncing failed") and offer a
       // manual retry instead of losing the action entirely.
       ScaffoldMessenger.of(context).showSnackBar(
@@ -137,6 +214,22 @@ class _OnlineOrdersTabState extends State<OnlineOrdersTab>
 
   /// Backend call with a couple of quick retries — protects against a single
   /// dropped packet on flaky mobile data from silently losing the accept/reject.
+  Future<void> _persistCurrentOrderCaches() async {
+    try {
+      final shopId = int.tryParse(_shopId) ?? 0;
+      if (shopId <= 0) return;
+
+      final prefs = await SharedPreferences.getInstance();
+      await Future.wait([
+        _saveCachedOrders(prefs, shopId, 'PENDING', _pendingOrders),
+        _saveCachedOrders(prefs, shopId, 'ACCEPTED', _acceptedOrders),
+        _saveCachedOrders(prefs, shopId, 'DISPATCHED', _dispatchedOrders),
+      ]);
+    } catch (e) {
+      debugPrint('⚠️ Online order local cache write failed: $e');
+    }
+  }
+
   Future<bool> _sendOrderAction(String orderId, String action) async {
     for (int attempt = 0; attempt < 3; attempt++) {
       try {

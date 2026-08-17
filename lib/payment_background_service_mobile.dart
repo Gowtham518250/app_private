@@ -47,6 +47,34 @@ Future<bool> onStart(ServiceInstance service) async {
 
     await pds.start();
 
+    // FIX: The UI isolate (dashboard) and this background isolate each hold
+    // a *separate* PaymentDetectionService singleton instance. When the user
+    // taps "Enable Payment Detection" and grants SMS/notification-listener
+    // permission, that only affects the UI isolate's instance — this
+    // background isolate (the one that actually keeps listening once the
+    // app is backgrounded) never learns permissions changed and its
+    // listeners stay dead. Listen for an explicit restart signal from the
+    // UI isolate so we can re-run start() (via restart()) with the
+    // now-granted permissions.
+    bool restartInProgress = false;
+    service.on('restart_payment_detection').listen((event) async {
+      if (restartInProgress) {
+        debugPrint('⏳ Background isolate: restart already in progress; ignoring duplicate signal');
+        return;
+      }
+
+      restartInProgress = true;
+      debugPrint('🔁 Background isolate: restarting payment detection after permission grant');
+      try {
+        await pds.restart();
+        debugPrint('✅ Background isolate: payment detection restarted');
+      } catch (e) {
+        debugPrint('⚠️ Background isolate: restart failed: $e');
+      } finally {
+        restartInProgress = false;
+      }
+    });
+
     try {
       final accessibilityEnabled =
           await FlutterAccessibilityService.isAccessibilityPermissionEnabled();

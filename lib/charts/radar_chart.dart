@@ -47,17 +47,70 @@ class RevenueRadarChart extends StatelessWidget {
         ),
       );
 
+  double _asDouble(dynamic value) {
+    if (value is num) return value.toDouble();
+    return double.tryParse(value?.toString() ?? '') ?? 0.0;
+  }
+
+  String _productNameFromSale(Map<String, dynamic> sale) {
+    final raw = sale['display_name'] ??
+        sale['product_name'] ??
+        sale['product'] ??
+        sale['name'] ??
+        sale['item'] ??
+        'Unknown Product';
+    final name = raw.toString().trim();
+    return name.isEmpty ? 'Unknown Product' : name;
+  }
+
+  double _saleQuantity(Map<String, dynamic> sale) {
+    return _asDouble(sale['qty'] ?? sale['quantity'] ?? sale['units'] ?? sale['count']);
+  }
+
+  Map<String, Map<String, dynamic>> _buildQuantityProductData() {
+    final direct = engine.productAnalyticsCache;
+
+    final directHasQuantity = direct.values.any(
+      (v) => _asDouble(v['quantity']) > 0,
+    );
+    if (direct.isNotEmpty && directHasQuantity) {
+      return {
+        for (final entry in direct.entries)
+          entry.key: {
+            ...entry.value,
+            'display_name': entry.value['display_name'] ?? entry.value['name'] ?? entry.key,
+            'quantity': _asDouble(entry.value['quantity']),
+          },
+      };
+    }
+
+    // Fallback to filtered sales so the chart remains populated even when
+    // productAnalyticsCache comes from an older/newer schema.
+    final derived = <String, Map<String, dynamic>>{};
+    for (final raw in engine.filteredSalesCache) {
+      final sale = Map<String, dynamic>.from(raw);
+      final name = _productNameFromSale(sale);
+      final quantity = _saleQuantity(sale);
+
+      final current = derived.putIfAbsent(name, () => {
+        'quantity': 0.0,
+        'display_name': name,
+      });
+      current['quantity'] = _asDouble(current['quantity']) + quantity;
+    }
+
+    return derived;
+  }
+
   @override
   Widget build(BuildContext context) {
     try {
-      final productData = engine.productAnalyticsCache;
+      final productData = _buildQuantityProductData();
       if (productData.isEmpty) return _empty();
 
       // Build quantity list, sort descending
       var items = productData.entries.map((e) {
-        final qty = e.value['quantity'];
-        double qtyD = 0;
-        if (qty is num) qtyD = qty.toDouble();
+        final qtyD = _asDouble(e.value['quantity']);
         final name = (e.value['display_name'] ?? e.value['name'] ?? e.key).toString();
         return MapEntry(name, qtyD);
       }).toList()
@@ -66,6 +119,7 @@ class RevenueRadarChart extends StatelessWidget {
       items = items.take(6).toList();
       final totalQty = items.fold<double>(0, (s, e) => s + e.value);
       final maxQty = items.isNotEmpty ? items.first.value : 1.0;
+      if (totalQty <= 0) return _empty();
 
       // Radar requires ≥ 3 points
       final radarItems = List<MapEntry<String, double>>.from(items);

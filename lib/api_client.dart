@@ -249,7 +249,7 @@ class ApiClient {
   static const String gstExportGstr1 = '/gst/export-gstr1';
 
   // Cache Management
-  static const String cacheStats = '/cache/api/cache/stats';
+  static const String cacheStats = 'api/cache/stats';
   static const String cacheWarmProducts = '/cache/api/cache/warm/products';
   static const String cacheWarmAnalytics = '/cache/api/cache/warm/analytics';
   static String cacheClearPattern(String pattern) => '/cache/api/cache/clear/$pattern';

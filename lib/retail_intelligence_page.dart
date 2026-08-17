@@ -9,7 +9,6 @@ import 'package:flutter/foundation.dart' show kDebugMode;
 import 'api_client.dart';
 import 'smart_reorder_ai.dart';
 import 'local_storage_service.dart';
-import 'scoped_shared_preferences.dart';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // RETAIL INTELLIGENCE PAGE — 100 CRORE STARTUP EDITION
@@ -206,7 +205,15 @@ class _FlashSaleTabState extends State<_FlashSaleTab> with SingleTickerProviderS
   late AnimationController _pulseController;
   late Animation<double> _pulseAnimation;
 
-  final _presetCategories = ['Beverages', 'Snacks', 'Dairy', 'Grains', 'FMCG', 'Electronics'];
+  final _presetCategories = [
+    'All',
+    'Beverages',
+    'Snacks',
+    'Dairy',
+    'Grains',
+    'FMCG',
+    'Electronics',
+  ];
 
   @override
   void initState() {
@@ -222,7 +229,8 @@ class _FlashSaleTabState extends State<_FlashSaleTab> with SingleTickerProviderS
   void _loadActiveFlashSale() async {
     try {
       // Load from local storage first for immediate response (offline-first)
-      final localFlashSaleData = await ScopedSharedPreferences.getString('active_flash_sale');
+      final prefs = await SharedPreferences.getInstance();
+      final localFlashSaleData = prefs.getString('active_flash_sale');
       
       if (localFlashSaleData != null && localFlashSaleData.isNotEmpty) {
         try {
@@ -237,7 +245,7 @@ class _FlashSaleTabState extends State<_FlashSaleTab> with SingleTickerProviderS
             if (kDebugMode) debugPrint('✅ Active flash sale loaded from local storage');
           } else {
             // Expired, clear local data
-            await ScopedSharedPreferences.remove('active_flash_sale');
+            await prefs.remove('active_flash_sale');
             if (kDebugMode) debugPrint('⏰ Flash sale expired, cleared local data');
           }
         } catch (e) {
@@ -264,19 +272,14 @@ class _FlashSaleTabState extends State<_FlashSaleTab> with SingleTickerProviderS
               _activeFlashSale = flashSaleData;
             });
             // Save to local storage for offline use
-            await ScopedSharedPreferences.setString('active_flash_sale', json.encode(flashSaleData));
+            await prefs.setString('active_flash_sale', json.encode(flashSaleData));
             if (kDebugMode) debugPrint('✅ Active flash sale synced from backend');
           } else {
             // Backend flash sale expired, clear local data
-            await ScopedSharedPreferences.remove('active_flash_sale');
+            await prefs.remove('active_flash_sale');
             setState(() => _activeFlashSale = null);
             if (kDebugMode) debugPrint('⏰ Backend flash sale expired');
           }
-        } else if (res.statusCode == 404 || res.statusCode == 204) {
-          // Backend explicitly says there is no active sale. Do not keep a
-          // stale local discount that can silently discount normal billing.
-          await ScopedSharedPreferences.remove('active_flash_sale');
-          if (mounted) setState(() => _activeFlashSale = null);
         }
       } catch (e) {
         if (kDebugMode) debugPrint('⚠️ Backend flash sale sync failed, using local data: $e');
@@ -294,50 +297,133 @@ class _FlashSaleTabState extends State<_FlashSaleTab> with SingleTickerProviderS
     super.dispose();
   }
 
-  void _activateFlashSale() async {
-    if (_categoryController.text.trim().isEmpty) {
+  Future<void> _activateFlashSale() async {
+    final selectedCategory = _categoryController.text.trim();
+
+    if (selectedCategory.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('⚠️ Enter a category first', style: GoogleFonts.poppins()),
+          content: Text(
+            '⚠️ Select a category first',
+            style: GoogleFonts.poppins(),
+          ),
           backgroundColor: Colors.orangeAccent,
           behavior: SnackBarBehavior.floating,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12),
+          ),
         ),
       );
       return;
     }
+
+    final normalizedCategory =
+        selectedCategory.toLowerCase() == 'all' ? 'ALL' : selectedCategory;
+
+    final discount =
+        double.tryParse(_discountController.text.trim()) ?? 20.0;
+    final hours = int.tryParse(_hoursController.text.trim()) ?? 2;
+
     setState(() => _isLoading = true);
     HapticFeedback.mediumImpact();
+
     try {
-      final res = await ApiClient.postJson('/api/flash-sale/setup', {
-        'category': _categoryController.text.trim(),
-        'discount_pct': double.tryParse(_discountController.text) ?? 20.0,
-        'hours': int.tryParse(_hoursController.text) ?? 2,
-      });
+      final res = await ApiClient.postJson(
+        '/api/flash-sale/setup',
+        {
+          'category': normalizedCategory,
+          'discount_pct': discount,
+          'hours': hours,
+        },
+      );
+
       if (res.statusCode < 200 || res.statusCode >= 300) {
-        throw Exception('Flash sale setup failed (${res.statusCode})');
-      }
-      final responseData = jsonDecode(res.body);
-      final flashSale = {
-          'category': _categoryController.text,
-          'discount': _discountController.text,
-          'hours': _hoursController.text,
-          'expiry': responseData['end_time'] ?? DateTime.now().add(Duration(hours: int.tryParse(_hoursController.text) ?? 2)).toIso8601String(),
-          'status': 'ACTIVE',
-        };
-      await ScopedSharedPreferences.setString('active_flash_sale', jsonEncode(flashSale));
-      if (mounted) {
-        setState(() => _activeFlashSale = flashSale);
-        HapticFeedback.heavyImpact();
-      }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Flash sale was not saved: $e'), backgroundColor: Colors.redAccent),
+        throw Exception(
+          'Flash sale setup failed (${res.statusCode})',
         );
       }
+
+      Map<String, dynamic> serverData = {};
+      if (res.body.isNotEmpty) {
+        try {
+          final decoded = jsonDecode(res.body);
+          if (decoded is Map) {
+            serverData = Map<String, dynamic>.from(decoded);
+          }
+        } catch (_) {
+          // Some successful endpoints may return an empty/non-JSON body.
+        }
+      }
+
+      final serverExpiry =
+          serverData['end_time']?.toString().trim() ?? '';
+      final expiry = serverExpiry.isNotEmpty
+          ? serverExpiry
+          : DateTime.now()
+              .add(Duration(hours: hours))
+              .toIso8601String();
+
+      final flashSaleData = <String, dynamic>{
+        'category': normalizedCategory,
+        'discount': discount.toString(),
+        'hours': hours.toString(),
+        'expiry': expiry,
+      };
+
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(
+        'active_flash_sale',
+        jsonEncode(flashSaleData),
+      );
+
+      if (!mounted) return;
+
+      setState(() {
+        _activeFlashSale = flashSaleData;
+        _categoryController.text =
+            normalizedCategory == 'ALL' ? 'All' : normalizedCategory;
+      });
+
+      HapticFeedback.heavyImpact();
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            normalizedCategory == 'ALL'
+                ? '⚡ Flash Sale launched for all products'
+                : '⚡ Flash Sale launched for $normalizedCategory',
+            style: GoogleFonts.poppins(),
+          ),
+          backgroundColor: Colors.green,
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12),
+          ),
+        ),
+      );
+    } catch (e) {
+      if (kDebugMode) {
+        debugPrint('❌ Flash sale setup failed: $e');
+      }
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              'Flash Sale could not be launched. Please check your connection and try again.',
+              style: GoogleFonts.poppins(),
+            ),
+            backgroundColor: Colors.redAccent,
+            behavior: SnackBarBehavior.floating,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(12),
+            ),
+          ),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
     }
-    if (mounted) setState(() => _isLoading = false);
   }
 
   @override
@@ -368,7 +454,7 @@ class _FlashSaleTabState extends State<_FlashSaleTab> with SingleTickerProviderS
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text('Flash Sale Engine', style: GoogleFonts.poppins(color: Colors.black, fontWeight: FontWeight.w700, fontSize: 16)),
-                        Text('Timed discount across a category', style: GoogleFonts.poppins(color: Colors.black87, fontWeight: FontWeight.w600, fontSize: 12)),
+                        Text('Timed discount across a category or all products', style: GoogleFonts.poppins(color: Colors.black87, fontWeight: FontWeight.w600, fontSize: 12)),
                       ],
                     ),
                   ],
@@ -405,7 +491,7 @@ class _FlashSaleTabState extends State<_FlashSaleTab> with SingleTickerProviderS
                   )).toList(),
                 ),
                 const SizedBox(height: 16),
-                _buildDarkField(_categoryController, 'Category', Icons.category_rounded, hint: 'e.g. Beverages'),
+                _buildDarkField(_categoryController, 'Category', Icons.category_rounded, hint: 'Choose All or a category'),
                 const SizedBox(height: 12),
                 Row(
                   children: [
@@ -473,7 +559,13 @@ class _FlashSaleTabState extends State<_FlashSaleTab> with SingleTickerProviderS
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceAround,
             children: [
-              _buildStatPill('Category', _activeFlashSale!['category'], Colors.orangeAccent),
+              _buildStatPill(
+                'Category',
+                (_activeFlashSale!['category']?.toString().toUpperCase() == 'ALL')
+                    ? 'All Products'
+                    : (_activeFlashSale!['category']?.toString() ?? 'Unknown'),
+                Colors.orangeAccent,
+              ),
               _buildStatPill('Discount', '${_activeFlashSale!['discount']}%', Colors.greenAccent),
               _buildStatPill('Duration', '${_activeFlashSale!['hours']}h', Colors.cyanAccent),
             ],

@@ -304,36 +304,64 @@ class InventorySyncService {
   static Future<Map<String, dynamic>> refreshAllInventory() async {
     try {
       if (kDebugMode) debugPrint('🔄 Refreshing all inventory from backend...');
-      
+
       final token = await SecureTokenStorage.getToken() ?? '';
       if (token.isEmpty) {
         return {'success': false, 'error': 'NOT_AUTHENTICATED'};
       }
-      
+
       final response = await ApiClient.getJson(
         '/api/inventory-sync/all-stock',
         headers: {'Authorization': 'Bearer $token'},
       ).timeout(const Duration(seconds: 10));
-      
+
       if (response.statusCode == 200) {
         final data = json.decode(response.body);
-        
-        // Update local cache with backend truth
-        await LocalStorageService.saveBackendProducts(
-          List<Map<String, dynamic>>.from(data['products'])
-        );
-        
+        final rawProducts = data is Map ? data['products'] : null;
+
+        final backendProducts = rawProducts is List
+            ? rawProducts
+                .whereType<Map>()
+                .map((p) => Map<String, dynamic>.from(p))
+                .toList()
+            : <Map<String, dynamic>>[];
+
+        final cachedProducts =
+            await LocalStorageService.loadBackendProducts();
+
+        // A 200 response containing zero products is not allowed to erase a
+        // healthy non-empty local snapshot. Keep the last known inventory
+        // until a meaningful cloud snapshot arrives.
+        if (backendProducts.isEmpty && cachedProducts.isNotEmpty) {
+          if (kDebugMode) {
+            debugPrint(
+              '⚠️ Inventory backend returned 200 with 0 products; '
+              'preserving ${cachedProducts.length} cached products',
+            );
+          }
+
+          return {
+            'success': true,
+            'total_products': cachedProducts.length,
+            'timestamp': data is Map ? data['timestamp'] : null,
+            'products': cachedProducts,
+            'cache_preserved': true,
+          };
+        }
+
+        await LocalStorageService.saveBackendProducts(backendProducts);
+
         if (kDebugMode) {
           debugPrint('✅ Inventory refreshed from backend');
-          debugPrint('   Total products: ${data['total_products']}');
-          debugPrint('   Timestamp: ${data['timestamp']}');
+          debugPrint('   Total products: ${backendProducts.length}');
+          debugPrint('   Timestamp: ${data is Map ? data['timestamp'] : null}');
         }
-        
+
         return {
           'success': true,
-          'total_products': data['total_products'],
-          'timestamp': data['timestamp'],
-          'products': data['products'],
+          'total_products': backendProducts.length,
+          'timestamp': data is Map ? data['timestamp'] : null,
+          'products': backendProducts,
         };
       } else {
         return {'success': false, 'error': 'BACKEND_ERROR'};
@@ -343,7 +371,7 @@ class InventorySyncService {
       return {'success': false, 'error': 'NETWORK_ERROR'};
     }
   }
-  
+
   /// Reconcile local cache with backend
   /// Detects discrepancies and provides correct values
   static Future<Map<String, dynamic>> reconcileInventory() async {

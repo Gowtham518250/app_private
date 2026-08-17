@@ -28,7 +28,7 @@ class InventoryPage extends StatefulWidget {
   State<InventoryPage> createState() => _InventoryPageState();
 }
 
-class _InventoryPageState extends State<InventoryPage> {
+class _InventoryPageState extends State<InventoryPage> with WidgetsBindingObserver {
   // Modern SaaS Colors - synced with visual_widgets.dart
   static const Color _primary = AppColors.primary;        // #635BFF
   static const Color _warning = AppColors.warning;        // #F59E0B
@@ -59,6 +59,7 @@ class _InventoryPageState extends State<InventoryPage> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _speech = stt.SpeechToText();
     _init();
     InventoryManagementService.onInventoryChanged = () {
@@ -68,10 +69,19 @@ class _InventoryPageState extends State<InventoryPage> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _nameC.dispose(); _barcodeC.dispose(); _priceC.dispose(); _mrpC.dispose();
     _stockC.dispose(); _catC.dispose(); _minStockC.dispose(); _unitC.dispose();
     InventoryManagementService.onInventoryChanged = null;
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed && mounted && _userId != null) {
+      // Restore the cached inventory immediately, then refresh from cloud.
+      _fetch();
+    }
   }
 
   Future<void> _init() async {
@@ -163,18 +173,49 @@ class _InventoryPageState extends State<InventoryPage> {
             }
           }
           if (res != null && res.statusCode == 200) {
-            final List<dynamic> productsData = json.decode(res.body);
-            final apiProducts = productsData.map((e) => Map<String, dynamic>.from(e)).toList();
-            final merged = InventoryStockHelper.mergeApiWithLocalCache(apiProducts, cachedBackend);
-            await LocalStorageService.saveBackendProducts(merged);
+            final decoded = json.decode(res.body);
+            final productsData = decoded is List
+                ? decoded
+                : (decoded is Map && decoded['products'] is List)
+                    ? decoded['products']
+                    : <dynamic>[];
+
+            final apiProducts = productsData
+                .whereType<Map>()
+                .map((e) => Map<String, dynamic>.from(e))
+                .toList();
+
+            // Never interpret an empty successful response as inventory
+            // deletion when we already have a durable non-empty cache.
+            final effectiveApiProducts =
+                apiProducts.isEmpty && cachedBackend.isNotEmpty
+                    ? cachedBackend
+                    : apiProducts;
+
+            final merged = InventoryStockHelper.mergeApiWithLocalCache(
+              effectiveApiProducts,
+              cachedBackend,
+            );
+
+            if (merged.isNotEmpty) {
+              await LocalStorageService.saveBackendProducts(merged);
+            }
+
             if (!mounted) return;
             setState(() {
               _products = [...localOfflineProducts, ...merged];
               _loading = false;
               _lastFetchFailed = false;
             });
-            if (kDebugMode) debugPrint('✅ Inventory merged: ${merged.length} products');
+
+            if (kDebugMode) {
+              debugPrint(
+                '✅ Inventory merged: ${merged.length} products '
+                '(API=${apiProducts.length}, cache=${cachedBackend.length})',
+              );
+            }
             return;
+
           } else if (res == null) {
             // Both attempts failed — this is a network problem, not an
             // empty catalog. Keep whatever cache we already loaded and

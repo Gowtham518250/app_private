@@ -65,21 +65,89 @@ class _RevenuePieChartState extends State<RevenuePieChart> {
         ),
       );
 
+  double _asDouble(dynamic value) {
+    if (value is num) return value.toDouble();
+    return double.tryParse(value?.toString() ?? '') ?? 0.0;
+  }
+
+  String _productNameFromSale(Map<String, dynamic> sale) {
+    final raw = sale['display_name'] ??
+        sale['product_name'] ??
+        sale['product'] ??
+        sale['name'] ??
+        sale['item'] ??
+        'Unknown Product';
+    final name = raw.toString().trim();
+    return name.isEmpty ? 'Unknown Product' : name;
+  }
+
+  double _saleRevenue(Map<String, dynamic> sale) {
+    return _asDouble(
+      sale['total'] ??
+          sale['line_total'] ??
+          sale['grand_total'] ??
+          sale['total_amount'] ??
+          sale['amount'] ??
+          sale['revenue'],
+    );
+  }
+
+  Map<String, Map<String, dynamic>> _buildRevenueProductData() {
+    final direct = widget.engine.productAnalyticsCache;
+
+    // Prefer the existing engine cache when it contains real revenue values.
+    final directHasRevenue = direct.values.any(
+      (v) => _asDouble(v['total']) > 0,
+    );
+    if (direct.isNotEmpty && directHasRevenue) {
+      return {
+        for (final entry in direct.entries)
+          entry.key: {
+            ...entry.value,
+            'display_name': entry.value['display_name'] ?? entry.key,
+            'total': _asDouble(entry.value['total']),
+          },
+      };
+    }
+
+    // Fallback: derive directly from the engine's already-filtered sales.
+    // This does not alter sales/analytics calculations; it only makes the
+    // visualization tolerant of different sale field names/cache versions.
+    final derived = <String, Map<String, dynamic>>{};
+    for (final raw in widget.engine.filteredSalesCache) {
+      final sale = Map<String, dynamic>.from(raw);
+      final name = _productNameFromSale(sale);
+      final revenue = _saleRevenue(sale);
+
+      final current = derived.putIfAbsent(name, () => {
+        'total': 0.0,
+        'count': 0,
+        'quantity': 0.0,
+        'display_name': name,
+      });
+
+      current['total'] = _asDouble(current['total']) + revenue;
+      current['count'] = (current['count'] as int) + 1;
+    }
+
+    return derived;
+  }
+
   @override
   Widget build(BuildContext context) {
-    final productData = widget.engine.productAnalyticsCache;
+    final productData = _buildRevenueProductData();
     if (productData.isEmpty) return _empty();
 
     // Sort by revenue (total sale value)
     final products = productData.entries.toList()
       ..sort((a, b) {
-        final bv = (b.value['total'] as num?)?.toDouble() ?? 0.0;
-        final av = (a.value['total'] as num?)?.toDouble() ?? 0.0;
+        final bv = _asDouble(b.value['total']);
+        final av = _asDouble(a.value['total']);
         return bv.compareTo(av);
       });
     final top = products.take(6).toList();
-    final grandTotal = top.fold<double>(0, (s, e) => s + ((e.value['total'] as num?)?.toDouble() ?? 0.0));
-    if (grandTotal == 0) return _empty();
+    final grandTotal = top.fold<double>(0, (s, e) => s + _asDouble(e.value['total']));
+    if (grandTotal <= 0) return _empty();
 
     return AnimatedBuilder(
       animation: widget.fadeAnimation,
@@ -186,7 +254,7 @@ class _RevenuePieChartState extends State<RevenuePieChart> {
                                   sections: top.asMap().entries.map((entry) {
                                     final i = entry.key;
                                     final p = entry.value;
-                                    final val = (p.value['total'] as num?)?.toDouble() ?? 0.0;
+                                    final val = _asDouble(p.value['total']);
                                     final perc = grandTotal > 0 ? val / grandTotal * 100 : 0.0;
                                     final color = _color(i);
                                     final isTouched = i == _touchedIndex;
@@ -237,7 +305,7 @@ class _RevenuePieChartState extends State<RevenuePieChart> {
                               children: top.asMap().entries.map((entry) {
                                 final i = entry.key;
                                 final p = entry.value;
-                                final val = (p.value['total'] as num?)?.toDouble() ?? 0.0;
+                                final val = _asDouble(p.value['total']);
                                 final perc = grandTotal > 0 ? val / grandTotal * 100 : 0.0;
                                 final color = _color(i);
                                 final name = (p.value['display_name'] ?? p.value['name'] ?? p.key).toString();
