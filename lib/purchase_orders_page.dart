@@ -112,6 +112,18 @@ class _PurchaseOrdersPageState extends State<PurchaseOrdersPage> {
   /// silently lose the order (matches the retry pattern used for sales).
   Future<void> _createPurchaseOrder(Map<String, dynamic> payload) async {
     try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString('purchase_orders_data');
+      final list = <dynamic>[];
+      if (raw != null && raw.isNotEmpty) {
+        final decoded = jsonDecode(raw);
+        if (decoded is List) list.addAll(decoded);
+      }
+      final localOrder = {...payload, 'id': 'LOCAL-PO-${DateTime.now().millisecondsSinceEpoch}', 'status': 'PENDING', 'created_at': DateTime.now().toIso8601String(), 'sync_status': 'pending'};
+      list.insert(0, localOrder);
+      await prefs.setString('purchase_orders_data', jsonEncode(list));
+      if (mounted) setState(() => _orders = list);
+
       final res = await ApiClient.postJson('/purchase-orders/', payload).timeout(const Duration(seconds: 15));
       if (res.statusCode == 200 || res.statusCode == 201) {
         await _fetchOrders();
@@ -120,10 +132,9 @@ class _PurchaseOrdersPageState extends State<PurchaseOrdersPage> {
       throw Exception('Backend rejected PO: ${res.statusCode} ${res.body}');
     } catch (e) {
       debugPrint('⚠️ PO create failed live, queuing for retry: $e');
-      // Durable fallback: retry automatically once we're back online,
-      // instead of the order simply vanishing.
       await SyncQueueManager.enqueue('create_purchase_order', payload);
       unawaited(SyncService.processQueueSafe());
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Purchase order saved offline and queued for sync.')));
     }
   }
 

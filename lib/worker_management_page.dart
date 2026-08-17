@@ -5,6 +5,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'api_client.dart';
 import 'secure_token_storage.dart';
 import 'worker_detail_page.dart';
+import 'worker_local_storage.dart';
 
 class WorkerManagementPage extends StatefulWidget {
   const WorkerManagementPage({super.key});
@@ -86,25 +87,41 @@ class _WorkerManagementPageState extends State<WorkerManagementPage> {
   }
 
   Future<void> _fetchWorkers() async {
+    if (!mounted) return;
     setState(() {
       _isLoading = true;
       _errorMessage = '';
     });
 
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      // 🔧 FIXED: Get user_id as int, not String
-      final userId = prefs.getInt('user_id') ?? prefs.getInt('userId') ?? 0;
-      final token = await SecureTokenStorage.getToken() ?? '';
+    final prefs = await SharedPreferences.getInstance();
+    final userId = prefs.getInt('user_id') ?? prefs.getInt('userId') ?? 0;
 
-      if (userId == 0) {
+    if (userId == 0) {
+      if (mounted) {
         setState(() {
           _errorMessage = 'User ID not found. Please login again.';
           _isLoading = false;
         });
-        return;
       }
+      return;
+    }
 
+    // LOCAL-FIRST: always restore the roster before attempting the network.
+    try {
+      final cachedWorkers = await WorkerLocalStorage.fetchWorkers(userId);
+      if (cachedWorkers.isNotEmpty && mounted) {
+        setState(() {
+          _workers = cachedWorkers.map((w) => w.toJson()).toList();
+          _isLoading = false;
+        });
+      }
+    } catch (e) {
+      debugPrint('⚠️ Worker local cache read failed: $e');
+    }
+
+    // BACKEND REFRESH: a failure must never replace an existing cache with [].
+    try {
+      final token = await SecureTokenStorage.getToken() ?? '';
       final response = await ApiClient.getJson(
         '/api/attendance/workers?user_id=$userId',
         headers: {'Authorization': 'Bearer $token'},
@@ -112,35 +129,41 @@ class _WorkerManagementPageState extends State<WorkerManagementPage> {
 
       if (response.statusCode == 200) {
         final data = json.decode(response.body);
-        setState(() {
-          try {
-            // 🔧 FIXED: Handle both list and single object responses
-            if (data is List) {
-              _workers = List<dynamic>.from(data);
-            } else if (data is Map && data.containsKey('workers')) {
-              _workers = List<dynamic>.from(data['workers'] as List);
-            } else {
-              _workers = [data]; // Single worker as list
-            }
-          } catch (e) {
-            _errorMessage = 'Error parsing worker data: $e';
-            _workers = [];
-          }
-        });
-      } else {
+
+        final List<dynamic> rawWorkers = data is List
+            ? data
+            : (data is Map && data['workers'] is List)
+                ? List<dynamic>.from(data['workers'] as List)
+                : (data is Map ? [data] : []);
+
+        final workers = rawWorkers
+            .whereType<Map>()
+            .map((w) => Worker.fromJson(Map<String, dynamic>.from(w)))
+            .toList();
+
+        await WorkerLocalStorage.saveWorkers(userId, workers);
+
+        if (mounted) {
+          setState(() {
+            _workers = workers.map((w) => w.toJson()).toList();
+            _errorMessage = '';
+          });
+        }
+      } else if (mounted && _workers.isEmpty) {
         setState(() {
           _errorMessage = 'Failed to load workers (${response.statusCode})';
         });
       }
     } catch (e) {
-      setState(() {
-        _errorMessage = 'Network error: $e';
-      });
+      if (mounted && _workers.isEmpty) {
+        setState(() {
+          _errorMessage = 'Workers unavailable offline. Retry when online.';
+        });
+      }
+      debugPrint('⚠️ Worker backend refresh failed: $e');
     } finally {
       if (mounted) {
-        setState(() {
-          _isLoading = false;
-        });
+        setState(() => _isLoading = false);
       }
     }
   }

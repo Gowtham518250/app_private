@@ -192,7 +192,7 @@ class CollectionsAndReportService {
   /// Get today's daily report
   static Future<Map<String, dynamic>?> getDailyReport() async {
     try {
-      final response = await ApiClient.getJson('/api/reports/today');
+      final response = await ApiClient.getJson('/api/reports/daily');
       
       if (response.statusCode == 200) {
         return jsonDecode(response.body);

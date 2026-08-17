@@ -184,6 +184,80 @@ class SyncService {
     }
   }
   
+  /// Syncs a queued attendance check-in event to the backend.
+  ///
+  /// Queue payloads have appeared in different builds with either
+  /// `employee_id` or `worker_id`. Normalize both here and reuse the same
+  /// authenticated endpoint used by the live check-in flow so offline
+  /// check-ins are persisted to the backend when connectivity returns.
+  static Future<bool> _syncAttendanceCheckInItem(
+    Map<String, dynamic> data,
+  ) async {
+    try {
+      final rawEmployeeId =
+          data['employee_id'] ??
+          data['worker_id'] ??
+          data['workerId'] ??
+          data['id'];
+
+      final employeeId = rawEmployeeId?.toString().trim() ?? '';
+      if (employeeId.isEmpty) {
+        await ErrorLogHelper.logMessage(
+          'Queued attendance check-in missing employee_id/worker_id',
+          level: 'ERROR',
+          attributes: {'data': jsonEncode(data)},
+        );
+        return false;
+      }
+
+      return await checkInWorker(employeeId);
+    } catch (e, stackTrace) {
+      await ErrorLogHelper.logException(
+        e,
+        stackTrace,
+        context: 'SyncService._syncAttendanceCheckInItem',
+        attributes: {'data': jsonEncode(data)},
+      );
+      return false;
+    }
+  }
+
+  /// Syncs a queued attendance check-out event to the backend.
+  ///
+  /// Uses the exact same authenticated endpoint as the live check-out flow,
+  /// ensuring queued offline events are not silently dropped.
+  static Future<bool> _syncAttendanceCheckOutItem(
+    Map<String, dynamic> data,
+  ) async {
+    try {
+      final rawEmployeeId =
+          data['employee_id'] ??
+          data['worker_id'] ??
+          data['workerId'] ??
+          data['id'];
+
+      final employeeId = rawEmployeeId?.toString().trim() ?? '';
+      if (employeeId.isEmpty) {
+        await ErrorLogHelper.logMessage(
+          'Queued attendance check-out missing employee_id/worker_id',
+          level: 'ERROR',
+          attributes: {'data': jsonEncode(data)},
+        );
+        return false;
+      }
+
+      return await checkOutWorker(employeeId);
+    } catch (e, stackTrace) {
+      await ErrorLogHelper.logException(
+        e,
+        stackTrace,
+        context: 'SyncService._syncAttendanceCheckOutItem',
+        attributes: {'data': jsonEncode(data)},
+      );
+      return false;
+    }
+  }
+
   /// Syncs worker profile data to the backend
   static Future<bool> syncWorkerProfile(Map<String, dynamic> workerData) async {
     try {
@@ -295,6 +369,165 @@ class SyncService {
           // and is intentionally NOT merged into the canonical invoice dataset because doing so
           // can double-count the same business transaction. Legacy recovery is handled separately.
           
+          // IMPORTANT: persist the canonical invoice records separately from
+          // the dashboard sales mirror. Dashboard sales may be rebuilt from the
+          // cloud, but Khata/Paid Invoice history must not depend on that mirror.
+          try {
+            final Map<String, List<Map<String, dynamic>>> invoiceGroups = {};
+            String invoiceKey(Map<String, dynamic> row) {
+              for (final field in const [
+                'invoice_id',
+                'sale_id',
+                'invoice_number',
+                'number',
+                'backend_id',
+                'id',
+              ]) {
+                final value = row[field]?.toString().trim() ?? '';
+                if (value.isNotEmpty && value != '0' && value != 'null') {
+                  return value;
+                }
+              }
+              return '';
+            }
+
+            for (final raw in allApiItems) {
+              if (raw is! Map) continue;
+              final row = Map<String, dynamic>.from(raw);
+              final key = invoiceKey(row);
+              if (key.isEmpty) continue;
+              invoiceGroups.putIfAbsent(key, () => <Map<String, dynamic>>[]).add(row);
+            }
+
+            double amount(dynamic value) {
+              if (value is num) return value.toDouble();
+              return double.tryParse(value?.toString() ?? '') ?? 0.0;
+            }
+
+            final List<Map<String, dynamic>> restoredInvoices = [];
+            for (final group in invoiceGroups.values) {
+              final first = group.first;
+
+              dynamic rawItems = first['line_items'] ?? first['items'];
+              if (rawItems is! List || rawItems.isEmpty) {
+                rawItems = group;
+              }
+
+              final List<Map<String, dynamic>> lineItems = [];
+              if (rawItems is List) {
+                for (final rawItem in rawItems) {
+                  if (rawItem is! Map) continue;
+                  final name = (rawItem['product_name'] ??
+                          rawItem['description'] ??
+                          rawItem['item'] ??
+                          rawItem['name'] ??
+                          rawItem['product'] ??
+                          '')
+                      .toString()
+                      .trim();
+                  if (name.isEmpty) continue;
+
+                  final price = amount(
+                    rawItem['unit_price'] ?? rawItem['price'] ?? 0,
+                  );
+                  final qty = amount(
+                    rawItem['quantity'] ?? rawItem['qty'] ?? 1,
+                  );
+                  final lineTotal = amount(
+                    rawItem['line_total'] ??
+                        rawItem['total'] ??
+                        rawItem['total_with_tax'] ??
+                        price * (qty > 0 ? qty : 1),
+                  );
+
+                  lineItems.add({
+                    ...rawItem,
+                    'product_name': name,
+                    'quantity': qty > 0 ? qty : 1,
+                    'qty': qty > 0 ? qty : 1,
+                    'price': price,
+                    'unit_price': price,
+                    'total': lineTotal,
+                    'line_total': lineTotal,
+                    'total_with_tax': lineTotal,
+                  });
+                }
+              }
+
+              final total = amount(
+                first['total_amount'] ??
+                    first['total'] ??
+                    first['invoice_total'] ??
+                    first['grand_total'],
+              );
+              final paid = amount(
+                first['paid_amount'] ??
+                    first['amount_paid'] ??
+                    first['paid'] ??
+                    first['received_amount'],
+              ).clamp(0.0, total).toDouble();
+              final outstanding =
+                  (total - paid).clamp(0.0, double.infinity).toDouble();
+              final statusRaw =
+                  (first['payment_status'] ?? first['status'] ?? '')
+                      .toString()
+                      .toUpperCase();
+              final status = statusRaw == 'PAID' ||
+                      statusRaw == 'PARTIAL' ||
+                      statusRaw == 'UNPAID'
+                  ? statusRaw
+                  : (paid >= total - 0.01
+                      ? 'PAID'
+                      : paid > 0
+                          ? 'PARTIAL'
+                          : 'UNPAID');
+
+              restoredInvoices.add({
+                ...first,
+                'invoice_id': first['invoice_id'] ?? first['id'],
+                'invoice_number': first['invoice_number'] ??
+                    first['number'] ??
+                    first['sale_id'] ??
+                    first['id'],
+                'sale_id': first['sale_id'] ??
+                    first['invoice_number'] ??
+                    first['id'],
+                'customer_name':
+                    first['customer_name'] ?? first['name'] ?? 'Cash Customer',
+                'customer_phone':
+                    first['customer_phone'] ?? first['phone'] ?? '',
+                'business_date': first['business_date'] ??
+                    first['invoice_date'] ??
+                    first['sale_date'] ??
+                    first['date'] ??
+                    first['created_at'],
+                'total_amount': total,
+                'paid_amount': paid,
+                'pending_amount': outstanding,
+                'payment_status': status,
+                'status': status,
+                'line_items': lineItems,
+                'items': lineItems,
+                'sync_status': 'synced',
+                'is_synced': true,
+                'source': 'cloud_restore',
+              });
+            }
+
+            if (restoredInvoices.isNotEmpty) {
+              await LocalStorageService.saveLocalInvoices(restoredInvoices);
+              if (kDebugMode) {
+                debugPrint(
+                  '✅ Cloud restore: ${restoredInvoices.length} canonical invoices persisted',
+                );
+              }
+            }
+          } catch (e) {
+            if (kDebugMode) {
+              debugPrint('⚠️ Failed to persist canonical invoice restore: $e');
+            }
+          }
+
           final currentLocal = await LocalStorageService.loadSales();
           final localBills = currentLocal
               .whereType<Map>()
@@ -1024,14 +1257,25 @@ static Future<bool> _createPurchaseOrderItem(Map<String, dynamic> data) async {
     try {
       final token = await SecureTokenStorage.getToken() ?? '';
       if (token.isEmpty) return false;
-
-      final res = await ApiClient.postJson(
-        '/purchase-orders/',
-        data,
-        headers: {'Authorization': 'Bearer $token'},
-      ).timeout(const Duration(seconds: 20));
-
-      return res.statusCode == 200 || res.statusCode == 201;
+      final normalizedItems = <Map<String, dynamic>>[];
+      final rawItems = data['items'];
+      if (rawItems is List) {
+        for (final raw in rawItems) {
+          if (raw is! Map) continue;
+          final item = Map<String, dynamic>.from(raw);
+          final name = (item['product_name'] ?? item['product'] ?? item['name'] ?? item['item'] ?? '').toString().trim();
+          final qty = double.tryParse((item['quantity'] ?? item['qty'] ?? 0).toString()) ?? 0.0;
+          final cost = double.tryParse((item['unit_cost'] ?? item['unit_price'] ?? item['price'] ?? 0).toString()) ?? 0.0;
+          if (name.isEmpty || qty <= 0) continue;
+          normalizedItems.add({'product_id': item['product_id'] ?? item['id'], 'product_name': name, 'quantity': qty, 'unit_cost': cost});
+        }
+      }
+      if (normalizedItems.isEmpty) return false;
+      final payload = {...data, 'supplier_name': (data['supplier_name'] ?? data['supplier'] ?? '').toString().trim(), 'items': normalizedItems};
+      final res = await ApiClient.postJson('/purchase-orders/', payload, headers: {'Authorization': 'Bearer $token'}).timeout(const Duration(seconds: 20));
+      final success = res.statusCode == 200 || res.statusCode == 201;
+      if (!success && kDebugMode) debugPrint('❌ Purchase order backend rejected sync: ${res.statusCode} ${res.body}');
+      return success;
     } catch (e) {
       if (kDebugMode) debugPrint('❌ Error creating purchase order: $e');
       return false;

@@ -45,31 +45,79 @@ class _WorkerAttendanceDetailPageState
     _load();
   }
 
+  static String _attendanceCacheKey(int workerId) =>
+      'attendance_worker_cache_$workerId';
+
+  Future<List<dynamic>> _loadLocalAttendance() async {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString(_attendanceCacheKey(_workerId));
+    if (raw == null || raw.isEmpty) return <dynamic>[];
+    try {
+      final decoded = jsonDecode(raw);
+      return decoded is List ? List<dynamic>.from(decoded) : <dynamic>[];
+    } catch (_) {
+      return <dynamic>[];
+    }
+  }
+
+  Future<void> _saveLocalAttendance(List<dynamic> records) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(
+      _attendanceCacheKey(_workerId),
+      jsonEncode(records),
+    );
+  }
+
   Future<void> _load() async {
-    setState(() => _loading = true);
+    if (mounted) setState(() => _loading = true);
+
     try {
       final prefs = await SharedPreferences.getInstance();
       _shopkeeperId = prefs.getInt('user_id') ?? prefs.getInt('userId');
 
-      final res = await ApiClient.getJson(
-          '${ApiClient.attendancePrefix}/employee/${widget.worker.id}');
-      if (res.statusCode == 200) {
-        final data = json.decode(res.body);
-        if (data is Map && data['records'] is List) {
-          _records = List<dynamic>.from(data['records'] as List);
-        } else if (data is List) {
-          _records = List<dynamic>.from(data);
+      // LOCAL-FIRST: payroll and attendance remain visible after page
+      // recreation or temporary backend/network failure.
+      final cachedRecords = await _loadLocalAttendance();
+      if (cachedRecords.isNotEmpty && mounted) {
+        setState(() => _records = cachedRecords);
+      }
+
+      // BACKEND REFRESH: successful response replaces the local snapshot.
+      try {
+        final res = await ApiClient.getJson(
+          '${ApiClient.attendancePrefix}/employee/${widget.worker.id}',
+        );
+
+        if (res.statusCode == 200) {
+          final data = jsonDecode(res.body);
+          final records = data is Map && data['records'] is List
+              ? List<dynamic>.from(data['records'] as List)
+              : data is List
+                  ? List<dynamic>.from(data)
+                  : <dynamic>[];
+
+          await _saveLocalAttendance(records);
+
+          if (mounted) {
+            setState(() => _records = records);
+          }
         }
+      } catch (e) {
+        // Keep cached records when the backend is temporarily unavailable.
+        debugPrint('⚠️ Worker attendance backend refresh failed: $e');
       }
 
       if (_shopkeeperId != null) {
         final workerId = int.tryParse(widget.worker.id) ?? 0;
         _payments = await PaymentHistoryStorage.fetchForWorker(
-            _shopkeeperId!, workerId);
+          _shopkeeperId!,
+          workerId,
+        );
       }
     } catch (e) {
-      // Non-fatal — show whatever we have, empty state handles the rest.
+      debugPrint('⚠️ Worker attendance local load failed: $e');
     }
+
     if (mounted) setState(() => _loading = false);
   }
 

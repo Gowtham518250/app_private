@@ -139,6 +139,8 @@ class _DashboardPageState extends State<DashboardPage>
     with SingleTickerProviderStateMixin, WidgetsBindingObserver, OptimizedStateMixin {
   late final AnimationController _animationController;
   late final ScrollController _scrollController;
+  late final AnimationController _paymentDetectionPulseController;
+  late final Animation<double> _paymentDetectionPulse;
   Timer? _refreshTimer;
 
   // sales + insight state
@@ -410,6 +412,24 @@ class _DashboardPageState extends State<DashboardPage>
       vsync: this,
       duration: const Duration(milliseconds: 600),
     );
+
+    // Persistent payment-detection CTA pulse. This animation only runs while
+    // required permissions are missing; it stops immediately once both are
+    // granted so the Dashboard does not waste resources while healthy.
+    _paymentDetectionPulseController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1100),
+    );
+    _paymentDetectionPulse = Tween<double>(
+      begin: 0.92,
+      end: 1.0,
+    ).animate(
+      CurvedAnimation(
+        parent: _paymentDetectionPulseController,
+        curve: Curves.easeInOut,
+      ),
+    );
+
     _fadeAnimation = CurvedAnimation(
       parent: _animationController,
       curve: Curves.easeOut,
@@ -534,17 +554,28 @@ class _DashboardPageState extends State<DashboardPage>
       _paymentPermissionCheckComplete = true;
     });
 
-    if (!missing && (notifGranted || smsGranted)) {
-      try {
-        await PaymentDetectionService().ensureChannelsRunning();
-      } catch (e) {
-        if (kDebugMode) debugPrint('⚠️ Payment detection channel startup failed: $e');
+    if (missing) {
+      // Keep the persistent Dashboard CTA animated until Android reports that
+      // every required permission is actually enabled.
+      if (!_paymentDetectionPulseController.isAnimating) {
+        _paymentDetectionPulseController.repeat(reverse: true);
       }
+      // Intentionally do not open a blocking dialog here. The Dashboard card
+      // is the single persistent reminder and remains usable for billing.
       return;
     }
 
-    if (missing && showReminderIfMissing) {
-      _schedulePaymentDetectionReminder();
+    // All required permissions are now enabled. Stop the reminder animation
+    // and start the payment-detection channels.
+    _paymentDetectionPulseController.stop();
+    _paymentDetectionPulseController.value = 1.0;
+
+    try {
+      await PaymentDetectionService().ensureChannelsRunning();
+    } catch (e) {
+      if (kDebugMode) {
+        debugPrint('⚠️ Payment detection channel startup failed: $e');
+      }
     }
   }
 
@@ -1128,12 +1159,11 @@ class _DashboardPageState extends State<DashboardPage>
   }
 
   Future<void> _checkPaymentsConfig() async {
-    // Permission prompting is controlled by the Dashboard core-feature reminder.
-    // Keep this method as a passive health check so existing initState wiring
-    // remains intact without opening duplicate dialogs.
+    // Passive health check only. The Dashboard's persistent payment-detection
+    // card is the single reminder; do not show a blocking dialog automatically.
     await Future<void>.delayed(const Duration(milliseconds: 200));
     if (!mounted) return;
-    await _checkPermissions(showReminderIfMissing: true);
+    await _checkPermissions(showReminderIfMissing: false);
   }
 
   Future<void> _loadOnlineStoreStatus() async {
@@ -1705,6 +1735,7 @@ class _DashboardPageState extends State<DashboardPage>
     // FIX BUG 6 cleanup — detach inventory observer
     InventoryManagementService.onInventoryChanged = null;
     _animationController.dispose();
+    _paymentDetectionPulseController.dispose();
     _scrollController.dispose();
     // Clear analytics engine cache to prevent memory leak
     engine.sales.clear();
@@ -2318,9 +2349,12 @@ class _DashboardPageState extends State<DashboardPage>
   // ═══════════════════════════════════════════════════════════════════════
   // KPI CARDS - Show FILTERED PERIOD data (based on selected time filter)
   // ═══════════════════════════════════════════════════════════════════════
-  double get totalSales => engine.totalSales; // Lifetime total for headline KPI
-  int get totalTransactions => engine.totalTransactions; // Lifetime total for headline KPI
-  double get averageSale => engine.filteredAverageSale; // Filtered period
+  // FILTER-AWARE KPI VALUES: all three headline metrics use the same selected
+  // Today / Week / Month / Year transaction set. Lifetime metrics remain available
+  // through AnalyticsEngine.lifetimeRevenue/lifetimeTransactions.
+  double get totalSales => engine.displayRevenue;
+  int get totalTransactions => engine.displayTransactions;
+  double get averageSale => engine.filteredAverageSale;
   int get uniqueProducts => engine.filteredUniqueProducts; // Filtered period
   List<Map<String, dynamic>> get recentSales =>
       engine.filteredSalesCache; // Filtered bills
@@ -2580,33 +2614,49 @@ class _DashboardPageState extends State<DashboardPage>
 
   void _shareDailyReport() async {
     final today = DateTime.now();
-    final dateStr = "${today.day}/${today.month}/${today.year}";
-    final dashboardMsg =
-        """
-🚀 *AI SHOP DAILY SUMMARY* ($dateStr)
-━━━━━━━━━━━━━━━
-💰 Revenue: ₹${totalSales.toStringAsFixed(0)}
-💳 Bills: $totalTransactions
-📊 Top Item: $_todayTopProduct
-🔥 Best Hour: $_todayBestHourLabel
-━━━━━━━━━━━━━━━
-✨ _Sent via AI Shop Pro_
-""";
-
-    final encodedMsg = Uri.encodeComponent(dashboardMsg);
-    final url = "https://wa.me/?text=$encodedMsg";
-
+    final todayStart = DateTime(today.year, today.month, today.day);
+    final todayBills = engine.sales.where((sale) {
+      final d = engine.getLocalDate(sale);
+      return DateTime(d.year, d.month, d.day) == todayStart;
+    }).toList()
+      ..sort((a, b) => engine.getLocalDate(b).compareTo(engine.getLocalDate(a)));
+    double amountOf(Map<String, dynamic> sale) => (sale['gross_revenue'] is num)
+        ? (sale['gross_revenue'] as num).toDouble()
+        : double.tryParse((sale['total_amount'] ?? sale['total'] ?? 0).toString()) ?? 0.0;
+    final total = todayBills.fold<double>(0.0, (sum, sale) => sum + amountOf(sale));
+    final count = todayBills.length;
+    final avg = count == 0 ? 0.0 : total / count;
+    final dateStr = '${today.day.toString().padLeft(2, '0')}/${today.month.toString().padLeft(2, '0')}/${today.year}';
+    final buffer = StringBuffer()
+      ..writeln('🚀 RETAIL MIND — DAILY SALES REPORT')
+      ..writeln('🏪 $shopName')
+      ..writeln('📅 $dateStr')
+      ..writeln('━━━━━━━━━━━━━━━━━━')
+      ..writeln('💰 Today Sales: ₹${total.toStringAsFixed(2)}')
+      ..writeln('🧾 Today Orders: $count')
+      ..writeln('📈 Average Order: ₹${avg.toStringAsFixed(2)}')
+      ..writeln('━━━━━━━━━━━━━━━━━━')
+      ..writeln('TODAY’S BILLS');
+    if (todayBills.isEmpty) {
+      buffer.writeln('No sales recorded today.');
+    } else {
+      for (var i = 0; i < todayBills.length; i++) {
+        final sale = todayBills[i];
+        final invoice = (sale['invoice_number'] ?? sale['sale_id'] ?? sale['_bill_id'] ?? 'SALE-${i + 1}').toString();
+        final customer = (sale['customer_name'] ?? sale['customer_phone'] ?? 'Walk-in Customer').toString();
+        final product = _dashboardProductDisplayName(sale);
+        buffer.writeln('${i + 1}. $invoice — $customer — ${product.isEmpty ? 'Sale' : product} — ₹${amountOf(sale).toStringAsFixed(2)}');
+      }
+    }
+    buffer.writeln('━━━━━━━━━━━━━━━━━━');
+    buffer.writeln('✨ Sent via RETAIL MIND');
+    final dashboardMsg = buffer.toString();
+    final url = 'https://wa.me/?text=${Uri.encodeComponent(dashboardMsg)}';
     if (await canLaunchUrl(Uri.parse(url))) {
       await launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication);
     } else {
-      Clipboard.setData(ClipboardData(text: dashboardMsg));
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Copied report to clipboard (WhatsApp not found).'),
-          ),
-        );
-      }
+      await Clipboard.setData(ClipboardData(text: dashboardMsg));
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Daily report copied to clipboard (WhatsApp not found).')));
     }
   }
 
@@ -6237,11 +6287,127 @@ class _DashboardPageState extends State<DashboardPage>
     );
   }
 
+  String _dashboardProductDisplayName(Map<String, dynamic> sale) {
+    String clean(String value) {
+      final v = value.trim();
+      if (v.isEmpty || AnalyticsEngine.isPlaceholderProductName(v)) return '';
+      return AnalyticsEngine.formatProductName(v);
+    }
+    for (final key in const ['product_name', 'product', 'item', 'description']) {
+      final value = clean((sale[key] ?? '').toString());
+      if (value.isNotEmpty) return value;
+    }
+    final rawItems = sale['items'] ?? sale['line_items'];
+    if (rawItems is List) {
+      final names = <String>[];
+      for (final raw in rawItems) {
+        if (raw is! Map) continue;
+        for (final key in const ['product_name', 'product', 'item', 'description']) {
+          final value = clean((raw[key] ?? '').toString());
+          if (value.isNotEmpty && !names.contains(value)) { names.add(value); break; }
+        }
+      }
+      if (names.isNotEmpty) return names.length == 1 ? names.first : '${names.first} + ${names.length - 1} more';
+    }
+    return '';
+  }
+
+  // Analytics chart source:
+  // Keep KPI/filter semantics unchanged, but never hide historical analytics
+  // merely because the selected filter (e.g. Today) has no rows.
+  //
+  // Example: a shop can have 500 historical bills and zero bills today.
+  // Pie/Radar/Monthly charts should still visualize that existing history.
+  List<Map<String, dynamic>> _chartSalesSource() {
+    if (filteredSales.isNotEmpty) return filteredSales;
+    return sales;
+  }
+
+  double _chartNumber(dynamic value) {
+    if (value is num) return value.toDouble();
+    return double.tryParse(value?.toString() ?? '') ?? 0.0;
+  }
+
+  Map<String, Map<String, dynamic>> _buildChartProductAnalytics(
+    List<Map<String, dynamic>> source,
+  ) {
+    final result = <String, Map<String, dynamic>>{};
+    void addLine(String rawName, double total, double qty) {
+      final name = rawName.trim();
+      if (name.isEmpty || AnalyticsEngine.isPlaceholderProductName(name)) return;
+      final displayName = AnalyticsEngine.formatProductName(name);
+      final entry = result.putIfAbsent(displayName, () => <String, dynamic>{'total': 0.0, 'count': 0, 'quantity': 0.0});
+      entry['total'] = (entry['total'] as double) + total;
+      entry['count'] = (entry['count'] as int) + 1;
+      entry['quantity'] = (entry['quantity'] as double) + qty;
+    }
+    for (final sale in source) {
+      final rawItems = sale['items'] ?? sale['line_items'];
+      if (rawItems is List && rawItems.isNotEmpty) {
+        for (final raw in rawItems) {
+          if (raw is! Map) continue;
+          final name = (raw['product_name'] ?? raw['product'] ?? raw['item'] ?? raw['description'] ?? '').toString();
+          final qty = _chartNumber(raw['quantity'] ?? raw['qty'] ?? raw['units'] ?? 1);
+          final lineTotal = _chartNumber(raw['line_total'] ?? raw['total_with_tax'] ?? raw['total']);
+          final unitPrice = _chartNumber(raw['unit_price'] ?? raw['price']);
+          addLine(name, lineTotal > 0 ? lineTotal : unitPrice * qty, qty);
+        }
+      } else {
+        final name = (sale['product_name'] ?? sale['product'] ?? sale['item'] ?? sale['name'] ?? sale['description'] ?? '').toString();
+        final total = _chartNumber(sale['invoice_total'] ?? sale['total_amount'] ?? sale['grand_total'] ?? sale['final_amount'] ?? sale['totalAmount'] ?? sale['total']);
+        final qty = _chartNumber(sale['quantity'] ?? sale['qty'] ?? sale['units'] ?? 1);
+        addLine(name, total, qty);
+      }
+    }
+    final grandTotal = result.values.fold<double>(0.0, (sum, value) => sum + (value['total'] as double? ?? 0.0));
+    for (final data in result.values) {
+      final total = data['total'] as double? ?? 0.0;
+      data['percentage'] = grandTotal > 0 ? (total / grandTotal) * 100.0 : 0.0;
+    }
+    return result;
+  }
+
+  Map<String, Map<int, double>> _buildChartMonthlyProductSales(
+    List<Map<String, dynamic>> source,
+  ) {
+    final result = <String, Map<int, double>>{};
+    final now = DateTime.now();
+    var usable = source.where((sale) => _getLocalDate(sale).year == now.year).toList();
+    if (usable.isEmpty) usable = source;
+    for (final sale in usable) {
+      final date = _getLocalDate(sale);
+      final rawItems = sale['items'] ?? sale['line_items'];
+      if (rawItems is List && rawItems.isNotEmpty) {
+        for (final raw in rawItems) {
+          if (raw is! Map) continue;
+          final name = (raw['product_name'] ?? raw['product'] ?? raw['item'] ?? raw['description'] ?? '').toString();
+          if (name.trim().isEmpty || AnalyticsEngine.isPlaceholderProductName(name)) continue;
+          final product = AnalyticsEngine.formatProductName(name);
+          final qty = _chartNumber(raw['quantity'] ?? raw['qty'] ?? raw['units'] ?? 1);
+          final lineTotal = _chartNumber(raw['line_total'] ?? raw['total_with_tax'] ?? raw['total']);
+          final unitPrice = _chartNumber(raw['unit_price'] ?? raw['price']);
+          final value = lineTotal > 0 ? lineTotal : unitPrice * qty;
+          final monthMap = result.putIfAbsent(product, () => <int, double>{});
+          monthMap[date.month] = (monthMap[date.month] ?? 0.0) + value;
+        }
+      } else {
+        final name = (sale['product_name'] ?? sale['product'] ?? sale['item'] ?? sale['name'] ?? '').toString();
+        if (name.trim().isEmpty || AnalyticsEngine.isPlaceholderProductName(name)) continue;
+        final product = AnalyticsEngine.formatProductName(name);
+        final value = _chartNumber(sale['invoice_total'] ?? sale['total_amount'] ?? sale['grand_total'] ?? sale['final_amount'] ?? sale['totalAmount'] ?? sale['total']);
+        final monthMap = result.putIfAbsent(product, () => <int, double>{});
+        monthMap[date.month] = (monthMap[date.month] ?? 0.0) + value;
+      }
+    }
+    return result;
+  }
+
   // MONTHLY SALES PER PRODUCT LINE CHART
   Widget _buildMonthlyProductChart() {
-    if (sales.isEmpty) return _buildEmptyChart('No sales data available');
+    final source = _chartSalesSource();
+    if (source.isEmpty) return _buildEmptyChart('No sales data available');
 
-    final monthly = _monthlyProductSales;
+    final monthly = _buildChartMonthlyProductSales(source);
     if (monthly.isEmpty) return _buildEmptyChart('No product data');
 
     final totals = <String, double>{};
@@ -7093,11 +7259,12 @@ class _DashboardPageState extends State<DashboardPage>
 
   // BEAUTIFUL PIE CHART - REVENUE DISTRIBUTION (BY PRICE / SALE VALUE)
   Widget _buildPieChart() {
-    if (filteredSales.isEmpty)
+    final source = _chartSalesSource();
+    if (source.isEmpty)
       return _buildEmptyChart(AppLocalizations.of(context).noProductData);
 
-    final productData = _productAnalytics;
-    if (productData == null || productData.isEmpty) {
+    final productData = _buildChartProductAnalytics(source);
+    if (productData.isEmpty) {
       return _buildEmptyChart(AppLocalizations.of(context).noProductData);
     }
     // Sort by revenue (total sale value)
@@ -7398,11 +7565,12 @@ class _DashboardPageState extends State<DashboardPage>
   // BEAUTIFUL RADAR CHART - MOST SOLD BY QUANTITY
   Widget _buildRadarChart() {
     try {
-      if (filteredSales.isEmpty)
+      final source = _chartSalesSource();
+      if (source.isEmpty)
         return _buildEmptyChart(AppLocalizations.of(context).noProductData);
 
-      final productData = _productAnalytics;
-      if (productData == null || productData.isEmpty) {
+      final productData = _buildChartProductAnalytics(source);
+      if (productData.isEmpty) {
         return _buildEmptyChart(AppLocalizations.of(context).noProductData);
       }
 
@@ -8342,18 +8510,25 @@ class _DashboardPageState extends State<DashboardPage>
                                         CrossAxisAlignment.start,
                                     mainAxisSize: MainAxisSize.min,
                                     children: [
-                                      Text(
-                                        s['customer_name']?.toString().isNotEmpty == true
-                                            ? s['customer_name'].toString()
-                                            : (s['customer_phone']?.toString().isNotEmpty == true
-                                                ? s['customer_phone'].toString()
-                                                : (s['invoice_number']?.toString() ?? 'Walk-in Customer')),
-                                        style: const TextStyle(
-                                          fontWeight: FontWeight.w600,
-                                          fontSize: 15,
-                                          color: Color(0xFF1F2937),
-                                        ),
-                                        overflow: TextOverflow.ellipsis,
+                                      Builder(
+                                        builder: (context) {
+                                          final productName = _dashboardProductDisplayName(s);
+                                          final invoice = (s['invoice_number'] ?? s['sale_id'] ?? s['_bill_id'] ?? '').toString().trim();
+                                          final title = productName.isNotEmpty
+                                              ? productName
+                                              : ((s['customer_name'] ?? s['customer_phone'] ?? 'Walk-in Customer').toString());
+                                          return Column(
+                                            crossAxisAlignment: CrossAxisAlignment.start,
+                                            mainAxisSize: MainAxisSize.min,
+                                            children: [
+                                              Text(title, style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 15, color: Color(0xFF1F2937)), overflow: TextOverflow.ellipsis),
+                                              if (invoice.isNotEmpty) ...[
+                                                const SizedBox(height: 2),
+                                                Text('Invoice: $invoice', style: const TextStyle(color: Color(0xFF94A3B8), fontSize: 10.5), overflow: TextOverflow.ellipsis),
+                                              ],
+                                            ],
+                                          );
+                                        },
                                       ),
                                       const SizedBox(height: 4),
                                       Row(
@@ -9037,181 +9212,196 @@ class _DashboardPageState extends State<DashboardPage>
       return const SizedBox.shrink();
     }
 
-    return Container(
-      width: double.infinity,
-      margin: const EdgeInsets.only(bottom: 20),
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: const Color(0xFFFEF2F2),
-        borderRadius: BorderRadius.circular(18),
-        border: Border.all(
-          color: const Color(0xFFEF4444).withValues(alpha: 0.45),
-          width: 1.5,
-        ),
-        boxShadow: [
-          BoxShadow(
-            color: const Color(0xFFEF4444).withValues(alpha: 0.10),
-            blurRadius: 14,
-            offset: const Offset(0, 5),
-          ),
-        ],
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Container(
-                padding: const EdgeInsets.all(9),
-                decoration: const BoxDecoration(
-                  color: Color(0xFFDC2626),
-                  shape: BoxShape.circle,
-                ),
-                child: const Icon(
-                  Icons.notifications_active_rounded,
-                  semanticLabel: 'Payment Detection Disabled',
-                  color: Colors.white,
-                  size: 21,
-                ),
+    return AnimatedBuilder(
+      animation: _paymentDetectionPulse,
+      builder: (context, child) {
+        final scale = _paymentDetectionPulse.value;
+        return Transform.scale(
+          scale: scale,
+          alignment: Alignment.center,
+          child: Container(
+            width: double.infinity,
+            margin: const EdgeInsets.only(bottom: 20),
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color: const Color(0xFFFEF2F2),
+              borderRadius: BorderRadius.circular(18),
+              border: Border.all(
+                color: const Color(0xFFEF4444).withValues(alpha: 0.58),
+                width: 1.6,
               ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
+              boxShadow: [
+                BoxShadow(
+                  color: const Color(0xFFEF4444).withValues(alpha: 0.18),
+                  blurRadius: 20,
+                  spreadRadius: 1,
+                  offset: const Offset(0, 6),
+                ),
+              ],
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Row(
-                      children: [
-                        Expanded(
-                          child: Text(
-                            'Payment Detection Disabled',
-                            style: GoogleFonts.poppins(
-                              fontWeight: FontWeight.w800,
-                              color: const Color(0xFF991B1B),
-                              fontSize: 16,
-                            ),
-                          ),
-                        ),
-                        Container(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 8,
-                            vertical: 4,
-                          ),
-                          decoration: BoxDecoration(
-                            color: const Color(0xFFDC2626),
-                            borderRadius: BorderRadius.circular(999),
-                          ),
-                          child: Text(
-                            'CORE FEATURE',
-                            style: GoogleFonts.poppins(
-                              color: Colors.white,
-                              fontSize: 9,
-                              fontWeight: FontWeight.w800,
-                              letterSpacing: 0.5,
-                            ),
-                          ),
-                        ),
-                      ],
+                    Container(
+                      padding: const EdgeInsets.all(9),
+                      decoration: const BoxDecoration(
+                        color: Color(0xFFDC2626),
+                        shape: BoxShape.circle,
+                      ),
+                      child: const Icon(
+                        Icons.notifications_active_rounded,
+                        semanticLabel: 'Payment Detection Disabled',
+                        color: Colors.white,
+                        size: 21,
+                      ),
                     ),
-                    const SizedBox(height: 5),
-                    Text(
-                      'Automatic UPI/payment detection is not fully enabled.',
-                      style: GoogleFonts.poppins(
-                        color: const Color(0xFFB91C1C),
-                        fontSize: 12.5,
-                        height: 1.35,
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            children: [
+                              Expanded(
+                                child: Text(
+                                  'Enable Payment Detection',
+                                  style: GoogleFonts.poppins(
+                                    fontWeight: FontWeight.w800,
+                                    color: const Color(0xFF991B1B),
+                                    fontSize: 16,
+                                  ),
+                                ),
+                              ),
+                              Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 8,
+                                  vertical: 4,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFFDC2626),
+                                  borderRadius: BorderRadius.circular(999),
+                                ),
+                                child: Text(
+                                  'ACTION REQUIRED',
+                                  style: GoogleFonts.poppins(
+                                    color: Colors.white,
+                                    fontSize: 8.5,
+                                    fontWeight: FontWeight.w800,
+                                    letterSpacing: 0.45,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 5),
+                          Text(
+                            'Automatic UPI/payment detection is disabled until the required Android permissions are enabled.',
+                            style: GoogleFonts.poppins(
+                              color: const Color(0xFFB91C1C),
+                              fontSize: 12.5,
+                              height: 1.35,
+                            ),
+                          ),
+                        ],
                       ),
                     ),
                   ],
                 ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 12),
-          Row(
-            children: [
-              Expanded(
-                child: _buildPaymentInlineStatus(
-                  'Notification',
-                  Icons.notifications_none_rounded,
-                  NotificationListenerService.isPermissionGranted(),
+                const SizedBox(height: 14),
+                Row(
+                  children: [
+                    Expanded(
+                      child: _buildPaymentInlineStatus(
+                        'Notification Access',
+                        Icons.notifications_none_rounded,
+                        NotificationListenerService.isPermissionGranted(),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: _buildPaymentInlineStatus(
+                        'SMS Access',
+                        Icons.sms_outlined,
+                        Permission.sms.status.then((s) => s.isGranted),
+                      ),
+                    ),
+                  ],
                 ),
-              ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: _buildPaymentInlineStatus(
-                  'SMS',
-                  Icons.sms_outlined,
-                  Permission.sms.status.then((s) => s.isGranted),
+                const SizedBox(height: 14),
+                Text(
+                  'This reminder will remain visible and highlighted until both required permissions are enabled.',
+                  style: GoogleFonts.poppins(
+                    fontSize: 11.5,
+                    color: const Color(0xFF7F1D1D),
+                    height: 1.4,
+                  ),
                 ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 12),
-          Text(
-            'Sales and billing continue normally. This reminder stays on the Dashboard until the required permissions are enabled.',
-            style: GoogleFonts.poppins(
-              color: const Color(0xFF7F1D1D),
-              fontSize: 11.5,
-              height: 1.4,
+                const SizedBox(height: 14),
+                SizedBox(
+                  width: double.infinity,
+                  height: 48,
+                  child: ElevatedButton.icon(
+                    onPressed: () async {
+                      try {
+                        await NotificationListenerService.requestPermission();
+                      } catch (e) {
+                        if (kDebugMode) {
+                          debugPrint(
+                            '⚠️ Notification permission request failed: $e',
+                          );
+                        }
+                      }
+
+                      try {
+                        final status = await Permission.sms.request();
+                        if (kDebugMode) {
+                          debugPrint('📱 SMS permission request result: $status');
+                        }
+                      } catch (e) {
+                        if (kDebugMode) {
+                          debugPrint('⚠️ SMS permission request failed: $e');
+                        }
+                      }
+
+                      // Android may take a moment to return from Settings/permission UI.
+                      await Future<void>.delayed(
+                        const Duration(milliseconds: 700),
+                      );
+
+                      if (!mounted) return;
+                      await _checkPermissions(showReminderIfMissing: false);
+                    },
+                    icon: const Icon(
+                      Icons.lock_open_rounded,
+                      size: 20,
+                    ),
+                    label: Text(
+                      'ENABLE PAYMENT DETECTION',
+                      style: GoogleFonts.poppins(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w800,
+                        letterSpacing: 0.2,
+                      ),
+                    ),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFFDC2626),
+                      foregroundColor: Colors.white,
+                      elevation: 4,
+                      shadowColor: const Color(0xFFDC2626).withValues(alpha: 0.35),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(13),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
             ),
           ),
-          const SizedBox(height: 14),
-          SizedBox(
-            width: double.infinity,
-            child: ElevatedButton.icon(
-              onPressed: () async {
-                try {
-                  await NotificationListenerService.requestPermission();
-                } catch (e) {
-                  if (kDebugMode) {
-                    debugPrint('⚠️ Notification permission request failed: $e');
-                  }
-                }
-
-                try {
-                  final status = await Permission.sms.request();
-                  if (kDebugMode) {
-                    debugPrint('📱 SMS permission request result: $status');
-                  }
-                } catch (e) {
-                  if (kDebugMode) {
-                    debugPrint('⚠️ SMS permission request failed: $e');
-                  }
-                }
-
-                await Future<void>.delayed(const Duration(milliseconds: 500));
-                await _checkPermissions(showReminderIfMissing: false);
-
-                if (mounted && _isPermissionsMissing) {
-                  _schedulePaymentDetectionReminder();
-                }
-              },
-              icon: const Icon(
-                Icons.lock_open_rounded,
-                size: 18,
-              ),
-              label: Text(
-                'ENABLE PAYMENT DETECTION',
-                style: GoogleFonts.poppins(
-                  fontWeight: FontWeight.w800,
-                  fontSize: 12.5,
-                  letterSpacing: 0.2,
-                ),
-              ),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: const Color(0xFFDC2626),
-                foregroundColor: Colors.white,
-                elevation: 0,
-                padding: const EdgeInsets.symmetric(vertical: 13),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(11),
-                ),
-              ),
-            ),
-          ),
-        ],
-      ),
+        );
+      },
     );
   }
 
@@ -13238,6 +13428,10 @@ class _DashboardPageState extends State<DashboardPage>
               // 0. GREETING HEADER
               _buildGreetingHeader(),
 
+              // 0.001 PAYMENT DETECTION SETUP — keep this visible and highlighted
+              // until the OS reports that every required permission is enabled.
+              if (!_isStaffMode && _isPermissionsMissing) _buildPermissionWarning(),
+
               // 0.01 FIRST LOGIN PROFILE PROMPT
               if (shopName.isEmpty || shopName == 'My Shop' || shopName == 'AI Shop Pro') ...[
                 Container(
@@ -13339,9 +13533,6 @@ class _DashboardPageState extends State<DashboardPage>
 
               // 0.5 LIVE SALES TICKER
               _buildLiveSalesTicker(),
-
-              // 0.6 PERMISSION WARNING (High Priority)
-              if (_isPermissionsMissing) _buildPermissionWarning(),
 
               // 1. GETTING STARTED (Only for new users with no sales)
               if (sales.isEmpty) ...[

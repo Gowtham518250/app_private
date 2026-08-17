@@ -22,7 +22,7 @@ class AttendancePage extends StatefulWidget {
 }
 
 class _AttendancePageState extends State<AttendancePage>
-    with TickerProviderStateMixin {
+    with TickerProviderStateMixin, WidgetsBindingObserver {
   static const Color _primary = Color(0xFF6366F1);
   static const Color _present = Color(0xFF10B981);
   static const Color _absent = Color(0xFFEF4444);
@@ -42,12 +42,15 @@ class _AttendancePageState extends State<AttendancePage>
   late AnimationController _pulseController;
   late Animation<double> _pulseAnimation;
   Timer? _timer;
+  Timer? _refreshTimer;
+  bool _refreshInFlight = false;
   String _liveHours = '0.0';
   List<Worker> _staff = [];
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _tab = TabController(length: 3, vsync: this);
     _pulseController = AnimationController(
       vsync: this,
@@ -58,6 +61,7 @@ class _AttendancePageState extends State<AttendancePage>
     );
     _init();
     _startTimer();
+    _startRefreshTimer();
   }
 
   @override
@@ -65,6 +69,8 @@ class _AttendancePageState extends State<AttendancePage>
     _tab.dispose();
     _pulseController.dispose();
     _timer?.cancel();
+    _refreshTimer?.cancel();
+    WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
 
@@ -115,12 +121,24 @@ class _AttendancePageState extends State<AttendancePage>
       if (res.statusCode == 200) {
         final data = json.decode(res.body);
         if (mounted) {
+          final syncedWorkers = data is List
+              ? data.map((w) => Worker.fromJson(w)).toList()
+              : (data is Map && data['workers'] is List)
+                  ? (data['workers'] as List)
+                      .whereType<Map>()
+                      .map((w) => Worker.fromJson(Map<String, dynamic>.from(w)))
+                      .toList()
+                  : <Worker>[];
+
+          // Backend success becomes the durable offline roster.
+          await WorkerLocalStorage.saveWorkers(_userId ?? 0, syncedWorkers);
+
           setState(() {
-            if (data is List) {
-              _staff = data.map((w) => Worker.fromJson(w)).toList();
-            }
+            _staff = syncedWorkers;
           });
-          if (kDebugMode) debugPrint('✅ Synced ${_staff.length} workers from backend');
+          if (kDebugMode) {
+            debugPrint('✅ Synced and cached ${_staff.length} workers from backend');
+          }
         }
       }
     } catch (e) {
@@ -164,23 +182,22 @@ class _AttendancePageState extends State<AttendancePage>
         }
       }
       
-      // Fetch attendance for all workers
-      for (var worker in _staff) {
+      // Fetch worker attendance in parallel so payroll/attendance stays responsive.
+      final workerResults = await Future.wait<List<dynamic>>(_staff.map((worker) async {
         try {
           final workerUrl = '${ApiClient.attendancePrefix}/employee/${worker.id}';
           final workerRes = await ApiClient.getJson(workerUrl);
           if (workerRes.statusCode == 200) {
             final workerData = json.decode(workerRes.body);
-            if (workerData is Map && workerData['records'] is List) {
-              final workerRecords = List<dynamic>.from(workerData['records'] as List);
-              // Keep all worker attendance records so payroll can compute monthly totals
-              allRecords.addAll(workerRecords);
-            }
+            if (workerData is Map && workerData['records'] is List) return List<dynamic>.from(workerData['records'] as List);
+            if (workerData is List) return List<dynamic>.from(workerData);
           }
         } catch (e) {
           if (kDebugMode) debugPrint('Error fetching attendance for worker ${worker.id}: $e');
         }
-      }
+        return <dynamic>[];
+      }));
+      for (final workerRecords in workerResults) { allRecords.addAll(workerRecords); }
       
       // IMPORTANT: never replace durable local attendance with a stale/empty
       // cloud response. Immediately after CHECK IN/CHECK OUT the local record
@@ -228,6 +245,28 @@ class _AttendancePageState extends State<AttendancePage>
     }
     setState(() => _loading = false);
     _updateLiveHours();
+  }
+
+  Future<void> _refreshAttendanceData() async {
+    if (!mounted || _refreshInFlight) return;
+    _refreshInFlight = true;
+    try {
+      await _loadStaff();
+      try { await OfflineAttendanceService.reconcileFromBackend(); } catch (e) { if (kDebugMode) debugPrint('⚠️ Attendance reconcile refresh failed: $e'); }
+      await _fetch();
+    } finally {
+      _refreshInFlight = false;
+    }
+  }
+
+  void _startRefreshTimer() {
+    _refreshTimer?.cancel();
+    _refreshTimer = Timer.periodic(const Duration(minutes: 5), (_) => _refreshAttendanceData());
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) _refreshAttendanceData();
   }
 
   void _startTimer() {

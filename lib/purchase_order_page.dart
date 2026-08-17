@@ -61,13 +61,13 @@ class _PurchaseOrderPageState extends State<PurchaseOrderPage> {
     // 🔧 FIX: Transform order structure to match backend expectations before syncing
     // Backend expects: supplier_name (not supplier), items with product_id/quantity/unit_cost
     final backendOrder = {
-      'supplier_name': order['supplier_name'] ?? order['supplier'],
+      'supplier_name': (order['supplier_name'] ?? order['supplier'] ?? '').toString().trim(),
       'expected_delivery': order['expected_delivery'],
       'items': (order['items'] as List?)?.map((item) => {
-        'product_id': item['product_id'],
-        'product_name': item['product_name'],
-        'quantity': item['quantity'],
-        'unit_cost': item['unit_cost'] ?? item['unit_price'] ?? 0.0,
+        'product_id': item['product_id'] ?? item['id'],
+        'product_name': item['product_name'] ?? item['product'] ?? item['name'],
+        'quantity': double.tryParse((item['quantity'] ?? item['qty'] ?? 0).toString()) ?? 0.0,
+        'unit_cost': double.tryParse((item['unit_cost'] ?? item['unit_price'] ?? item['price'] ?? 0).toString()) ?? 0.0,
       }).toList(),
       'notes': order['notes'],
     };

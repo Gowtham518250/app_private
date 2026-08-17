@@ -13,6 +13,7 @@ import 'api_client.dart';
 import 'sync_queue_manager.dart';
 import 'sync_service.dart';
 import 'visual_widgets.dart';
+import 'paid_invoices_page.dart';
 
 class KhataPage extends StatefulWidget {
   final String? focusPhone;
@@ -154,6 +155,116 @@ class _KhataPageState extends State<KhataPage> with SingleTickerProviderStateMix
     return map;
   }
 
+
+  /// Khata only accepts real customer phone numbers.
+  /// Indian mobile format: 10 digits beginning with 6-9, optionally prefixed by 91/+91.
+  bool _isValidCustomerPhone(String value) {
+    final digits = value.replaceAll(RegExp(r'[^0-9]'), '');
+    final normalized = digits.startsWith('91') && digits.length == 12
+        ? digits.substring(2)
+        : digits;
+    return normalized.length == 10 && RegExp(r'^[6-9][0-9]{9}$').hasMatch(normalized);
+  }
+
+  /// Mirror a received Khata payment into the local invoice ledger immediately.
+  /// This fixes the offline-first gap where the backend eventually becomes PAID
+  /// but the local invoice remains UNPAID until a later restore.
+  Future<void> _persistLocalInvoicePayment({
+    required String customerPhone,
+    required double amount,
+    required double expectedPaidAmount,
+    String? invoiceId,
+    String? invoiceNumber,
+  }) async {
+    if (!_isValidCustomerPhone(customerPhone) || amount <= 0) return;
+
+    try {
+      final invoices = (await LocalStorageService.loadLocalInvoices())
+          .whereType<Map>()
+          .map((e) => Map<String, dynamic>.from(e))
+          .toList();
+
+      final target = (invoiceId ?? '').trim();
+      final number = (invoiceNumber ?? '').trim();
+
+      for (final invoice in invoices) {
+        final invPhone =
+            (invoice['customer_phone'] ?? invoice['phone'] ?? invoice['mobile'] ?? '')
+                .toString()
+                .trim();
+
+        if (!_isValidCustomerPhone(invPhone)) continue;
+
+        final ids = <String>{
+          (invoice['invoice_id'] ?? '').toString().trim(),
+          (invoice['backend_id'] ?? '').toString().trim(),
+          (invoice['id'] ?? '').toString().trim(),
+        }..removeWhere((v) => v.isEmpty || v == 'null');
+
+        final numbers = <String>{
+          (invoice['invoice_number'] ?? '').toString().trim(),
+          (invoice['sale_id'] ?? '').toString().trim(),
+          (invoice['number'] ?? '').toString().trim(),
+        }..removeWhere((v) => v.isEmpty || v == 'null');
+
+        final sameInvoice =
+            (target.isNotEmpty && ids.contains(target)) ||
+            (number.isNotEmpty && numbers.contains(number));
+
+        if (!sameInvoice) continue;
+
+        final total = double.tryParse(
+              (invoice['total_amount'] ??
+                      invoice['total'] ??
+                      invoice['invoice_total'] ??
+                      0)
+                  .toString(),
+            ) ??
+            0.0;
+
+        final oldPaid = double.tryParse(
+              (invoice['paid_amount'] ??
+                      invoice['amount_paid'] ??
+                      invoice['paid'] ??
+                      0)
+                  .toString(),
+            ) ??
+            0.0;
+
+        // Idempotent mirror: if recordUnifiedPayment() already persisted the
+        // invoice amount, keep that value instead of applying the payment twice.
+        final targetPaid = expectedPaidAmount > oldPaid
+            ? expectedPaidAmount
+            : oldPaid;
+        final newPaid =
+            targetPaid.clamp(0.0, total).toDouble();
+
+        invoice['paid_amount'] =
+            double.parse(newPaid.toStringAsFixed(2));
+
+        if (newPaid >= total - 0.01) {
+          invoice['paid_amount'] =
+              double.parse(total.toStringAsFixed(2));
+          invoice['payment_status'] = 'PAID';
+          invoice['status'] = 'PAID';
+        } else {
+          invoice['payment_status'] = 'PARTIAL';
+          invoice['status'] = 'PARTIAL';
+        }
+
+        invoice['customer_phone'] = invPhone;
+        invoice['updated_at'] = DateTime.now().toUtc().toIso8601String();
+
+        await LocalStorageService.saveLocalInvoices(invoices);
+        return;
+      }
+    } catch (e) {
+      if (kDebugMode) {
+        debugPrint('⚠️ Local Khata invoice payment mirror failed: $e');
+      }
+    }
+  }
+
   Future<void> _loadInvoiceAnalytics() async {
     if (!mounted) return;
     setState(() => _invoicesLoading = true);
@@ -168,102 +279,172 @@ class _KhataPageState extends State<KhataPage> with SingleTickerProviderStateMix
         return double.tryParse(value?.toString() ?? '') ?? 0.0;
       }
 
-      final invoices = canonical.values.map((row) {
-        final total = parseAmount(row['total_amount'] ?? row['total'] ?? row['amount'] ?? row['invoice_total'] ?? row['grand_total']);
-        final paidRaw = parseAmount(row['paid_amount'] ?? row['amount_paid'] ?? row['paid'] ?? row['received_amount']);
+      final normalized = canonical.values.map((row) {
+        final total = parseAmount(
+          row['total_amount'] ??
+              row['total'] ??
+              row['amount'] ??
+              row['invoice_total'] ??
+              row['grand_total'],
+        );
+        final paidRaw = parseAmount(
+          row['paid_amount'] ??
+              row['amount_paid'] ??
+              row['paid'] ??
+              row['received_amount'],
+        );
         final paid = paidRaw.clamp(0.0, total).toDouble();
-        final rawStatus = (row['payment_status'] ?? row['status'] ?? '').toString().toUpperCase();
-        final status = rawStatus == 'PAID' || rawStatus == 'PARTIAL' || rawStatus == 'UNPAID'
-            ? rawStatus
-            : _deriveStatus(total, paid);
-        final businessDate = row['business_date'] ?? row['invoice_date'] ?? row['sale_date'] ?? row['date'] ?? row['created_at'];
-        final invoiceNumber = row['invoice_number'] ?? row['number'] ?? row['sale_id'] ?? row['id'];
-        final phone = (row['customer_phone'] ?? row['phone'] ?? row['mobile'] ?? row['contact'] ?? '').toString().trim();
-        final rawName = (row['customer_name'] ?? row['name'] ?? row['customer'] ?? '').toString().trim();
+        final status = _deriveStatus(total, paid);
+        final businessDate = row['business_date'] ??
+            row['invoice_date'] ??
+            row['sale_date'] ??
+            row['date'] ??
+            row['created_at'];
+        final invoiceNumber =
+            row['invoice_number'] ?? row['number'] ?? row['sale_id'] ?? row['id'];
+        final phone =
+            (row['customer_phone'] ?? row['phone'] ?? row['mobile'] ?? '')
+                .toString()
+                .trim();
+        final rawName =
+            (row['customer_name'] ?? row['name'] ?? row['customer'] ?? '')
+                .toString()
+                .trim();
+
         return {
           ...row,
           'invoice_number': invoiceNumber,
-          'customer_name': rawName.isNotEmpty ? rawName : (phone.isNotEmpty ? 'Guest Customer' : 'Cash Customer'),
+          'customer_name': rawName.isNotEmpty ? rawName : 'Customer',
           'customer_phone': phone,
           'business_date': businessDate,
           'total_amount': total,
           'paid_amount': paid,
-          'pending_amount': (total - paid).clamp(0.0, double.infinity).toDouble(),
+          'pending_amount':
+              (total - paid).clamp(0.0, double.infinity).toDouble(),
           'payment_status': status,
         };
       }).toList();
 
+      // Khata is a CREDIT ledger, not a general sales report.
+      // Only show:
+      //   1) a valid customer phone number
+      //   2) an outstanding amount
+      // This excludes normal cash/paid sales and anonymous records.
+      final invoices = normalized.where((inv) {
+        final phone = (inv['customer_phone'] ?? '').toString().trim();
+        final total = (inv['total_amount'] as num?)?.toDouble() ?? 0.0;
+        final paid = (inv['paid_amount'] as num?)?.toDouble() ?? 0.0;
+        final pending = (total - paid).clamp(0.0, double.infinity).toDouble();
+
+        return _isValidCustomerPhone(phone) && pending > 0.01;
+      }).toList();
+
       invoices.sort((a, b) {
-        final da = DateTime.tryParse(a['business_date']?.toString() ?? '') ?? DateTime(1970);
-        final db = DateTime.tryParse(b['business_date']?.toString() ?? '') ?? DateTime(1970);
+        final da =
+            DateTime.tryParse(a['business_date']?.toString() ?? '') ??
+                DateTime(1970);
+        final db =
+            DateTime.tryParse(b['business_date']?.toString() ?? '') ??
+                DateTime(1970);
         return db.compareTo(da);
       });
 
-      double invoiced = 0.0;
-      double paid = 0.0;
-      int paidCount = 0;
+      double creditTotal = 0.0;
+      double collectedAgainstCredit = 0.0;
       int partialCount = 0;
       int unpaidCount = 0;
+
       final outstandingByCustomer = <String, Map<String, dynamic>>{};
 
       for (final inv in invoices) {
-        final total = (inv['total_amount'] as num?)?.toDouble() ?? 0.0;
-        final paidAmt = (inv['paid_amount'] as num?)?.toDouble() ?? 0.0;
-        final pending = (total - paidAmt).clamp(0.0, double.infinity).toDouble();
-        invoiced += total;
-        paid += paidAmt;
+        final total =
+            (inv['total_amount'] as num?)?.toDouble() ?? 0.0;
+        final paidAmt =
+            (inv['paid_amount'] as num?)?.toDouble() ?? 0.0;
+        final pending =
+            (total - paidAmt).clamp(0.0, double.infinity).toDouble();
 
-        final status = inv['payment_status'].toString().toUpperCase();
-        if (status == 'PAID') {
-          paidCount++;
-        } else if (status == 'PARTIAL') {
+        creditTotal += total;
+        collectedAgainstCredit += paidAmt;
+
+        final status =
+            (inv['payment_status'] ?? _deriveStatus(total, paidAmt))
+                .toString()
+                .toUpperCase();
+
+        if (status == 'PARTIAL') {
           partialCount++;
         } else {
           unpaidCount++;
         }
 
-        if (pending > 0.01) {
-          final customerId = (inv['customer_id'] ?? '').toString().trim();
-          final phone = (inv['customer_phone'] ?? '').toString().trim();
-          final name = (inv['customer_name'] ?? 'Cash Customer').toString().trim();
-          final key = customerId.isNotEmpty && customerId != '0'
-              ? 'id:$customerId'
-              : phone.isNotEmpty
-                  ? 'phone:$phone'
-                  : 'invoice:${inv['invoice_number']}';
-          final existing = outstandingByCustomer[key];
-          if (existing == null) {
-            outstandingByCustomer[key] = {
-              'customer_id': customerId.isNotEmpty ? customerId : null,
-              'name': name.isNotEmpty ? name : 'Cash Customer',
-              'phone': phone,
-              'outstanding': pending,
-              'invoice_count': 1,
-            };
-          } else {
-            existing['outstanding'] = (existing['outstanding'] as double) + pending;
-            existing['invoice_count'] = (existing['invoice_count'] as int) + 1;
-          }
+        final customerId =
+            (inv['customer_id'] ?? '').toString().trim();
+        final phone =
+            (inv['customer_phone'] ?? '').toString().trim();
+        final name =
+            (inv['customer_name'] ?? 'Customer').toString().trim();
+
+        final key = customerId.isNotEmpty && customerId != '0'
+            ? 'id:$customerId'
+            : 'phone:$phone';
+
+        final existing = outstandingByCustomer[key];
+        if (existing == null) {
+          outstandingByCustomer[key] = {
+            'customer_id':
+                customerId.isNotEmpty ? customerId : null,
+            'name': name.isNotEmpty ? name : 'Customer',
+            'phone': phone,
+            'outstanding': pending,
+            'invoice_count': 1,
+          };
+        } else {
+          existing['outstanding'] =
+              (existing['outstanding'] as double) + pending;
+          existing['invoice_count'] =
+              (existing['invoice_count'] as int) + 1;
         }
       }
 
       final topOutstanding = outstandingByCustomer.values.toList()
-        ..sort((a, b) => (b['outstanding'] as double).compareTo(a['outstanding'] as double));
+        ..sort(
+          (a, b) =>
+              (b['outstanding'] as double)
+                  .compareTo(a['outstanding'] as double),
+        );
 
       if (!mounted) return;
+
       setState(() {
         _allInvoices = invoices;
-        _invoicedTotal = invoiced;
-        _paidTotal = paid;
-        _pendingTotal = (invoiced - paid).clamp(0.0, double.infinity).toDouble();
-        _paidCount = paidCount;
+        _invoicedTotal = creditTotal;
+        _paidTotal = collectedAgainstCredit;
+        _pendingTotal = invoices.fold<double>(
+          0.0,
+          (sum, inv) =>
+              sum +
+              ((inv['pending_amount'] as num?)?.toDouble() ?? 0.0),
+        );
+
+        // Paid invoices are intentionally not part of this Khata view.
+        _paidCount = 0;
         _partialCount = partialCount;
         _unpaidCount = unpaidCount;
         _topOutstandingCustomers = topOutstanding.take(5).toList();
         _invoicesLoading = false;
+
+        if (_invoiceStatusFilter == 'PAID') {
+          _invoiceStatusFilter = 'ALL';
+        }
       });
+
+      // Backend reconciliation is already performed by _loadKhata().
+      // Avoid recursively calling _loadInvoiceAnalytics() here.
     } catch (e) {
-      if (kDebugMode) debugPrint('Error loading invoice analytics: $e');
+      if (kDebugMode) {
+        debugPrint('Error loading invoice analytics: $e');
+      }
       if (mounted) setState(() => _invoicesLoading = false);
     }
   }
@@ -354,6 +535,10 @@ class _KhataPageState extends State<KhataPage> with SingleTickerProviderStateMix
       await _loadKhataLocalFallback();
       _applyFilter();
       if (mounted) setState(() {});
+      // Cloud restore persists canonical invoices separately. Reload invoice
+      // analytics after the restore so a fresh install/data-clear immediately
+      // repopulates Udhar/Invoice Analytics without requiring relogin.
+      await _loadInvoiceAnalytics();
     } catch (e) {
       if (kDebugMode) debugPrint('Khata background reconciliation skipped: $e');
     }
@@ -371,6 +556,13 @@ class _KhataPageState extends State<KhataPage> with SingleTickerProviderStateMix
 
     final today = DateTime.now();
     for (var c in unified) {
+      // Khata is customer-credit only: an invoice/customer must have a valid
+      // mobile number to appear in this screen.
+      final customerPhone = (c['phone'] ?? c['customer_phone'] ?? '').toString().trim();
+      if (!_isValidCustomerPhone(customerPhone)) {
+        continue;
+      }
+
       // FIX: loadUnifiedCustomersLedger() returns 'unified_balance' and
       // 'history', not 'balance' and 'invoices'. Reading the wrong keys
       // meant `bal` was always 0.0 here, so this tab silently showed zero
@@ -405,7 +597,7 @@ class _KhataPageState extends State<KhataPage> with SingleTickerProviderStateMix
         _customers.add({
           'customer_id': c['customer_id'] ?? c['phone'],
           'customer_name': c['name'] ?? 'Customer',
-          'customer_phone': c['phone'] ?? '',
+          'customer_phone': customerPhone,
           'total_balance': bal,
           'overdue_amount': overdue ? bal : 0.0,
           'is_overdue': overdue,
@@ -648,48 +840,224 @@ class _KhataPageState extends State<KhataPage> with SingleTickerProviderStateMix
                                   (customer['customer_phone'] ?? customer['phone'] ?? '')
                                       .toString()
                                       .trim();
-                              final rawCustomerId =
-                                  customer['customer_id'] ?? customer['id'];
-                              final customerId = int.tryParse(
-                                rawCustomerId?.toString().trim() ?? '',
-                              );
 
-                              // FastAPI expects customer_id to be an integer. Never
-                              // send an empty string (the old payload caused the
-                              // "unable to parse string as an integer" failure).
-                              if (customerPhone.isEmpty && (customerId == null || customerId <= 0)) {
-                                _showToast('Customer identity is missing. Payment was not recorded.');
+                              if (!_isValidCustomerPhone(customerPhone)) {
+                                _showToast(
+                                  'A valid customer phone number is required for Khata payment.',
+                                );
                                 setModalState(() => isSubmitting = false);
                                 return;
                               }
 
-                              final identity = customerId != null && customerId > 0
-                                  ? 'id:$customerId'
-                                  : 'phone:$customerPhone';
-                              final paymentPayload = <String, dynamic>{
-                                if (customerId != null && customerId > 0) 'customer_id': customerId,
-                                if (customerPhone.isNotEmpty) 'customer_phone': customerPhone,
-                                'amount': amt,
-                                'payment_method': selectedMethod,
-                                'notes': notesController.text.trim(),
-                                'payment_date': DateTime.now().toIso8601String(),
-                                'idempotency_key': '${identity}_$amt',
-                              };
+                              final paymentDate =
+                                  DateTime.now().toUtc().toIso8601String();
+
+                              // Build a stable invoice list from the customer's
+                              // canonical ledger history. Payments are allocated
+                              // oldest-first so each invoice gets a real persisted
+                              // paid_amount/status transition.
+                              final rawHistory =
+                                  customer['invoices'] ?? customer['history'] ?? [];
+                              final invoices = rawHistory
+                                  .whereType<Map>()
+                                  .map((e) => Map<String, dynamic>.from(e))
+                                  .where((inv) {
+                                    final total = double.tryParse(
+                                          (inv['total_amount'] ??
+                                                  inv['total'] ??
+                                                  inv['invoice_total'] ??
+                                                  0)
+                                              .toString(),
+                                        ) ??
+                                        0.0;
+                                    final paid = double.tryParse(
+                                          (inv['paid_amount'] ??
+                                                  inv['amount_paid'] ??
+                                                  inv['paid'] ??
+                                                  0)
+                                              .toString(),
+                                        ) ??
+                                        0.0;
+                                    return (total - paid) > 0.01;
+                                  })
+                                  .toList();
+
+                              invoices.sort((a, b) {
+                                DateTime dateOf(Map<String, dynamic> inv) =>
+                                    DateTime.tryParse(
+                                      (inv['due_date'] ??
+                                              inv['business_date'] ??
+                                              inv['invoice_date'] ??
+                                              inv['created_at'] ??
+                                              '')
+                                          .toString(),
+                                    ) ??
+                                    DateTime(9999);
+                                return dateOf(a).compareTo(dateOf(b));
+                              });
+
+                              double remaining = amt;
+                              int allocationCount = 0;
 
                               try {
-                                // OFFLINE-FIRST: record the payment locally first.
-                                // The cloud request is a backup/synchronization concern.
-                                await LocalStorageService.recordUnifiedPayment(
-                                  (customer['customer_phone'] ?? '').toString(),
-                                  amt,
-                                );
-                                await SyncQueueManager.enqueue('record_khata_payment', paymentPayload);
+                                for (final invoice in invoices) {
+                                  if (remaining <= 0.009) break;
+
+                                  final total = double.tryParse(
+                                        (invoice['total_amount'] ??
+                                                invoice['total'] ??
+                                                invoice['invoice_total'] ??
+                                                0)
+                                            .toString(),
+                                      ) ??
+                                      0.0;
+                                  final alreadyPaid = double.tryParse(
+                                        (invoice['paid_amount'] ??
+                                                invoice['amount_paid'] ??
+                                                invoice['paid'] ??
+                                                0)
+                                            .toString(),
+                                      ) ??
+                                      0.0;
+                                  final outstanding = (total - alreadyPaid)
+                                      .clamp(0.0, double.infinity)
+                                      .toDouble();
+
+                                  if (outstanding <= 0.01) continue;
+
+                                  final applied =
+                                      remaining < outstanding ? remaining : outstanding;
+
+                                  final invoiceId =
+                                      invoice['invoice_id']?.toString() ??
+                                      invoice['backend_id']?.toString() ??
+                                      invoice['id']?.toString();
+                                  final invoiceNumber =
+                                      invoice['invoice_number']?.toString() ??
+                                      invoice['sale_id']?.toString() ??
+                                      invoiceId ??
+                                      '';
+
+                                  final identity = invoiceId?.trim().isNotEmpty == true
+                                      ? invoiceId!.trim()
+                                      : invoiceNumber.trim();
+
+                                  if (identity.isEmpty) {
+                                    continue;
+                                  }
+
+                                  final idempotencyKey =
+                                      'khata_${identity}_${paymentDate}_${applied.toStringAsFixed(2)}';
+
+                                  // Immediately persist the invoice payment locally.
+                                  // The backend sync remains queued separately.
+                                  await LocalStorageService.recordUnifiedPayment(
+                                    customerPhone,
+                                    applied,
+                                    invoiceId: invoiceId,
+                                    invoiceNumber: invoiceNumber,
+                                    paymentMethod: selectedMethod,
+                                    paymentDate: paymentDate,
+                                    idempotencyKey: idempotencyKey,
+                                  );
+
+                                  await _persistLocalInvoicePayment(
+                                    customerPhone: customerPhone,
+                                    amount: applied,
+                                    expectedPaidAmount: alreadyPaid + applied,
+                                    invoiceId: invoiceId,
+                                    invoiceNumber: invoiceNumber,
+                                  );
+
+                                  final paymentPayload = <String, dynamic>{
+                                    if (invoiceId != null &&
+                                        int.tryParse(invoiceId.trim()) != null)
+                                      'invoice_id': int.parse(invoiceId.trim()),
+                                    'invoice_number': invoiceNumber,
+                                    if (customer['customer_id'] != null &&
+                                        int.tryParse(
+                                              customer['customer_id'].toString(),
+                                            ) !=
+                                            null)
+                                      'customer_id': int.parse(
+                                        customer['customer_id'].toString(),
+                                      ),
+                                    if (customerPhone.isNotEmpty)
+                                      'customer_phone': customerPhone,
+                                    'amount': applied,
+                                    'payment_method': selectedMethod,
+                                    'notes': notesController.text.trim(),
+                                    'payment_date': paymentDate,
+                                    'idempotency_key': idempotencyKey,
+                                  };
+
+                                  await SyncQueueManager.enqueue(
+                                    'record_khata_payment',
+                                    paymentPayload,
+                                  );
+
+                                  remaining -= applied;
+                                  allocationCount++;
+                                }
+
+                                // Preserve any legacy/customer-level amount that
+                                // cannot be tied to an invoice. This prevents money
+                                // from disappearing if an old record has no
+                                // canonical invoice identity.
+                                if (remaining > 0.009 && _isValidCustomerPhone(customerPhone)) {
+                                  await LocalStorageService.recordUnifiedPayment(
+                                    customerPhone,
+                                    remaining,
+                                    paymentMethod: selectedMethod,
+                                    paymentDate: paymentDate,
+                                    idempotencyKey:
+                                        'khata_customer_${customerPhone}_$paymentDate',
+                                  );
+
+                                  await SyncQueueManager.enqueue(
+                                    'record_khata_payment',
+                                    {
+                                      if (customer['customer_id'] != null &&
+                                          int.tryParse(
+                                                customer['customer_id'].toString(),
+                                              ) !=
+                                              null)
+                                        'customer_id': int.parse(
+                                          customer['customer_id'].toString(),
+                                        ),
+                                      if (customerPhone.isNotEmpty)
+                                        'customer_phone': customerPhone,
+                                      'amount': remaining,
+                                      'payment_method': selectedMethod,
+                                      'notes': notesController.text.trim(),
+                                      'payment_date': paymentDate,
+                                      'idempotency_key':
+                                          'khata_customer_${customerPhone}_$paymentDate',
+                                    },
+                                  );
+
+                                  remaining = 0;
+                                  allocationCount++;
+                                }
+
+                                if (allocationCount == 0) {
+                                  throw StateError(
+                                    'No payable invoice was found for this customer.',
+                                  );
+                                }
+
                                 if (ctx.mounted) Navigator.pop(ctx);
-                                _showToast('✅ Payment of ₹$amt recorded locally and queued for cloud sync.');
+                                _showToast(
+                                  '✅ Payment of ₹${amt.toStringAsFixed(2)} recorded and queued. Pending invoices will update automatically.',
+                                );
+
                                 await _loadKhata();
+                                await _loadInvoiceAnalytics();
                                 unawaited(SyncService.processQueueSafe());
                               } catch (e) {
-                                _showToast('❌ Payment could not be saved locally: $e');
+                                _showToast(
+                                  '❌ Payment could not be saved locally: $e',
+                                );
                               } finally {
                                 if (ctx.mounted) setModalState(() => isSubmitting = false);
                               }
@@ -770,6 +1138,22 @@ class _KhataPageState extends State<KhataPage> with SingleTickerProviderStateMix
         elevation: 0,
         iconTheme: const IconThemeData(color: Color(0xFF0F172A)),
         actions: [
+          IconButton(
+            icon: const Icon(Icons.verified_rounded, color: _success),
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => const PaidInvoicesPage(),
+                ),
+              ).then((_) {
+                if (!mounted) return;
+                _loadKhata();
+                _loadInvoiceAnalytics();
+              });
+            },
+            tooltip: 'Paid Invoices',
+          ),
           IconButton(
             icon: const Icon(Icons.refresh_rounded),
             onPressed: () {
@@ -1178,7 +1562,7 @@ class _KhataPageState extends State<KhataPage> with SingleTickerProviderStateMix
             const SizedBox(height: 20),
             _buildTopOutstandingCustomers(),
             const SizedBox(height: 20),
-            Text('All Invoices', style: GoogleFonts.inter(fontSize: 15, fontWeight: FontWeight.bold, color: const Color(0xFF0F172A))),
+            Text('Pending Credit Invoices', style: GoogleFonts.inter(fontSize: 15, fontWeight: FontWeight.bold, color: const Color(0xFF0F172A))),
             const SizedBox(height: 10),
             _buildInvoiceSearchAndSort(),
             const SizedBox(height: 10),
@@ -1413,7 +1797,7 @@ class _KhataPageState extends State<KhataPage> with SingleTickerProviderStateMix
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text('Payment Status Breakdown', style: GoogleFonts.inter(fontSize: 14, fontWeight: FontWeight.bold, color: const Color(0xFF0F172A))),
+          Text('Outstanding Credit Status', style: GoogleFonts.inter(fontSize: 14, fontWeight: FontWeight.bold, color: const Color(0xFF0F172A))),
           const SizedBox(height: 16),
           if (total == 0)
             Padding(
@@ -1501,8 +1885,6 @@ class _KhataPageState extends State<KhataPage> with SingleTickerProviderStateMix
       child: Row(
         children: [
           _buildInvoiceChip('ALL', 'All (${_allInvoices.length})'),
-          const SizedBox(width: 8),
-          _buildInvoiceChip('PAID', 'Paid ($_paidCount)', color: _success),
           const SizedBox(width: 8),
           _buildInvoiceChip('PARTIAL', 'Partial ($_partialCount)', color: _warning),
           const SizedBox(width: 8),

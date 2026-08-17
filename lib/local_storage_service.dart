@@ -902,89 +902,325 @@ class LocalStorageService {
 
   
   // =========== UNIFIED LEDGER ===========
-  // Customer identity is keyed by stable customer_id when present and only
-  // falls back to normalized phone when an ID is unavailable.
+  // Canonical invoice ledger:
+  //   * local manual/borrow invoices are authoritative when present
+  //   * cloud-restored sales are promoted to invoice records when no invoice
+  //     mirror exists (critical after app-data clearing)
+  //   * one stable invoice identity is used to prevent double-counting
+  //   * customer balances are derived from invoice outstanding amounts only
   static Future<List<Map<String, dynamic>>> loadUnifiedCustomersLedger() async {
     final sales = await loadSales();
     final invoices = await loadLocalInvoices();
     final customers = await loadLocalCustomers();
     final khataBalances = await loadKhataBalances();
 
+    String invoiceKey(Map<String, dynamic> row) {
+      for (final field in const [
+        'invoice_id',
+        'sale_id',
+        'invoice_number',
+        'invoiceId',
+        'backend_id',
+        'id',
+      ]) {
+        final value = row[field]?.toString().trim().toLowerCase() ?? '';
+        if (value.isNotEmpty && value != 'null' && value != '0') {
+          return value;
+        }
+      }
+      final date =
+          (row['business_date'] ??
+                  row['invoice_date'] ??
+                  row['sale_date'] ??
+                  row['date'] ??
+                  row['created_at'] ??
+                  '')
+              .toString();
+      final phone =
+          (row['customer_phone'] ?? row['phone'] ?? '').toString().trim();
+      final total = double.tryParse(
+            (row['total_amount'] ?? row['total'] ?? 0).toString(),
+          ) ??
+          0.0;
+      return 'fallback|$date|$phone|${total.toStringAsFixed(2)}';
+    }
+
+    double amount(dynamic value) {
+      if (value is num) return value.toDouble();
+      return double.tryParse(value?.toString() ?? '') ?? 0.0;
+    }
+
+    // Build one canonical invoice map. A real invoice record wins over a
+    // flattened sale copy because it contains the authoritative payment state.
+    final Map<String, Map<String, dynamic>> canonical = {};
+
+    void mergeInvoice(
+      dynamic raw, {
+      bool prefer = false,
+    }) {
+      if (raw is! Map) return;
+      final row = Map<String, dynamic>.from(raw);
+      final key = invoiceKey(row);
+      if (key.isEmpty) return;
+
+      final existing = canonical[key];
+      if (existing == null) {
+        canonical[key] = row;
+        return;
+      }
+
+      final existingUpdated = DateTime.tryParse(
+            existing['updated_at']?.toString() ??
+                existing['last_updated']?.toString() ??
+                existing['created_at']?.toString() ??
+                '',
+          ) ??
+          DateTime(1970);
+      final incomingUpdated = DateTime.tryParse(
+            row['updated_at']?.toString() ??
+                row['last_updated']?.toString() ??
+                row['created_at']?.toString() ??
+                '',
+          ) ??
+          DateTime(1970);
+
+      if (prefer || incomingUpdated.isAfter(existingUpdated)) {
+        canonical[key] = {...existing, ...row};
+      } else {
+        canonical[key] = {
+          ...row,
+          ...existing,
+          if ((existing['customer_name'] ?? '').toString().trim().isEmpty &&
+              (row['customer_name'] ?? '').toString().trim().isNotEmpty)
+            'customer_name': row['customer_name'],
+          if ((existing['customer_phone'] ?? '').toString().trim().isEmpty &&
+              (row['customer_phone'] ?? '').toString().trim().isNotEmpty)
+            'customer_phone': row['customer_phone'],
+          if ((existing['payment_method'] ?? '').toString().trim().isEmpty &&
+              (row['payment_method'] ?? '').toString().trim().isNotEmpty)
+            'payment_method': row['payment_method'],
+        };
+      }
+    }
+
+    // Existing invoice mirrors are authoritative.
+    for (final invoice in invoices) {
+      mergeInvoice(invoice, prefer: true);
+    }
+
+    // Promote any cloud-restored/legacy sales that do not already have an
+    // invoice mirror. This is the key recovery path after app-data clearing.
+    for (final rawSale in sales) {
+      if (rawSale is! Map) continue;
+      final sale = Map<String, dynamic>.from(rawSale);
+      final key = invoiceKey(sale);
+      if (canonical.containsKey(key)) continue;
+
+      final rawItems = sale['line_items'] ?? sale['items'];
+      List<dynamic> lineItems = const [];
+      if (rawItems is List && rawItems.isNotEmpty) {
+        lineItems = rawItems;
+      } else if ((sale['product_name'] ?? sale['product'] ?? '').toString().trim().isNotEmpty) {
+        final p = amount(sale['price']);
+        final q = amount(sale['quantity'] ?? sale['qty']);
+        lineItems = [
+          {
+            'product_name':
+                (sale['product_name'] ?? sale['product']).toString(),
+            'price': p,
+            'quantity': q > 0 ? q : 1,
+            'qty': q > 0 ? q : 1,
+            'total': amount(sale['total']) > 0
+                ? amount(sale['total'])
+                : p * (q > 0 ? q : 1),
+          }
+        ];
+      }
+
+      final total = amount(
+        sale['total_amount'] ??
+            sale['total'] ??
+            sale['invoice_total'] ??
+            sale['grand_total'] ??
+            sale['final_amount'],
+      );
+      final paid = amount(
+        sale['paid_amount'] ??
+            sale['amount_paid'] ??
+            sale['paid'] ??
+            (sale['payment_status']?.toString().toUpperCase() == 'PAID'
+                ? total
+                : 0),
+      ).clamp(0.0, total);
+
+      canonical[key] = {
+        ...sale,
+        'invoice_number': sale['invoice_number'] ??
+            sale['sale_id'] ??
+            sale['invoice_id'] ??
+            sale['id'],
+        'sale_id': sale['sale_id'] ??
+            sale['invoice_number'] ??
+            sale['invoice_id'] ??
+            sale['id'],
+        'customer_name':
+            sale['customer_name'] ?? sale['name'] ?? 'Cash Customer',
+        'customer_phone':
+            sale['customer_phone'] ?? sale['phone'] ?? '',
+        'total_amount': total,
+        'paid_amount': paid,
+        'payment_status': sale['payment_status'] ??
+            _deriveInvoiceStatus(total, paid),
+        'line_items': lineItems,
+        'items': lineItems,
+        'is_recovered_from_sale': true,
+      };
+    }
+
+    // Persist promoted records so the recovered invoices survive a restart and
+    // do not depend on the in-memory ledger being rebuilt again.
+    final recovered = canonical.values
+        .where((row) => row['is_recovered_from_sale'] == true)
+        .toList();
+    if (recovered.isNotEmpty) {
+      try {
+        await saveLocalInvoices(recovered);
+      } catch (_) {
+        // Ledger remains usable even if a legacy record cannot be persisted.
+      }
+    }
+
     final Map<String, Map<String, dynamic>> unified = {};
-    String keyFor({dynamic customerId, dynamic phone}) {
+
+    String customerKey({
+      dynamic customerId,
+      dynamic phone,
+    }) {
       final id = customerId?.toString().trim() ?? '';
-      if (id.isNotEmpty && id != '0' && id.toLowerCase() != 'null') return 'id:$id';
-      final p = phone?.toString().trim() ?? '';
-      if (p.isNotEmpty) return 'phone:$p';
+      if (id.isNotEmpty && id != '0' && id.toLowerCase() != 'null') {
+        return 'id:$id';
+      }
+      final normalizedPhone = phone?.toString().trim() ?? '';
+      if (normalizedPhone.isNotEmpty) {
+        return 'phone:$normalizedPhone';
+      }
       return '';
     }
 
-    Map<String, dynamic> ensure({dynamic customerId, dynamic phone, dynamic name}) {
-      final key = keyFor(customerId: customerId, phone: phone);
+    Map<String, dynamic> ensureCustomer({
+      dynamic customerId,
+      dynamic phone,
+      dynamic name,
+    }) {
+      final key = customerKey(customerId: customerId, phone: phone);
       if (key.isEmpty) return {};
-      return unified.putIfAbsent(key, () => {
-        'customer_id': customerId,
-        'phone': phone?.toString() ?? '',
-        'name': (name?.toString().trim().isNotEmpty ?? false) ? name : 'Customer',
-        'unified_balance': 0.0,
-        'last_transaction': DateTime.now().toIso8601String(),
-        'history': <dynamic>[],
-      });
+
+      return unified.putIfAbsent(
+        key,
+        () => {
+          'customer_id': customerId,
+          'phone': phone?.toString() ?? '',
+          'name': (name?.toString().trim().isNotEmpty ?? false)
+              ? name.toString()
+              : 'Customer',
+          'unified_balance': 0.0,
+          'last_transaction': DateTime(1970).toIso8601String(),
+          'history': <dynamic>[],
+        },
+      );
     }
 
+    // Customer directory entries should exist even before they have a pending
+    // balance.
     for (final c in customers) {
-      ensure(customerId: c['id'] ?? c['customer_id'], phone: c['phone'], name: c['name'] ?? c['customer_name']);
+      if (c is! Map) continue;
+      ensureCustomer(
+        customerId: c['id'] ?? c['customer_id'],
+        phone: c['phone'] ?? c['customer_phone'],
+        name: c['name'] ?? c['customer_name'],
+      );
     }
 
-    for (final sale in sales) {
-      final row = Map<String, dynamic>.from(sale as Map);
-      final entry = ensure(
-        customerId: row['customer_id'],
-        phone: row['customer_phone'] ?? row['phone'],
-        name: row['customer_name'] ?? row['name'],
+    // Build balances strictly from canonical invoice records. Fully-paid
+    // invoices stay in history but contribute zero outstanding amount.
+    for (final row in canonical.values) {
+      final customerPhone =
+          (row['customer_phone'] ?? row['phone'] ?? '').toString().trim();
+      final customerId = row['customer_id'] ?? row['customerId'];
+      final customerName =
+          (row['customer_name'] ?? row['name'] ?? 'Cash Customer').toString();
+
+      final entry = ensureCustomer(
+        customerId: customerId,
+        phone: customerPhone,
+        name: customerName,
       );
       if (entry.isEmpty) continue;
-      final history = entry['history'] as List<dynamic>;
-      history.add(row);
-      entry['last_transaction'] = row['business_date'] ?? row['sale_date'] ?? row['date'] ?? entry['last_transaction'];
-      if ((entry['name'] ?? 'Customer') == 'Customer' && row['customer_name'] != null) {
-        entry['name'] = row['customer_name'];
-      }
-    }
 
-    for (final inv in invoices) {
-      final row = Map<String, dynamic>.from(inv as Map);
-      final entry = ensure(
-        customerId: row['customer_id'],
-        phone: row['customer_phone'] ?? row['phone'],
-        name: row['customer_name'] ?? row['name'],
+      final total = amount(
+        row['total_amount'] ??
+            row['total'] ??
+            row['amount'] ??
+            row['invoice_total'] ??
+            row['grand_total'],
       );
-      if (entry.isEmpty) continue;
-      final history = entry['history'] as List<dynamic>;
-      history.add(row);
-      entry['last_transaction'] = row['invoice_date'] ?? row['date'] ?? entry['last_transaction'];
-
-      final total = double.tryParse((row['total_amount'] ?? row['total'] ?? 0).toString()) ?? 0.0;
-      final paid = double.tryParse((row['paid_amount'] ?? 0).toString()) ?? 0.0;
+      final paid = amount(
+        row['paid_amount'] ??
+            row['amount_paid'] ??
+            row['paid'] ??
+            row['received_amount'],
+      ).clamp(0.0, total);
       final outstanding = (total - paid).clamp(0.0, double.infinity);
-      if (outstanding > 0.0) {
-        entry['unified_balance'] = (entry['unified_balance'] as double) + outstanding;
+
+      final normalized = {
+        ...row,
+        'total_amount': total,
+        'paid_amount': paid,
+        'pending_amount': outstanding,
+        'payment_status': _deriveInvoiceStatus(total, paid),
+        'invoice_number': row['invoice_number'] ??
+            row['sale_id'] ??
+            row['invoice_id'] ??
+            row['id'],
+        'customer_name': customerName,
+        'customer_phone': customerPhone,
+      };
+
+      (entry['history'] as List<dynamic>).add(normalized);
+      final transactionDate =
+          row['business_date'] ??
+          row['invoice_date'] ??
+          row['sale_date'] ??
+          row['date'] ??
+          row['created_at'];
+      if (transactionDate != null) {
+        entry['last_transaction'] = transactionDate.toString();
+      }
+      if (outstanding > 0.01) {
+        entry['unified_balance'] =
+            (entry['unified_balance'] as double) + outstanding;
       }
     }
 
-    // Manual Khata adjustments/payments remain additive on top of invoices.
+    // Legacy manual Khata adjustments are additive for records that have not
+    // been attached to a canonical invoice yet.
     for (final pair in khataBalances.entries) {
-      final key = keyFor(phone: pair.key);
+      final key = customerKey(phone: pair.key);
       if (key.isEmpty) continue;
-      final entry = unified.putIfAbsent(key, () => {
-        'customer_id': null,
-        'phone': pair.key,
-        'name': 'Customer',
-        'unified_balance': 0.0,
-        'last_transaction': DateTime.now().toIso8601String(),
-        'history': <dynamic>[],
-      });
-      entry['unified_balance'] = (entry['unified_balance'] as double) + pair.value;
+
+      final entry = unified.putIfAbsent(
+        key,
+        () => {
+          'customer_id': null,
+          'phone': pair.key,
+          'name': 'Customer',
+          'unified_balance': 0.0,
+          'last_transaction': DateTime.now().toIso8601String(),
+          'history': <dynamic>[],
+        },
+      );
+      entry['unified_balance'] =
+          (entry['unified_balance'] as double) + pair.value;
     }
 
     return unified.values.toList();
@@ -996,13 +1232,103 @@ class LocalStorageService {
     return 'UNPAID';
   }
 
-  static Future<void> recordUnifiedPayment(String customerPhone, double amount) async {
+  static Future<void> recordUnifiedPayment(
+    String customerPhone,
+    double amount, {
+    String? invoiceId,
+    String? invoiceNumber,
+    String paymentMethod = 'CASH',
+    String? paymentDate,
+    String? idempotencyKey,
+  }) async {
+    if (amount <= 0) {
+      throw ArgumentError.value(amount, 'amount', 'Payment must be greater than zero');
+    }
+
+    final invoices = await loadLocalInvoices();
+
+    // Prefer exact invoice settlement. This makes "Mark Paid" an actual
+    // payment-state change instead of simply hiding the customer from the UI.
+    if (invoiceId != null && invoiceId.trim().isNotEmpty ||
+        invoiceNumber != null && invoiceNumber.trim().isNotEmpty) {
+      final target = (invoiceId ?? invoiceNumber)!.trim().toLowerCase();
+      int index = invoices.indexWhere((raw) {
+        if (raw is! Map) return false;
+        final row = Map<String, dynamic>.from(raw);
+        final ids = [
+          row['invoice_id'],
+          row['sale_id'],
+          row['invoice_number'],
+          row['invoiceId'],
+          row['backend_id'],
+          row['id'],
+        ];
+        return ids.any(
+          (v) => v?.toString().trim().toLowerCase() == target,
+        );
+      });
+
+      // Also match invoice number separately when invoiceId is numeric.
+      if (index < 0 && invoiceNumber != null) {
+        final number = invoiceNumber.trim().toLowerCase();
+        index = invoices.indexWhere(
+          (raw) =>
+              raw is Map &&
+              raw['invoice_number']?.toString().trim().toLowerCase() ==
+                  number,
+        );
+      }
+
+      if (index >= 0) {
+        final row = Map<String, dynamic>.from(invoices[index]);
+        final total = double.tryParse(
+              (row['total_amount'] ??
+                      row['total'] ??
+                      row['invoice_total'] ??
+                      row['grand_total'] ??
+                      0)
+                  .toString(),
+            ) ??
+            0.0;
+        final currentPaid = double.tryParse(
+              (row['paid_amount'] ??
+                      row['amount_paid'] ??
+                      row['paid'] ??
+                      row['received_amount'] ??
+                      0)
+                  .toString(),
+            ) ??
+            0.0;
+
+        final newPaid =
+            (currentPaid + amount).clamp(0.0, total).toDouble();
+        final outstanding =
+            (total - newPaid).clamp(0.0, double.infinity).toDouble();
+
+        row['paid_amount'] = newPaid;
+        row['payment_status'] = _deriveInvoiceStatus(total, newPaid);
+        row['status'] = row['payment_status'];
+        row['pending_amount'] = outstanding;
+        row['last_payment_amount'] = amount;
+        row['last_payment_method'] = paymentMethod;
+        row['payment_method'] = paymentMethod;
+        row['paid_at'] = paymentDate ?? DateTime.now().toUtc().toIso8601String();
+        row['payment_date'] = paymentDate ?? DateTime.now().toUtc().toIso8601String();
+        if (idempotencyKey != null && idempotencyKey.isNotEmpty) {
+          row['last_payment_idempotency_key'] = idempotencyKey;
+        }
+        row['updated_at'] = DateTime.now().toUtc().toIso8601String();
+
+        invoices[index] = row;
+        await saveLocalInvoices(invoices);
+        return;
+      }
+    }
+
+    // Legacy/manual customer-level Khata balance. Keep this only for old
+    // records that are not attached to a specific invoice yet.
     final balances = await loadKhataBalances();
     final current = balances[customerPhone] ?? 0.0;
-
-    // Instead of just reducing khata, we also check unpaid invoices if needed, but for simplicity:
-    // Allow khataBalance to go negative if they overpay or pay off an invoice via Khata.
-    // That way, unified_balance = khataBalance (negative) + unpaid_invoices (positive) = 0.
     balances[customerPhone] = current - amount;
     await saveKhataBalances(balances);
   }

@@ -3,45 +3,30 @@ import 'format_helper.dart';
 import 'financial_math.dart';
 
 class AnalyticsEngine {
-  // ── Helper: Format product name for display (Standard Title Case) ──────────────
-  static String formatProductName(String raw) {
-    if (raw.isEmpty) return 'Unknown';
-    String name = raw.toString().trim();
-    
-    return name.split(' ').map((word) {
-      if (word.isEmpty) return '';
-      return word[0].toUpperCase() + word.substring(1).toLowerCase();
-    }).join(' ');
-  }
-
-  /// Returns true when a product name is only an internal/fallback label.
-  bool isPlaceholderProductName(String? raw) {
-    final name = (raw ?? '').trim();
-    if (name.isEmpty) return true;
-    final normalized = name.toLowerCase();
-
+  // ── Helper: Format product name / fallback guard ──────────────
+  static bool isPlaceholderProductName(String raw) {
+    final value = raw.trim().toLowerCase();
+    if (value.isEmpty) return true;
     const generic = {
-      'product',
-      'unknown',
-      'item',
-      'guest',
-      'guest product',
-      'cash product',
-      'n/a',
-      '-',
-      '—',
+      'product', 'unknown', 'unknown item', 'cloud item', 'item', 'invoice',
+      'guest', 'guest product', 'cash product', 'n/a', '-', '—',
     };
-    if (generic.contains(normalized)) return true;
-
-    if (RegExp(r'^sale[_-]', caseSensitive: false).hasMatch(normalized)) {
-      return true;
-    }
-    if (RegExp(r'^(invoice|order|transaction)[_-]', caseSensitive: false)
-        .hasMatch(normalized)) {
-      return true;
-    }
+    if (generic.contains(value)) return true;
+    if (RegExp(r'^sale[_ -]?\d+', caseSensitive: false).hasMatch(value)) return true;
+    if (RegExp(r'^(invoice|order|transaction)[_-]\d+', caseSensitive: false).hasMatch(value)) return true;
     return false;
   }
+
+  static String formatProductName(String raw) {
+    final value = raw.trim();
+    if (isPlaceholderProductName(value)) return 'Unknown';
+    return value.split(RegExp(r'\s+')).map((word) =>
+      word.isEmpty ? '' : word[0].toUpperCase() + word.substring(1).toLowerCase()
+    ).join(' ');
+  }
+
+  // Backward-compatible instance helper for older widgets/services.
+  bool isPlaceholderProductNameLegacy(String? raw) => isPlaceholderProductName(raw ?? '');
 
   List<dynamic> sales = [];
   int selectedTimeFilter = 0;
@@ -118,12 +103,23 @@ class AnalyticsEngine {
 
   /// Cash/UPI/etc. actually collected for the current filter.
   double get displayCollected {
-    return filteredSalesCache.fold(0.0, (sum, t) => sum + _toDouble(t['collected_revenue']));
+    return filteredSalesCache.fold(0.0, (sum, t) {
+      final collected = _toDouble(t['collected_revenue']);
+      if (collected > 0) return sum + collected;
+      final total = _toDouble(t['gross_revenue'] ?? t['total_amount'] ?? t['total']);
+      return sum + _toDouble(t['paid_amount']).clamp(0.0, total).toDouble();
+    });
   }
 
   /// Outstanding amount for the current filter.
   double get displayOutstanding {
-    return filteredSalesCache.fold(0.0, (sum, t) => sum + _toDouble(t['outstanding_amount']));
+    return filteredSalesCache.fold(0.0, (sum, t) {
+      final outstanding = _toDouble(t['outstanding_amount']);
+      if (outstanding > 0) return sum + outstanding;
+      final total = _toDouble(t['gross_revenue'] ?? t['total_amount'] ?? t['total']);
+      final paid = _toDouble(t['paid_amount']);
+      return sum + (total - paid).clamp(0.0, double.infinity).toDouble();
+    });
   }
 
   List<Map<String, dynamic>> recentSales = [];
@@ -133,7 +129,14 @@ class AnalyticsEngine {
   /// Parse sale date with multiple format support and force Indian Time (IST)
   DateTime getLocalDate(Map<String, dynamic> sale) {
     try {
-      final str = (sale['business_date'] ?? sale['sale_date'] ?? sale['invoice_date'] ?? sale['date'] ?? '').toString().trim();
+      String str = (sale['business_date'] ?? '').toString().trim();
+      final hasTime = str.contains('T') || RegExp(r'\d{2}:\d{2}').hasMatch(str);
+      if (str.isEmpty || !hasTime) {
+        for (final field in const ['created_at', 'createdAt', 'sale_timestamp', 'invoice_timestamp', 'timestamp', 'sale_date', 'invoice_date', 'date']) {
+          final candidate = (sale[field] ?? '').toString().trim();
+          if (candidate.isNotEmpty) { str = candidate; if (candidate.contains('T') || RegExp(r'\d{2}:\d{2}').hasMatch(candidate)) break; }
+        }
+      }
       if (str.isEmpty) return DateTime(1970);
       
       if (kDebugMode) debugPrint('🔍 Date parsing: "$str", is_local: ${sale['is_local']}, available fields: ${sale.keys.join(', ')}');

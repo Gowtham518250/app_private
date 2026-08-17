@@ -23,11 +23,15 @@ class SaleService {
   /// up to 49 paise would be marked PAID. 0.01 (1 paisa) is enough to absorb
   /// real floating-point rounding noise without masking a real balance due.
   static String paymentStatusFor(double paidAmount, double grandTotal) {
-    const tolerance = 0.01;
-    if (paidAmount >= grandTotal - tolerance) return 'PAID';
-    if (paidAmount > 0) return 'PARTIAL';
+    // Compare money at paise precision so floating-point noise cannot
+    // incorrectly turn a genuinely unpaid balance into PAID.
+    final paidPaise = (paidAmount * 100).round();
+    final totalPaise = (grandTotal * 100).round();
+
+    if (paidPaise >= totalPaise) return 'PAID';
+    if (paidPaise > 0) return 'PARTIAL';
     return 'UNPAID';
-  }
+}
 
   static Future<Map<String, dynamic>> submitSale({
     required String saleId,
