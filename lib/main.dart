@@ -1382,6 +1382,135 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
   }
 }
 
+
+class _IdentityVerificationGate extends StatefulWidget {
+  const _IdentityVerificationGate();
+
+  @override
+  State<_IdentityVerificationGate> createState() =>
+      _IdentityVerificationGateState();
+}
+
+class _IdentityVerificationGateState
+    extends State<_IdentityVerificationGate> {
+  String? _email;
+  String? _error;
+  bool _loading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadOwnerEmail();
+  }
+
+  Future<void> _loadOwnerEmail() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+
+      // Prefer a locally persisted authenticated email. Support the common
+      // keys already used by different login implementations.
+      String? email = prefs.getString('user_email') ??
+          prefs.getString('email') ??
+          prefs.getString('owner_email');
+
+      // If the local profile doesn't contain email, recover it from the
+      // authenticated shop profile without blocking the rest of startup.
+      if ((email ?? '').trim().isEmpty) {
+        try {
+          final token = await SecureTokenStorage.getToken();
+          final response = await ApiClient.getJson(
+            '/api/shop/profile',
+            headers: (token ?? '').isNotEmpty
+                ? {'Authorization': 'Bearer $token'}
+                : null,
+          ).timeout(const Duration(seconds: 8));
+
+          if (response.statusCode == 200) {
+            final decoded = jsonDecode(response.body);
+            if (decoded is Map) {
+              email = (decoded['email'] ??
+                      decoded['owner_email'] ??
+                      decoded['shopkeeper_email'])
+                  ?.toString();
+            }
+          }
+        } catch (_) {
+          // Offline startup: keep local values if available.
+        }
+      }
+
+      final normalized = (email ?? '').trim();
+
+      if (!mounted) return;
+
+      if (normalized.isEmpty) {
+        setState(() {
+          _loading = false;
+          _error =
+              'Owner email is missing. Please log in again to verify your identity.';
+        });
+        return;
+      }
+
+      await prefs.setString('user_email', normalized);
+
+      setState(() {
+        _email = normalized;
+        _loading = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _error = 'Unable to load owner verification details.';
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_loading) {
+      return const Scaffold(
+        body: Center(child: CircularProgressIndicator()),
+      );
+    }
+
+    if ((_email ?? '').isEmpty) {
+      return Scaffold(
+        body: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(24),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(Icons.verified_user_outlined, size: 52),
+                const SizedBox(height: 16),
+                Text(
+                  _error ?? 'Owner verification is unavailable.',
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 20),
+                FilledButton(
+                  onPressed: () {
+                    Navigator.pushNamedAndRemoveUntil(
+                      context,
+                      '/login',
+                      (_) => false,
+                    );
+                  },
+                  child: const Text('Login Again'),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+
+    return RoleSelectionPage(email: _email!);
+  }
+}
+
 // Custom Painters for visual effects
 
 class Particle {

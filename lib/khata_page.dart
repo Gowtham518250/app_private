@@ -54,6 +54,7 @@ class _KhataPageState extends State<KhataPage> with SingleTickerProviderStateMix
   // ── Invoice Analytics Tab State ──
   late final TabController _tabController;
   bool _invoicesLoading = true;
+  bool _invoiceLoadInProgress = false;
   List<Map<String, dynamic>> _allInvoices = [];
   String _invoiceStatusFilter = 'ALL'; // ALL, PAID, PARTIAL, UNPAID
   double _invoicedTotal = 0.0;
@@ -102,59 +103,125 @@ class _KhataPageState extends State<KhataPage> with SingleTickerProviderStateMix
   }
 
   /// Canonicalize local invoices + sales so one business transaction is counted once.
+  /// A business invoice may exist in local invoice storage, sales history and
+  /// a restored backend record with different identifier fields. Merge those
+  /// representations before calculating totals or rendering cards.
   Map<String, Map<String, dynamic>> _canonicalInvoiceMap(
     List<dynamic> invoices,
     List<dynamic> sales,
   ) {
-    final map = <String, Map<String, dynamic>>{};
+    final canonical = <String, Map<String, dynamic>>{};
+    final aliasToCanonical = <String, String>{};
+    int sequence = 0;
 
-    String key(Map<String, dynamic> row) {
-      for (final field in const ['offline_id', 'sale_id', 'invoice_number', 'invoice_id', 'backend_id', 'id']) {
+    List<String> aliases(Map<String, dynamic> row) {
+      final values = <String>[];
+      for (final field in const [
+        'invoice_number',
+        'number',
+        'sale_id',
+        'offline_id',
+        'invoice_id',
+        'backend_id',
+        'id',
+      ]) {
         final value = row[field]?.toString().trim().toLowerCase() ?? '';
-        if (value.isNotEmpty && value != 'null' && value != '0') return value;
+        if (value.isNotEmpty && value != 'null' && value != '0') {
+          values.add('$field:$value');
+        }
       }
-      final date = (row['business_date'] ?? row['invoice_date'] ?? row['sale_date'] ?? row['date'] ?? '').toString();
-      final phone = (row['customer_phone'] ?? row['phone'] ?? '').toString().trim();
-      final total = double.tryParse((row['total_amount'] ?? row['total'] ?? 0).toString()) ?? 0.0;
+      return values;
+    }
+
+    String fallbackKey(Map<String, dynamic> row) {
+      final date = (row['business_date'] ??
+              row['invoice_date'] ??
+              row['sale_date'] ??
+              row['date'] ??
+              row['created_at'] ??
+              '')
+          .toString();
+      final phone =
+          (row['customer_phone'] ?? row['phone'] ?? '').toString().trim();
+      final total = double.tryParse(
+            (row['total_amount'] ?? row['total'] ?? 0).toString(),
+          ) ??
+          0.0;
       return 'fallback|$date|$phone|${total.toStringAsFixed(2)}';
     }
 
     void add(dynamic raw, {bool prefer = false}) {
       if (raw is! Map) return;
+
       final row = Map<String, dynamic>.from(raw);
-      final k = key(row);
-      final existing = map[k];
-      if (existing == null) {
-        map[k] = row;
-        return;
+      final rowAliases = aliases(row);
+
+      String? existingKey;
+      for (final alias in rowAliases) {
+        final mapped = aliasToCanonical[alias];
+        if (mapped != null) {
+          existingKey = mapped;
+          break;
+        }
       }
-      final existingUpdated = DateTime.tryParse(existing['updated_at']?.toString() ?? '');
-      final incomingUpdated = DateTime.tryParse(row['updated_at']?.toString() ?? '');
-      final newer = incomingUpdated != null && (existingUpdated == null || incomingUpdated.isAfter(existingUpdated));
-      if (newer || prefer) {
-        map[k] = {...existing, ...row};
+
+      final key = existingKey ??
+          (rowAliases.isNotEmpty ? rowAliases.first : fallbackKey(row));
+
+      if (existingKey == null) {
+        canonical[key] = row;
       } else {
-        // Preserve richer customer/payment fields from the other copy.
-        map[k] = {
-          ...row,
-          ...existing,
-          if ((existing['customer_phone'] ?? '').toString().trim().isEmpty && (row['customer_phone'] ?? '').toString().trim().isNotEmpty)
-            'customer_phone': row['customer_phone'],
-          if ((existing['customer_name'] ?? '').toString().trim().isEmpty ||
-              const ['Guest Customer', 'Cash Customer'].contains(existing['customer_name']))
-            if ((row['customer_name'] ?? '').toString().trim().isNotEmpty &&
-                !const ['Guest Customer', 'Cash Customer'].contains(row['customer_name']))
-              'customer_name': row['customer_name'],
-        };
+        final existing = canonical[key]!;
+        final existingUpdated =
+            DateTime.tryParse(existing['updated_at']?.toString() ?? '');
+        final incomingUpdated =
+            DateTime.tryParse(row['updated_at']?.toString() ?? '');
+        final incomingNewer = incomingUpdated != null &&
+            (existingUpdated == null ||
+                incomingUpdated.isAfter(existingUpdated));
+
+        if (incomingNewer || prefer) {
+          canonical[key] = {
+            ...existing,
+            ...row,
+          };
+        } else {
+          canonical[key] = {
+            ...row,
+            ...existing,
+            if ((existing['customer_phone'] ?? '').toString().trim().isEmpty &&
+                (row['customer_phone'] ?? '').toString().trim().isNotEmpty)
+              'customer_phone': row['customer_phone'],
+            if ((existing['customer_name'] ?? '').toString().trim().isEmpty ||
+                const ['Guest Customer', 'Cash Customer']
+                    .contains(existing['customer_name']))
+              if ((row['customer_name'] ?? '').toString().trim().isNotEmpty &&
+                  !const ['Guest Customer', 'Cash Customer']
+                      .contains(row['customer_name']))
+                'customer_name': row['customer_name'],
+          };
+        }
+      }
+
+      for (final alias in rowAliases) {
+        aliasToCanonical[alias] = key;
+      }
+
+      if (rowAliases.isEmpty) {
+        aliasToCanonical['generated:$sequence'] = key;
+        sequence++;
       }
     }
 
-    // Real invoice records are preferred over flattened legacy sales.
-    for (final inv in invoices) add(inv, prefer: true);
-    for (final sale in sales) add(sale);
-    return map;
-  }
+    for (final inv in invoices) {
+      add(inv, prefer: true);
+    }
+    for (final sale in sales) {
+      add(sale);
+    }
 
+    return canonical;
+  }
 
   /// Khata only accepts real customer phone numbers.
   /// Indian mobile format: 10 digits beginning with 6-9, optionally prefixed by 91/+91.
@@ -266,7 +333,9 @@ class _KhataPageState extends State<KhataPage> with SingleTickerProviderStateMix
   }
 
   Future<void> _loadInvoiceAnalytics() async {
-    if (!mounted) return;
+    if (!mounted || _invoiceLoadInProgress) return;
+
+    _invoiceLoadInProgress = true;
     setState(() => _invoicesLoading = true);
 
     try {
@@ -446,6 +515,8 @@ class _KhataPageState extends State<KhataPage> with SingleTickerProviderStateMix
         debugPrint('Error loading invoice analytics: $e');
       }
       if (mounted) setState(() => _invoicesLoading = false);
+    } finally {
+      _invoiceLoadInProgress = false;
     }
   }
 
