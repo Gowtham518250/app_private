@@ -39,10 +39,33 @@ class OfflineAttendanceService {
     if (uid == null || uid <= 0) return;
     final prefs = await SharedPreferences.getInstance();
     final dedup = <String, Map<String, dynamic>>{};
+
     for (final record in records) {
-      final key = '${record['worker_id'] ?? record['employee_id'] ?? uid}:${record['attendance_date'] ?? ''}';
-      dedup[key] = record;
+      final employeeId = record['employee_id']?.toString().trim() ?? '';
+      final workerId = record['worker_id']?.toString().trim() ?? '';
+      final identity = employeeId.isNotEmpty
+          ? 'employee:$employeeId'
+          : workerId.isNotEmpty
+              ? 'worker:$workerId'
+              : 'user:$uid';
+      final date =
+          (record['attendance_date']?.toString() ?? '').split('T').first;
+      final key = '$identity:$date';
+      final existing = dedup[key];
+
+      if (existing == null) {
+        dedup[key] = Map<String, dynamic>.from(record);
+      } else if (existing['local_pending'] == true &&
+          record['local_pending'] != true) {
+        continue;
+      } else {
+        dedup[key] = {
+          ...existing,
+          ...Map<String, dynamic>.from(record),
+        };
+      }
     }
+
     await prefs.setString(await _key(uid), jsonEncode(dedup.values.toList()));
   }
 
@@ -153,17 +176,23 @@ class OfflineAttendanceService {
     return true;
   }
 
-  /// Persist a complete remote attendance history into the local cache so
-  /// payroll/history remain available after a cold start or temporary auth/network failure.
-  /// Local pending records always win over remote records for the same worker/date.
   static Future<void> mergeRemoteRecords(List<Map<String, dynamic>> remoteRecords) async {
     if (remoteRecords.isEmpty) return;
     try {
       final local = await loadLocalRecords();
       final merged = <String, Map<String, dynamic>>{};
 
-      String keyFor(Map<String, dynamic> r) =>
-          '${r['worker_id'] ?? r['employee_id'] ?? ''}:${r['attendance_date'] ?? ''}';
+      String keyFor(Map<String, dynamic> r) {
+        final employeeId = r['employee_id']?.toString().trim() ?? '';
+        final workerId = r['worker_id']?.toString().trim() ?? '';
+        final identity = employeeId.isNotEmpty
+            ? 'employee:$employeeId'
+            : workerId.isNotEmpty
+                ? 'worker:$workerId'
+                : '';
+        final date = (r['attendance_date']?.toString() ?? '').split('T').first;
+        return '$identity:$date';
+      }
 
       for (final record in [...local, ...remoteRecords]) {
         final key = keyFor(record);
@@ -172,7 +201,7 @@ class OfflineAttendanceService {
         if (previous == null) {
           merged[key] = Map<String, dynamic>.from(record);
         } else if (record['local_pending'] == true && previous['local_pending'] != true) {
-          merged[key] = { ...Map<String, dynamic>.from(record) };
+          merged[key] = {...Map<String, dynamic>.from(record)};
         } else if (previous['local_pending'] == true) {
           merged[key] = {
             ...Map<String, dynamic>.from(record),
@@ -211,14 +240,22 @@ class OfflineAttendanceService {
       final local = await loadLocalRecords();
       final merged = <String, Map<String, dynamic>>{};
       for (final r in [...local, ...remote]) {
-        final key = '${r['worker_id'] ?? r['employee_id'] ?? uid}:${r['attendance_date'] ?? ''}';
+        final employeeId = r['employee_id']?.toString().trim() ?? '';
+        final workerId = r['worker_id']?.toString().trim() ?? '';
+        final identity = employeeId.isNotEmpty
+            ? 'employee:$employeeId'
+            : workerId.isNotEmpty
+                ? 'worker:$workerId'
+                : 'user:$uid';
+        final dateKey = (r['attendance_date']?.toString() ?? '').split('T').first;
+        final key = '$identity:$dateKey';
         final previous = merged[key];
         if (previous == null) {
-          merged[key] = r;
+          merged[key] = Map<String, dynamic>.from(r);
         } else if (r['local_pending'] == true && previous['local_pending'] != true) {
-          merged[key] = r;
+          merged[key] = Map<String, dynamic>.from(r);
         } else {
-          merged[key] = {...previous, ...r, 'local_pending': previous['local_pending'] == true};
+          merged[key] = {...previous, ...Map<String, dynamic>.from(r), 'local_pending': previous['local_pending'] == true};
         }
       }
       await _saveRecords(merged.values.toList());
@@ -226,6 +263,7 @@ class OfflineAttendanceService {
       if (kDebugMode) debugPrint('OfflineAttendance reconcile skipped: $e');
     }
   }
+
   static Future<void> markSynced({required int employeeId, int? workerId, required String date}) async {
     final records = await loadLocalRecords();
     for (int i = 0; i < records.length; i++) {
@@ -243,5 +281,4 @@ class OfflineAttendanceService {
       }
     }
   }
-
 }
