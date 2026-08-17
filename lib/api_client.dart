@@ -249,11 +249,11 @@ class ApiClient {
   static const String gstExportGstr1 = '/gst/export-gstr1';
 
   // Cache Management
-  static const String cacheStats = 'api/cache/stats';
-  static const String cacheWarmProducts = '/cache/api/cache/warm/products';
-  static const String cacheWarmAnalytics = '/cache/api/cache/warm/analytics';
-  static String cacheClearPattern(String pattern) => '/cache/api/cache/clear/$pattern';
-  static const String cacheClearAll = '/cache/api/cache/clear-all';
+  static const String cacheStats = '/api/cache/stats';
+  static const String cacheWarmProducts = '/api/cache/warm/products';
+  static const String cacheWarmAnalytics = '/api/cache/warm/analytics';
+  static String cacheClearPattern(String pattern) => '/api/cache/clear/$pattern';
+  static const String cacheClearAll = '/api/cache/clear-all';
   
   // Security Hardening Service (NEW - Phase 1-10 Production Fixes)
   static const String securityCheckInput = '/api/security/check-input';
