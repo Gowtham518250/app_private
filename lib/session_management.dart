@@ -30,6 +30,9 @@ class SessionManagementService {
   static const String _userNameKey = 'user_name';
   static const String _userEmailKey = 'user_email';
   static const String _sessionTimeKey = 'session_time';
+  static const String _identityVerifiedKeyPrefix = 'identity_verified_';
+  static const String _identityVerifiedRoleKeyPrefix = 'identity_verified_role_';
+  static const String _identityVerifiedAtKeyPrefix = 'identity_verified_at_';
 
   static final Lock _sessionLock = Lock();
 
@@ -216,6 +219,76 @@ class SessionManagementService {
     });
   }
 
+  /// Identity verification is deliberately separate from login/session validity.
+  /// A valid refresh token never grants Owner/Staff access by itself.
+  /// The state is user-scoped and survives an app restart, but logout and a
+  /// new login session clear it.
+  // Verification is valid only for the current app process.
+  // It intentionally does not survive a force-close/restart.
+  static final Map<int, String> _processIdentityVerification = <int, String>{};
+
+  static String _identityVerificationKey(int userId) =>
+      '$_identityVerifiedKeyPrefix$userId';
+
+  static String _identityVerificationRoleKey(int userId) =>
+      '$_identityVerifiedRoleKeyPrefix$userId';
+
+  static String _identityVerificationAtKey(int userId) =>
+      '$_identityVerifiedAtKeyPrefix$userId';
+
+  static Future<void> clearIdentityVerification({int? userId}) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final resolvedUserId = userId ??
+          prefs.getInt(_userIdKey) ??
+          prefs.getInt('userId') ??
+          0;
+      if (resolvedUserId <= 0) return;
+      _processIdentityVerification.remove(resolvedUserId);
+      await prefs.remove(_identityVerificationKey(resolvedUserId));
+      await prefs.remove(_identityVerificationRoleKey(resolvedUserId));
+      await prefs.remove(_identityVerificationAtKey(resolvedUserId));
+    } catch (e) {
+      if (kDebugMode) debugPrint('⚠️ Failed to clear identity verification: $e');
+    }
+  }
+
+  static Future<void> markIdentityVerified({
+    required int userId,
+    required String role,
+  }) async {
+    try {
+      if (userId <= 0) return;
+      final normalizedRole = role.trim().toUpperCase();
+      _processIdentityVerification[userId] = normalizedRole;
+
+      // Remove any legacy persisted verification state.
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.remove(_identityVerificationKey(userId));
+      await prefs.remove(_identityVerificationRoleKey(userId));
+      await prefs.remove(_identityVerificationAtKey(userId));
+
+      if (kDebugMode) {
+        debugPrint('✅ Identity verified for current app process: user $userId as $normalizedRole');
+      }
+    } catch (e) {
+      if (kDebugMode) debugPrint('⚠️ Failed to save identity verification: $e');
+    }
+  }
+
+  static Future<bool> isIdentityVerified({
+    required int userId,
+    required String role,
+  }) async {
+    try {
+      if (userId <= 0) return false;
+      return _processIdentityVerification[userId] == role.trim().toUpperCase();
+    } catch (e) {
+      if (kDebugMode) debugPrint('⚠️ Identity verification check failed: $e');
+      return false;
+    }
+  }
+
   static Future<void> initializeSession({
     required int userId,
     required String accessToken,
@@ -226,6 +299,8 @@ class SessionManagementService {
     String deviceId = 'flutter_app',
   }) async {
     if (kDebugMode) debugPrint('🔐 Initializing session for user ID $userId');
+    // A fresh login session must pass identity verification again.
+    await clearIdentityVerification(userId: userId);
     await SecureTokenStorage.clearAll();
     await saveTokens(
       refreshToken: refreshToken,

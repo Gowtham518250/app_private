@@ -132,7 +132,7 @@ class AnalyticsEngine {
       String str = (sale['business_date'] ?? '').toString().trim();
       final hasTime = str.contains('T') || RegExp(r'\d{2}:\d{2}').hasMatch(str);
       if (str.isEmpty || !hasTime) {
-        for (final field in const ['created_at', 'createdAt', 'sale_timestamp', 'invoice_timestamp', 'timestamp', 'sale_date', 'invoice_date', 'date']) {
+        for (final field in const ['sale_timestamp', 'invoice_timestamp', 'created_at', 'createdAt', 'timestamp', 'sale_date', 'invoice_date', 'date']) {
           final candidate = (sale[field] ?? '').toString().trim();
           if (candidate.isNotEmpty) { str = candidate; if (candidate.contains('T') || RegExp(r'\d{2}:\d{2}').hasMatch(candidate)) break; }
         }
@@ -180,8 +180,8 @@ class AnalyticsEngine {
   /// creation timestamp; business_date is often date-only and would otherwise
   /// collapse every sale into 00:00 (or midnight), producing a fake Best Hour.
   DateTime getEventDate(Map<String, dynamic> sale) {
-    final value = sale['created_at'] ?? sale['updated_at'] ?? sale['timestamp'] ??
-        sale['createdAt'] ?? sale['sale_timestamp'] ?? sale['invoice_timestamp'];
+    final value = sale['sale_timestamp'] ?? sale['invoice_timestamp'] ??
+        sale['created_at'] ?? sale['updated_at'] ?? sale['timestamp'] ?? sale['createdAt'];
     if (value != null && value.toString().trim().isNotEmpty) {
       final parsed = _parseFlexibleDate(value.toString());
       if (parsed != null) return parsed;
@@ -526,36 +526,85 @@ class AnalyticsEngine {
     productAnalyticsCache = {};
     void addProductAnalytics(Map<String, dynamic> transaction, bool includeFiltered) {
       final lines = transaction['items'] ?? transaction['line_items'];
-      if (lines is! List) return;
-      final seenLines = <String>{};
-      for (final rawLine in lines) {
-        if (rawLine is! Map) continue;
-        final item = Map<String, dynamic>.from(rawLine);
-        final lk = lineKey(item);
-        if (!seenLines.add(lk)) continue;
-        final id = (item['product_id'] ?? item['id'] ?? item['barcode'] ?? '').toString().trim();
-        final rawName = (item['product_name'] ?? item['product'] ?? item['item'] ?? item['description'] ?? 'Unknown').toString();
-        final key = id.isNotEmpty && id != '0' ? id : FormatHelper.normalizeName(rawName);
-        final name = formatProductName(rawName);
-        if (key.isEmpty || name == 'Unknown') continue;
-        final q = _toDouble(item['quantity'] ?? item['qty']);
-        final value = _toDouble(item['line_total'] ?? item['total_with_tax'] ?? item['total']) > 0
-            ? _toDouble(item['line_total'] ?? item['total_with_tax'] ?? item['total'])
-            : CurrencyManager.multiply(_toDouble(item['unit_price'] ?? item['price']), q);
-        productKeys.add(key);
-        if (includeFiltered) filteredProductKeys.add(key);
-        final data = productAnalyticsCache.putIfAbsent(key, () => {
-          'total': 0.0,
-          'count': 0,
-          'quantity': 0.0,
-          'name': name,
-          'display_name': name,
-        });
-        if (includeFiltered) {
-          data['total'] = (data['total'] as double) + value;
-          data['count'] = (data['count'] as int) + 1;
-          data['quantity'] = (data['quantity'] as double) + q;
+
+      // Normal path: invoice contains line items.
+      if (lines is List) {
+        final seenLines = <String>{};
+        for (final rawLine in lines) {
+          if (rawLine is! Map) continue;
+          final item = Map<String, dynamic>.from(rawLine);
+          final lk = lineKey(item);
+          if (!seenLines.add(lk)) continue;
+          final id = (item['product_id'] ?? item['id'] ?? item['barcode'] ?? '').toString().trim();
+          final rawName = (item['product_name'] ?? item['product'] ?? item['item'] ?? item['description'] ?? 'Unknown').toString();
+          final key = id.isNotEmpty && id != '0' ? id : FormatHelper.normalizeName(rawName);
+          final name = formatProductName(rawName);
+          if (key.isEmpty || name == 'Unknown') continue;
+          final q = _toDouble(item['quantity'] ?? item['qty']);
+          final value = _toDouble(item['line_total'] ?? item['total_with_tax'] ?? item['total']) > 0
+              ? _toDouble(item['line_total'] ?? item['total_with_tax'] ?? item['total'])
+              : CurrencyManager.multiply(_toDouble(item['unit_price'] ?? item['price']), q);
+          productKeys.add(key);
+          if (includeFiltered) filteredProductKeys.add(key);
+          final data = productAnalyticsCache.putIfAbsent(key, () => {
+            'total': 0.0,
+            'count': 0,
+            'quantity': 0.0,
+            'name': name,
+            'display_name': name,
+          });
+          if (includeFiltered) {
+            data['total'] = (data['total'] as double) + value;
+            data['count'] = (data['count'] as int) + 1;
+            data['quantity'] = (data['quantity'] as double) + q;
+          }
         }
+        return;
+      }
+
+      // Fallback: some restored/legacy sales are already flattened and carry
+      // product fields directly on the transaction instead of line_items.
+      final rawName = (transaction['product_name'] ??
+              transaction['product'] ??
+              transaction['item'] ??
+              transaction['name'] ??
+              '')
+          .toString()
+          .trim();
+      if (rawName.isEmpty) return;
+
+      final id = (transaction['product_id'] ??
+              transaction['barcode'] ??
+              '')
+          .toString()
+          .trim();
+      final key = id.isNotEmpty && id != '0'
+          ? id
+          : FormatHelper.normalizeName(rawName);
+      final name = formatProductName(rawName);
+      if (key.isEmpty || name == 'Unknown') return;
+
+      final q = _toDouble(transaction['quantity'] ?? transaction['qty']);
+      final value = _toDouble(
+        transaction['line_total'] ??
+            transaction['total_with_tax'] ??
+            transaction['total'] ??
+            transaction['total_amount'],
+      );
+
+      productKeys.add(key);
+      if (includeFiltered) filteredProductKeys.add(key);
+      final data = productAnalyticsCache.putIfAbsent(key, () => {
+        'total': 0.0,
+        'count': 0,
+        'quantity': 0.0,
+        'name': name,
+        'display_name': name,
+      });
+      if (includeFiltered) {
+        data['total'] = (data['total'] as double) + value;
+        data['count'] = (data['count'] as int) + 1;
+        data['quantity'] = (data['quantity'] as double) + q;
       }
     }
     for (final t in sortedTransactions) {

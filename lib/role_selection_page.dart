@@ -346,10 +346,11 @@ class _RoleSelectionPageState extends State<RoleSelectionPage> with TickerProvid
       _error = null;
     });
 
-    final result = await OTPService.sendOTPToEmail(
+    final result = await OTPService.sendOwnerVerificationOTP(
       widget.email,
       title: '🔐 Identity Verification',
-      bodyText: 'To access the Owner Dashboard and financial analytics, please use the OTP below:',
+      bodyText:
+          'To access the Owner Dashboard and financial analytics, please use the 6-digit OTP below.',
     );
 
     if (!mounted) return;
@@ -396,7 +397,10 @@ class _RoleSelectionPageState extends State<RoleSelectionPage> with TickerProvid
 
     setState(() => _sendingOTP = true);
 
-    final result = await OTPService.verifyOTP(widget.email, _otpController.text);
+    final result = await OTPService.verifyOwnerVerificationOTP(
+      widget.email,
+      _otpController.text,
+    );
 
     if (!mounted) return;
 

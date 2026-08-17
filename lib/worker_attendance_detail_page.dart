@@ -39,6 +39,8 @@ class _WorkerAttendanceDetailPageState
   int? _shopkeeperId;
   List<WorkerPayment> _payments = [];
 
+  int get _workerId => int.tryParse(widget.worker.id) ?? 0;
+
   @override
   void initState() {
     super.initState();

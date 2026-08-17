@@ -166,9 +166,32 @@ class _DecentLoginPageState extends State<DecentLoginPage>
           }
         })();
 
-        // 🔧 FIX: Clear old session data (does not clear business data like sales/products)
-        if (kDebugMode) debugPrint('🧹 Clearing old session data on new login...');
-        await UserDataClearService.clearAllUserData();
+        // Clear stale session-only state only when an older local owner session
+        // is still present. After a normal logout the token is already gone, so
+        // repeating the full purge here can reopen/clear storage again and leave
+        // the login overlay waiting indefinitely.
+        final existingToken = await SecureTokenStorage.getToken();
+        if ((existingToken ?? '').isNotEmpty && existingToken != accessToken) {
+          if (kDebugMode) {
+            debugPrint('🧹 Existing local session detected; clearing stale session data...');
+          }
+          try {
+            await UserDataClearService.clearAllUserData().timeout(
+              const Duration(seconds: 8),
+            );
+          } on TimeoutException {
+            if (mounted) {
+              setState(() {
+                errorMessage =
+                    'Local session cleanup timed out. Please retry login.';
+              });
+            }
+            if (kDebugMode) {
+              debugPrint('⏱️ Login aborted: local session cleanup timed out');
+            }
+            return;
+          }
+        }
 
         final deviceId = await SessionManagementService.getDeviceId();
         await SessionManagementService.initializeSession(

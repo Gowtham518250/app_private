@@ -4,6 +4,7 @@ import 'api_client.dart';
 import 'app_localizations.dart';
 import 'dart:convert';
 import 'email_sender_service.dart';
+import 'otp_service.dart';
 
 class ResetPasswordPage extends StatefulWidget {
   const ResetPasswordPage({super.key});
@@ -33,9 +34,13 @@ class _ResetPasswordPageState extends State<ResetPasswordPage> {
     super.dispose();
   }
 
-  /// Step 1: Request password reset OTP to email
+  /// Step 1: Request password reset OTP to email.
+  /// Uses the hardened password-reset challenge, while OTP delivery itself
+  /// remains frontend-owned through the configured Gmail SMTP sender.
   Future<void> sendResetOTP() async {
-    if (emailController.text.isEmpty) {
+    final email = emailController.text.trim();
+
+    if (email.isEmpty) {
       setState(() => errorMessage = 'Please enter email');
       return;
     }
@@ -47,64 +52,47 @@ class _ResetPasswordPageState extends State<ResetPasswordPage> {
     });
 
     try {
-      final response = await ApiClient.postJson(
-        '/auth/forgot-password',
-        {'email': emailController.text.trim()},
+      final result = await OTPService.sendOTPToEmail(
+        email,
+        title: '🔐 Retail Mind Password Reset',
+        bodyText:
+            'Use the 6-digit OTP below to reset your Retail Mind owner password. '
+            'Also confirm the secure email link before resetting the password.',
       );
 
-      if (response.statusCode == 200) {
-        // Extract OTP from response
-        final responseData = json.decode(response.body);
-        final otp = responseData['otp']?.toString() ?? '';
-        
-        // 🔐 Do NOT print or display OTP - send it ONLY to email
-        // Send OTP via email using Frontend
-        if (otp.isNotEmpty) {
-          final emailSent = await EmailSenderService.sendOTPEmail(
-            recipientEmail: emailController.text.trim(),
-            otp: otp,
-            userName: 'User',
-          );
+      if (!mounted) return;
 
-          if (emailSent) {
-            setState(() {
-              otpSent = true;
-              successMessage = '✅ OTP sent to ${emailController.text.trim()}. Check inbox/spam.';
-              isLoading = false;
-            });
-          } else {
-            setState(() {
-              successMessage = '⚠️ OTP generated but email failed. Check console.';
-              otpSent = true;
-              isLoading = false;
-            });
-          }
-        }
-      } else if (response.statusCode == 404) {
+      if (result['success'] == true) {
         setState(() {
-          errorMessage = '❌ Email not found. Please register first.';
-          isLoading = false;
+          otpSent = true;
+          successMessage =
+              result['message']?.toString() ??
+              'OTP sent. Check your inbox and spam folder.';
         });
       } else {
         setState(() {
-          errorMessage = '❌ Failed to send OTP. Try again.';
-          isLoading = false;
+          errorMessage =
+              result['message']?.toString() ?? 'Failed to send reset OTP.';
         });
       }
     } catch (e) {
-      setState(() {
-        errorMessage = '❌ Error: $e';
-        isLoading = false;
-      });
+      if (mounted) {
+        setState(() => errorMessage = 'Failed to send reset OTP: $e');
+      }
+    } finally {
+      if (mounted) {
+        setState(() => isLoading = false);
+      }
     }
   }
 
-  /// Step 2: Verify OTP and reset password
+  /// Step 2: Verify the password-reset OTP, obtain the one-time reset
+  /// authorization token, and then use that token to change the password.
   Future<void> resetPassword() async {
-    String email = emailController.text.trim();
-    String otp = otpController.text.trim();
-    String newPass = newPasswordController.text;
-    String confirmPass = confirmPasswordController.text;
+    final email = emailController.text.trim();
+    final otp = otpController.text.trim();
+    final newPass = newPasswordController.text;
+    final confirmPass = confirmPasswordController.text;
 
     if (email.isEmpty || otp.isEmpty || newPass.isEmpty || confirmPass.isEmpty) {
       setState(() => errorMessage = 'All fields are required');
@@ -116,8 +104,12 @@ class _ResetPasswordPageState extends State<ResetPasswordPage> {
       return;
     }
 
-    if (newPass.length < 6) {
-      setState(() => errorMessage = '❌ Password must be at least 6 characters');
+    if (newPass.length < 8 ||
+        !RegExp(r'[A-Z]').hasMatch(newPass) ||
+        !RegExp(r'[a-z]').hasMatch(newPass) ||
+        !RegExp(r'\d').hasMatch(newPass)) {
+      setState(() => errorMessage =
+          'Password must be at least 8 characters and contain uppercase, lowercase, and a number.');
       return;
     }
 
@@ -128,30 +120,75 @@ class _ResetPasswordPageState extends State<ResetPasswordPage> {
     });
 
     try {
-      final response = await ApiClient.postJson(
+      // Local OTP verification + hardened backend authorization.
+      final verifyResult = await OTPService.verifyOTP(email, otp);
+
+      if (!mounted) return;
+
+      if (verifyResult['success'] != true) {
+        setState(() {
+          errorMessage =
+              verifyResult['message']?.toString() ??
+              'Invalid or expired OTP.';
+        });
+        return;
+      }
+
+      final resetToken = verifyResult['token']?.toString();
+      if (resetToken == null || resetToken.isEmpty) {
+        setState(() {
+          errorMessage =
+              'Secure reset authorization was not issued. Please request a new OTP.';
+        });
+        return;
+      }
+
+      // Canonical hardened reset endpoint. The token is one-time and short-lived.
+      final response = await ApiClient.postForm(
         '/auth/reset-password',
         {
-          'email': email,
-          'otp': otp,
-          'new_password': newPass,
+          'token': resetToken,
+          'password': newPass,
         },
       );
 
+      if (!mounted) return;
+
       if (response.statusCode == 200) {
-        setState(() => successMessage = '✅ Password reset successful! Redirecting to login...');
-        
-        // Wait 2 seconds then redirect to login
-        await Future.delayed(const Duration(seconds: 2));
+        await OTPService.clearResetState();
+
+        setState(() {
+          successMessage =
+              '✅ Password reset successful! Redirecting to login...';
+        });
+
+        await Future.delayed(const Duration(seconds: 1));
+
         if (mounted) {
-          Navigator.of(context).pushNamedAndRemoveUntil('/login', (route) => false);
+          Navigator.of(context).pushNamedAndRemoveUntil(
+            '/login',
+            (route) => false,
+          );
         }
-      } else if (response.statusCode == 400) {
-        setState(() => errorMessage = '❌ Invalid OTP or expired. Request a new one.');
       } else {
-        setState(() => errorMessage = '❌ Password reset failed. Try again.');
+        Map<String, dynamic> data = {};
+        try {
+          final decoded = json.decode(response.body);
+          if (decoded is Map<String, dynamic>) {
+            data = decoded;
+          }
+        } catch (_) {}
+
+        setState(() {
+          errorMessage =
+              data['detail']?.toString() ??
+              'Password reset failed. Please request a new OTP.';
+        });
       }
     } catch (e) {
-      setState(() => errorMessage = '❌ Error: $e');
+      if (mounted) {
+        setState(() => errorMessage = '❌ Password reset failed: $e');
+      }
     } finally {
       if (mounted) {
         setState(() => isLoading = false);

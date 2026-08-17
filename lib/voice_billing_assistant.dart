@@ -28,7 +28,6 @@ import 'language_detection_visualizer.dart';
 import 'language_detector.dart';
 import 'product_catalog_service.dart';
 import 'stt_accuracy_config.dart';
-import 'roman_indian_voice_normalizer.dart';
 
 // ─── Language Config ──────────────────────────────────────────────────────────
 
@@ -483,8 +482,6 @@ class MultiLangVoiceParser {
 
     // ✅ PATCH: Normalize STT output before parsing — fixes ~40% of parse failures
     transcript = PhoneticNormalizer.normalize(transcript, lang.code);
-    // Normalize Romanized Indian speech and phonetic unit/number variants before semantic parsing.
-    transcript = RomanIndianVoiceNormalizer.normalize(transcript, locale: lang.code);
 
     // First attempt: Split on commas, "and", "और", "மற்றும்" etc.
     final splitPattern = RegExp(r'[,।]|(?<!\d)\.(?!\d)|\band\b|\bplus\b|\baur\b|और|\binkaa\b|\bmariyum\b|\bmattu\b|మరియు|ಮತ್ತು|ਅਤੇ|\bnext\b|\bitem\b', caseSensitive: false);
@@ -736,11 +733,24 @@ class MultiLangVoiceParser {
       final item = await _parseSegment(itemText, lang, knownProducts: knownProducts);
       
       if (item != null && item.name.isNotEmpty && item.price > 0) {
-        // Check for duplicates
-        if (!items.any((e) => 
-          e.name.toLowerCase() == item.name.toLowerCase() && 
-          (e.price - item.price).abs() < 1.0
-        )) {
+        // Same product at the same price is one line item. Merge quantity.
+        final existingIdx = items.indexWhere(
+          (e) =>
+              e.name.trim().toLowerCase() == item.name.trim().toLowerCase() &&
+              (e.price - item.price).abs() < 0.01,
+        );
+
+        if (existingIdx >= 0) {
+          final existing = items[existingIdx];
+          items[existingIdx] = ParsedItem(
+            name: existing.name,
+            qty: existing.qty + item.qty,
+            unit: item.unit.isNotEmpty ? item.unit : existing.unit,
+            price: item.price,
+            confidence: item.confidence,
+            isConfirmed: existing.isConfirmed || item.isConfirmed,
+          );
+        } else {
           items.add(item);
         }
       }
@@ -1080,7 +1090,6 @@ class _VoiceBillingAssistantState extends State<VoiceBillingAssistant>
       }
       _lastPreviewItems = [];
       _clearEditControllers();
-      _clearEditControllers();
       setState(() {
         ParsedItems = List.from(_committedItems);
         _isProcessing = false;
@@ -1130,14 +1139,32 @@ class _VoiceBillingAssistantState extends State<VoiceBillingAssistant>
       }
     }
 
-    // Deduplicate: keep the last occurrence of each product name
-    final seen = <String, int>{};
-    for (int i = 0; i < ParsedItems.length; i++) {
-      final key = ParsedItems[i].name.toLowerCase().trim();
-      seen[key] = i; // last index wins
+    // Merge duplicates by product + price before sending them to the bill.
+    // This preserves quantities instead of "last occurrence wins".
+    final uniqueItems = <ParsedItem>[];
+    for (final item in ParsedItems) {
+      final existingIdx = uniqueItems.indexWhere(
+        (existing) =>
+            existing.name.trim().toLowerCase() == item.name.trim().toLowerCase() &&
+            (existing.price - item.price).abs() < 0.01,
+      );
+
+      if (existingIdx >= 0) {
+        final existing = uniqueItems[existingIdx];
+        uniqueItems[existingIdx] = ParsedItem(
+          name: existing.name,
+          qty: existing.qty + item.qty,
+          unit: item.unit.isNotEmpty ? item.unit : existing.unit,
+          price: item.price > 0 ? item.price : existing.price,
+          confidence: item.confidence > existing.confidence
+              ? item.confidence
+              : existing.confidence,
+          isConfirmed: existing.isConfirmed || item.isConfirmed,
+        );
+      } else {
+        uniqueItems.add(item);
+      }
     }
-    final deduped = seen.values.toList()..sort();
-    final uniqueItems = deduped.map((i) => ParsedItems[i]).toList();
 
     final confirmed = uniqueItems.where((e) => e.isConfirmed).toList();
     if (confirmed.isEmpty) {

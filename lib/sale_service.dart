@@ -211,7 +211,11 @@ try {
   bool backendSuccess = false;
 
   // OFFLINE-FIRST: persist the sale and enqueue it BEFORE attempting any network call.
-  // This guarantees that a sale survives app close/background/crash/network loss.
+  // Capture the exact transaction timestamp once. The same value is used by
+  // local history and the backend so a later sync cannot rewrite the sale time.
+  final DateTime saleTimestamp = DateTime.now().toUtc();
+  final String saleTimestampIso = saleTimestamp.toIso8601String();
+
   final invoicePayload = {
     'invoice_number': saleId,
     'offline_id': offlineId,
@@ -221,7 +225,9 @@ try {
     'paid_amount': paidAmount,
     'tax': withTax ? (totals['tax'] ?? 0.0) : 0.0,
     'payment_status': paymentStatusFor(paidAmount, grandTotal),
-    'invoice_date': DateTime.now().toIso8601String().split('T')[0],
+    'invoice_date': saleTimestampIso.split('T')[0],
+    'sale_timestamp': saleTimestampIso,
+    'created_at': saleTimestampIso,
     'notes': isBorrow ? 'Payment via $paymentMethod - Borrow Invoice' : 'Payment via $paymentMethod - Regular Sale',
     'line_items': lineItems,
   };
@@ -597,6 +603,7 @@ try {
       'offline_id': saleId,
       'invoice_number': saleId,
       'created_at': existingSale?['created_at'] ?? saleTimestamp,
+      'sale_timestamp': existingSale?['sale_timestamp'] ?? (existingSale?['created_at'] ?? saleTimestamp),
       'updated_at': saleTimestamp,
       'user_id': userId,
       'sync_status': syncStatus,

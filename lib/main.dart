@@ -54,6 +54,7 @@ import 'package:flutter/foundation.dart' show kDebugMode, kIsWeb;
 import 'package:flutter_svg/flutter_svg.dart';
 import 'shop_profile_page.dart';
 import 'owner_biometric_register_page.dart';
+import 'role_selection_page.dart';
 import 'onboarding_page.dart';
 
 import 'shop_details_page.dart';
@@ -1103,9 +1104,9 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
               final authed = snapshot.hasData && snapshot.data == true;
               String initialRoute = '/login';
               if (!booting && authed) {
-                // Determine initial route by retrieving role
-                // We'll read from a sync helper or check what is cached in prefs
-                initialRoute = '/dashboard'; 
+                // A valid login session is not enough to open a protected shop
+                // area. The resolver below checks identity verification first.
+                initialRoute = '/identity-verification';
               } else if (booting) {
                 initialRoute = '/_boot';
               }
@@ -1113,13 +1114,37 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
                 future: (() async {
                   if (booting) return '/_boot';
                   if (!authed) return '/login';
+
                   final routePrefs = await SharedPreferences.getInstance();
                   final rawRole = routePrefs.getString('user_role') ?? 'OWNER';
                   final role = rawRole.trim().toUpperCase();
+                  final userId = routePrefs.getInt('user_id') ??
+                      routePrefs.getInt('userId') ??
+                      0;
+
                   if (role == 'CUSTOMER') return '/nearby-shops';
+
+                  // Hard onboarding gate: an authenticated shop account cannot
+                  // enter protected shop screens until shop details are saved.
+                  final shopDetailsCompleted =
+                      routePrefs.getBool('shop_details_completed_$userId') ??
+                      routePrefs.getBool('shop_details_completed') ??
+                      false;
+                  if (!shopDetailsCompleted) return '/shop-details';
+
+                  // Owner account + Staff Mode require identity verification
+                  // for the CURRENT APP PROCESS. Closing/restarting the app
+                  // intentionally requires verification again.
+                  final isStaffMode =
+                      routePrefs.getBool('is_staff_mode') ?? false;
+                  final verificationRole = isStaffMode ? 'STAFF' : 'OWNER';
+                  final verified = await SessionManagementService.isIdentityVerified(
+                    userId: userId,
+                    role: verificationRole,
+                  );
+
+                  if (!verified) return '/identity-verification';
                   if (role == 'WORKER') return '/attendance';
-                  // OWNER accounts always use the dashboard. Staff Mode is a
-                  // scoped UI mode inside the owner account, not a server role.
                   return '/dashboard';
                 })(),
                 builder: (context, routeSnapshot) {
@@ -1294,6 +1319,8 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
               '/forgot-password': (context) => const ForgotPasswordPage(),
               '/reset-password': (context) => const ResetPasswordPage(),
               '/shop-profile': (context) => const ShopProfilePage(),
+              '/identity-verification': (context) =>
+                  const _IdentityVerificationGate(),
               '/owner-biometric-register': (context) {
                 final args = ModalRoute.of(context)?.settings.arguments;
                 final fromDashboard = args is Map && args['fromDashboard'] == true;

@@ -501,6 +501,8 @@ class SyncService {
                     first['sale_date'] ??
                     first['date'] ??
                     first['created_at'],
+                'created_at': first['created_at'],
+                'sale_timestamp': first['sale_timestamp'] ?? first['created_at'],
                 'total_amount': total,
                 'paid_amount': paid,
                 'pending_amount': outstanding,
@@ -1050,6 +1052,10 @@ static Future<bool> _syncSaleItem(Map<String, dynamic> data) async {
             data['business_date'] ??
             data['sale_date'] ??
             data['date'],
+        if (data['sale_timestamp'] != null)
+          'sale_timestamp': data['sale_timestamp'],
+        if (data['created_at'] != null)
+          'created_at': data['created_at'],
         'line_items': lineItems,
       };
 

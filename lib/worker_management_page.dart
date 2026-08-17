@@ -6,6 +6,7 @@ import 'api_client.dart';
 import 'secure_token_storage.dart';
 import 'worker_detail_page.dart';
 import 'worker_local_storage.dart';
+import 'models.dart';
 
 class WorkerManagementPage extends StatefulWidget {
   const WorkerManagementPage({super.key});
@@ -139,6 +140,7 @@ class _WorkerManagementPageState extends State<WorkerManagementPage> {
         final workers = rawWorkers
             .whereType<Map>()
             .map((w) => Worker.fromJson(Map<String, dynamic>.from(w)))
+            .whereType<Worker>()
             .toList();
 
         await WorkerLocalStorage.saveWorkers(userId, workers);

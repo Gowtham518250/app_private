@@ -2,6 +2,7 @@ import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'app_state_reset.dart';
+import 'api_client.dart';
 import 'account_data_sync_service.dart';
 import 'customer_api_client.dart';
 import 'google_auth_service.dart';
@@ -45,10 +46,30 @@ class SessionLogoutService {
 
   static Future<void> _clearCore({bool notifyServer = true}) async {
     if (notifyServer) {
-      await _step('server logout', () => SessionManagementService.logout());
+      await _step(
+        'server logout',
+        () => SessionManagementService.logout().timeout(
+          const Duration(seconds: 8),
+          onTimeout: () {
+            if (kDebugMode) {
+              debugPrint('⏱️ Logout server request timed out; continuing local logout');
+            }
+          },
+        ),
+      );
     }
 
-    await _step('stop online orders listener', () => OnlineOrdersListener.instance.stop());
+    await _step(
+      'stop online orders listener',
+      () => OnlineOrdersListener.instance.stop().timeout(
+        const Duration(seconds: 3),
+        onTimeout: () {
+          if (kDebugMode) {
+            debugPrint('⏱️ Online orders listener stop timed out; continuing logout');
+          }
+        },
+      ),
+    );
 
     // 🔒 FIRST: Close all current user's Hive boxes to ensure data isolation.
     // Box names are already scoped per user (e.g. "sales_v2_$userId"), so
@@ -73,6 +94,10 @@ class SessionLogoutService {
     await _step('clear secure token storage', () => SecureTokenStorage.clearAll());
     await _step('clear payment data', () => SecurePreferencesService.clearAllPaymentData());
     await _step('clear session tokens', () => SessionManagementService.clearTokens());
+    await _step(
+      'reset api auth runtime state',
+      () => ApiClient.resetAuthRuntimeState(),
+    );
     // DO NOT clear sync queue! (it's user-scoped and will be reloaded for new user)
     // await SyncQueueManager.clearQueue();
     await _step('clear account data cache', () => AccountDataSyncService.clearAllCache());
@@ -99,7 +124,14 @@ class SessionLogoutService {
       if (processQueueFirst) {
         await SyncService.processQueueSafe();
       }
-      await _clearCore(notifyServer: true);
+      await _clearCore(notifyServer: true).timeout(
+        const Duration(seconds: 20),
+        onTimeout: () {
+          if (kDebugMode) {
+            debugPrint('⏱️ Owner logout cleanup exceeded 20s; continuing to reset logout state');
+          }
+        },
+      );
     } finally {
       _inProgress = false;
     }

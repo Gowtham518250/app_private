@@ -23,6 +23,13 @@ class OTPService {
   static const _kResetToken = 'password_reset_reset_token';
   static const _kAttempts = 'password_reset_otp_attempts';
 
+  // Owner verification OTP is intentionally independent from password reset.
+  // It is generated, emailed, and verified locally on the device.
+  static const _kOwnerEmail = 'owner_verification_email';
+  static const _kOwnerOtpHash = 'owner_verification_otp_hash';
+  static const _kOwnerOtpCreatedAt = 'owner_verification_otp_created_at';
+  static const _kOwnerAttempts = 'owner_verification_otp_attempts';
+
   static const Duration _otpValidity = Duration(minutes: 10);
   static const int _maxLocalAttempts = 5;
 
@@ -52,6 +59,168 @@ class OTPService {
     ]) {
       await _storage.delete(key: key);
     }
+  }
+
+  static Future<void> _clearOwnerVerificationState() async {
+    for (final key in const [
+      _kOwnerEmail,
+      _kOwnerOtpHash,
+      _kOwnerOtpCreatedAt,
+      _kOwnerAttempts,
+    ]) {
+      await _storage.delete(key: key);
+    }
+  }
+
+  /// Owner identity verification only.
+  ///
+  /// This path intentionally does NOT call any password-reset or backend OTP
+  /// endpoint. The app generates the code locally and sends it through the
+  /// configured Gmail SMTP sender.
+  static Future<Map<String, dynamic>> sendOwnerVerificationOTP(
+    String email, {
+    String? title,
+    String? bodyText,
+  }) async {
+    final normalizedEmail = email.trim().toLowerCase();
+    if (normalizedEmail.isEmpty) {
+      return {'success': false, 'message': 'Email is required'};
+    }
+
+    try {
+      await _clearOwnerVerificationState();
+
+      final otp = _generateSecureOTP();
+      final otpHash = _hashOtp(otp);
+      final createdAt = DateTime.now().millisecondsSinceEpoch;
+
+      await _storage.write(key: _kOwnerEmail, value: normalizedEmail);
+      await _storage.write(key: _kOwnerOtpHash, value: otpHash);
+      await _storage.write(
+        key: _kOwnerOtpCreatedAt,
+        value: createdAt.toString(),
+      );
+      await _storage.write(key: _kOwnerAttempts, value: '0');
+
+      final emailSent = await EmailSenderService.sendOTPEmail(
+        recipientEmail: normalizedEmail,
+        otp: otp,
+        userName: 'Owner',
+        title: title ?? '🔐 Retail Mind Owner Verification',
+        bodyText: bodyText ??
+            'Use this 6-digit OTP to verify that you are the Retail Mind shop owner.',
+      );
+
+      if (!emailSent) {
+        await _clearOwnerVerificationState();
+        return {
+          'success': false,
+          'message':
+              'Failed to send verification OTP. Check the Gmail SMTP credentials configured for the app.',
+        };
+      }
+
+      if (kDebugMode) {
+        debugPrint('✅ Owner verification OTP sent to $normalizedEmail');
+      }
+
+      return {
+        'success': true,
+        'message': 'Verification OTP sent. Check your email inbox and spam folder.',
+      };
+    } catch (e) {
+      await _clearOwnerVerificationState();
+      if (kDebugMode) {
+        debugPrint('❌ Owner verification OTP send failed: $e');
+      }
+      return {
+        'success': false,
+        'message': 'Failed to send owner verification OTP: $e',
+      };
+    }
+  }
+
+  /// Verify the locally stored owner-verification OTP.
+  /// No backend call is made on the owner verification path.
+  static Future<Map<String, dynamic>> verifyOwnerVerificationOTP(
+    String email,
+    String enteredOTP,
+  ) async {
+    final normalizedEmail = email.trim().toLowerCase();
+    final code = enteredOTP.trim();
+
+    if (!RegExp(r'^\d{6}$').hasMatch(code)) {
+      return {'success': false, 'message': 'OTP must be 6 digits'};
+    }
+
+    final storedEmail = await _storage.read(key: _kOwnerEmail);
+    final storedHash = await _storage.read(key: _kOwnerOtpHash);
+    final createdAtRaw = await _storage.read(key: _kOwnerOtpCreatedAt);
+    final attemptsRaw = await _storage.read(key: _kOwnerAttempts);
+
+    if (storedEmail == null || storedHash == null || createdAtRaw == null) {
+      return {
+        'success': false,
+        'message': 'No owner verification OTP pending. Request a new code.',
+      };
+    }
+
+    if (storedEmail != normalizedEmail) {
+      return {
+        'success': false,
+        'message': 'The verification OTP belongs to a different email address.',
+      };
+    }
+
+    final createdAt = int.tryParse(createdAtRaw);
+    if (createdAt == null) {
+      await _clearOwnerVerificationState();
+      return {
+        'success': false,
+        'message': 'Owner verification state is invalid. Request a new code.',
+      };
+    }
+
+    if (DateTime.now().millisecondsSinceEpoch - createdAt >
+        _otpValidity.inMilliseconds) {
+      await _clearOwnerVerificationState();
+      return {
+        'success': false,
+        'message': 'Owner verification OTP expired. Request a new code.',
+      };
+    }
+
+    final attempts = int.tryParse(attemptsRaw ?? '0') ?? 0;
+    if (attempts >= _maxLocalAttempts) {
+      await _clearOwnerVerificationState();
+      return {
+        'success': false,
+        'message':
+            'Too many verification attempts. Request a new owner OTP.',
+      };
+    }
+
+    final enteredHash = _hashOtp(code);
+    if (!_constantTimeEquals(storedHash, enteredHash)) {
+      await _storage.write(
+        key: _kOwnerAttempts,
+        value: '${attempts + 1}',
+      );
+      final left = _maxLocalAttempts - attempts - 1;
+      return {
+        'success': false,
+        'message': left > 0
+            ? 'Invalid verification OTP. $left attempt(s) remaining.'
+            : 'Invalid verification OTP. Request a new code.',
+      };
+    }
+
+    await _clearOwnerVerificationState();
+
+    return {
+      'success': true,
+      'message': 'Owner identity verified successfully.',
+    };
   }
 
   static Future<Map<String, dynamic>> sendOTPToEmail(

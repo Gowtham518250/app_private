@@ -174,54 +174,29 @@ class _SalesEntryPageState extends State<SalesEntryPage>
   }
 
   void _onVoiceOrderParsed(List<Map<String, dynamic>> items) {
-    setState(() {
-      for (var item in items) {
-        final String name = item['name'] ?? item['product_name'] ?? '';
-        final double qty = ((item['qty'] ?? item['quantity']) as num?)?.toDouble() ?? 1.0;
-        final double price = (item['price'] as num?)?.toDouble() ?? 0.0;
-        
-        // Null safety check: ensure entries list and controllers exist
-        if (entries.isEmpty) {
-          addEntry();
-        }
-        
-        // Find existing row with this name or empty row with null safety
-        int targetIdx = entries.indexWhere((e) {
-          try {
-            return (e['item']?.text.isEmpty ?? true) || 
-                   ((e['item']?.text.isNotEmpty ?? false) && e['item']!.text.toUpperCase() == name.toUpperCase());
-          } catch (e) {
-            return false; // Skip invalid entries
-          }
-        });
-        
-        if (targetIdx == -1) {
-          addEntry();
-          targetIdx = entries.length - 1;
-        }
-        
-        // Null safety check for controllers
-        try {
-          if (entries[targetIdx]['item'] != null) {
-            entries[targetIdx]['item']!.text = name;
-          }
-          if (entries[targetIdx]['qty'] != null) {
-            entries[targetIdx]['qty']!.text = qty.toString();
-          }
-          if (entries[targetIdx]['price'] != null) {
-            if (price > 0) {
-              entries[targetIdx]['price']!.text = price.toString();
-            } else {
-              entries[targetIdx]['price']!.text = '';
-            }
-          }
-        } catch (e) {
-          if (kDebugMode) debugPrint('⚠️ Error setting voice order values: $e');
-        }
-      }
-      _isVoiceAssistantOpen = false;
+    if (items.isEmpty || !mounted) return;
+
+    // Route assistant results through the same duplicate-safe insertion path.
+    for (final item in items) {
+      final name = (item['name'] ?? item['product_name'] ?? '').toString().trim();
+      final qty = ((item['qty'] ?? item['quantity']) as num?)?.toDouble() ?? 1.0;
+      final price = (item['price'] as num?)?.toDouble() ?? 0.0;
+
+      if (name.isEmpty || qty <= 0) continue;
+
+      _addVoiceItem(
+        name,
+        qty,
+        providedPrice: price > 0 ? price : null,
+        providedGst: double.tryParse(item['gst']?.toString() ?? ''),
+        providedBarcode: item['barcode']?.toString(),
+      );
+    }
+
+    if (mounted) {
+      setState(() => _isVoiceAssistantOpen = false);
       calculateTotal();
-    });
+    }
   }
 
   Future<void> _shareOnWhatsApp() async {
@@ -526,6 +501,7 @@ class _SalesEntryPageState extends State<SalesEntryPage>
   DateTime? _selectedDueDate;          // Deadline for unpaid amount
   final TextEditingController _dueDateController = TextEditingController();
   bool _isVoiceProcessing = false; // Flag to prevent UI listeners from adding duplicate items during voice entry
+  bool _borrowWaitingForCustomer = false;
 
 
   // Local product catalog keyed by barcode
@@ -1071,50 +1047,92 @@ class _SalesEntryPageState extends State<SalesEntryPage>
   }
 
   void _addVoiceItem(String name, double qty, {double? providedPrice, double? providedGst, String? providedBarcode}) {
-    if (!mounted) return;
+    if (!mounted || name.trim().isEmpty || qty <= 0) return;
+
     setState(() {
       _isVoiceProcessing = true;
 
-      // Cleanup: Logic to replace last empty row OR add new
-      int targetIdx = -1;
+      final normalizedName = name.trim().toLowerCase();
+      final incomingPrice = providedPrice ?? 0.0;
+      final incomingBarcode = (providedBarcode ?? '').trim();
+
+      // Same product + same price = one bill line. Merge quantity instead
+      // of creating a second identical row.
+      int existingIdx = -1;
       for (int i = 0; i < entries.length; i++) {
-        if ((entries[i]['item']?.text.isEmpty ?? true) &&
-            (entries[i]['price']?.text.isEmpty ?? true)) {
-          targetIdx = i;
+        final rowName = entries[i]['item']?.text.trim().toLowerCase() ?? '';
+        if (rowName.isEmpty || rowName != normalizedName) continue;
+
+        final rowPrice =
+            double.tryParse(entries[i]['price']?.text.trim() ?? '') ?? 0.0;
+        final rowBarcode = entries[i]['barcode']?.text.trim() ?? '';
+
+        final sameBarcode = incomingBarcode.isNotEmpty &&
+            rowBarcode.isNotEmpty &&
+            incomingBarcode == rowBarcode;
+        final samePrice = incomingPrice <= 0 ||
+            rowPrice <= 0 ||
+            (rowPrice - incomingPrice).abs() < 0.01;
+
+        if (sameBarcode || samePrice) {
+          existingIdx = i;
           break;
         }
       }
 
-      if (targetIdx == -1) {
-        addEntry();
-        targetIdx = entries.length - 1;
-      }
+      if (existingIdx >= 0) {
+        final currentQty =
+            double.tryParse(entries[existingIdx]['qty']?.text.trim() ?? '') ??
+                0.0;
+        final mergedQty = currentQty + qty;
+        entries[existingIdx]['qty']?.text =
+            mergedQty % 1 == 0 ? mergedQty.toInt().toString() : mergedQty.toString();
 
-      if (entries[targetIdx]['item'] != null) {
-        entries[targetIdx]['item']!.text = name;
-      }
-      if (entries[targetIdx]['qty'] != null) {
-        entries[targetIdx]['qty']!.text = qty.toString();
-      }
-      if (entries[targetIdx]['price'] != null) {
-        if (providedPrice != null && providedPrice > 0) {
-          entries[targetIdx]['price']!.text = providedPrice.toStringAsFixed(0);
-        } else {
-          entries[targetIdx]['price']!.text = '';
+        if ((entries[existingIdx]['price']?.text.trim().isEmpty ?? true) &&
+            incomingPrice > 0) {
+          entries[existingIdx]['price']?.text = incomingPrice.toStringAsFixed(0);
+        }
+        if (providedGst != null && entries[existingIdx]['gst'] != null) {
+          entries[existingIdx]['gst']!.text = providedGst.toStringAsFixed(0);
+        }
+        if (incomingBarcode.isNotEmpty && entries[existingIdx]['barcode'] != null) {
+          entries[existingIdx]['barcode']!.text = incomingBarcode;
+        }
+      } else {
+        int targetIdx = -1;
+        for (int i = 0; i < entries.length; i++) {
+          if ((entries[i]['item']?.text.isEmpty ?? true) &&
+              (entries[i]['price']?.text.isEmpty ?? true)) {
+            targetIdx = i;
+            break;
+          }
+        }
+
+        if (targetIdx == -1) {
+          addEntry();
+          targetIdx = entries.length - 1;
+        }
+
+        entries[targetIdx]['item']?.text = name.trim();
+        entries[targetIdx]['qty']?.text =
+            qty % 1 == 0 ? qty.toInt().toString() : qty.toString();
+
+        entries[targetIdx]['price']?.text =
+            incomingPrice > 0 ? incomingPrice.toStringAsFixed(0) : '';
+
+        if (providedGst != null && entries[targetIdx]['gst'] != null) {
+          entries[targetIdx]['gst']!.text = providedGst.toStringAsFixed(0);
+        }
+        if (incomingBarcode.isNotEmpty && entries[targetIdx]['barcode'] != null) {
+          entries[targetIdx]['barcode']!.text = incomingBarcode;
         }
       }
-      if (providedGst != null && entries[targetIdx]['gst'] != null) {
-        entries[targetIdx]['gst']!.text = providedGst.toStringAsFixed(0);
-      }
-      if (providedBarcode != null && entries[targetIdx]['barcode'] != null) {
-        entries[targetIdx]['barcode']!.text = providedBarcode;
-      }
-      
+
       calculateTotal();
-      
-      Future.delayed(const Duration(milliseconds: 500), () {
-        if (mounted) setState(() => _isVoiceProcessing = false);
-      });
+    });
+
+    Future.delayed(const Duration(milliseconds: 500), () {
+      if (mounted) setState(() => _isVoiceProcessing = false);
     });
 
     // 🚀 100/100 REAL-TIME STOCK PULSE: Alert if merchant adds an item that is low in stock
@@ -1193,17 +1211,31 @@ class _SalesEntryPageState extends State<SalesEntryPage>
           ElevatedButton(
             style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF4F46E5), foregroundColor: Colors.white),
             onPressed: () async {
-              if (phoneC.text.isEmpty) {
-                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('⚠️ Phone number is required')));
+              final rawPhone = phoneC.text.trim();
+              final digits = rawPhone.replaceAll(RegExp(r'[^0-9]'), '');
+              final normalizedPhone =
+                  digits.startsWith('91') && digits.length == 12
+                      ? digits.substring(2)
+                      : digits;
+
+              if (normalizedPhone.length != 10 ||
+                  !RegExp(r'^[6-9][0-9]{9}$').hasMatch(normalizedPhone)) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    content: Text('⚠️ Enter a valid 10-digit Indian mobile number'),
+                    backgroundColor: Color(0xFFEF4444),
+                  ),
+                );
                 return;
               }
+
               final List<dynamic> customers = await LocalStorageService.loadLocalCustomers();
               
               // If name is empty, use 'Customer'
               final finalName = nameC.text.trim().isEmpty ? 'Customer' : nameC.text.trim();
               customers.add({
                 'name': finalName,
-                'phone': phoneC.text.trim(),
+                'phone': normalizedPhone,
                 'address': addressC.text.trim(),
                 'joining_date': DateFormat('yyyy-MM-dd').format(DateTime.now()),
               });
@@ -1220,21 +1252,31 @@ class _SalesEntryPageState extends State<SalesEntryPage>
                 // Queue for retry if backend sync fails
                 await _queueOfflineAction('save_customer', {
                   'name': nameC.text.trim(),
-                  'phone': phoneC.text.trim(),
+                  'phone': normalizedPhone,
                   'address': addressC.text.trim(),
                 });
                 if (kDebugMode) debugPrint('⚠️ Customer backend sync failed, queued for retry');
               }
               
+              if (!mounted) return;
+              final wasBorrowRequest = _borrowWaitingForCustomer;
               setState(() {
-                customerPhoneController.text = phoneC.text.trim();
+                customerPhoneController.text = normalizedPhone;
                 _loadLocalCustomers(); // Refresh dropdown
+                _borrowWaitingForCustomer = false;
               });
               Navigator.pop(ctx);
-              ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-                content: Text('✅ Customer added!'),
-                backgroundColor: Color(0xFF10B981),
-              ));
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: Text(
+                    wasBorrowRequest
+                        ? '✅ Customer added. Borrow NOT recorded yet — tap “Record Borrow” to continue.'
+                        : '✅ Customer added!',
+                  ),
+                  backgroundColor: const Color(0xFF10B981),
+                  duration: const Duration(seconds: 4),
+                ),
+              );
             },
             child: const Text('Add'),
           ),
@@ -3021,32 +3063,32 @@ class _SalesEntryPageState extends State<SalesEntryPage>
   }
 
   Future<void> borrowSale() async {
-    // 🛡️ PRIVATE CREDIT: If phone is empty, check if owner wants to assign a Guest ID
-    if (customerPhoneController.text.trim().isEmpty) {
-      final String guestName = customerNameController.text.trim();
-      final bool hasGuestName = guestName.isNotEmpty;
-      
-      if (!hasGuestName) {
-        if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('⚠️ Name or Phone is required to record a PRIVATE CREDIT'),
-            backgroundColor: Color(0xFFEF4444),
-            behavior: SnackBarBehavior.floating,
-          ),
-        );
-        _showQuickAddCustomer();
-        return;
-      }
-      
-      // Allow borrowing for named guest (Local tracking only)
+    if (isLoading) return;
+
+    final rawPhone = customerPhoneController.text.trim();
+    final digits = rawPhone.replaceAll(RegExp(r'[^0-9]'), '');
+    final normalizedPhone =
+        digits.startsWith('91') && digits.length == 12
+            ? digits.substring(2)
+            : digits;
+
+    if (normalizedPhone.length != 10 ||
+        !RegExp(r'^[6-9][0-9]{9}$').hasMatch(normalizedPhone)) {
+      if (!mounted) return;
+      _borrowWaitingForCustomer = true;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('🛡️ Recording Private Credit for $guestName'),
-          backgroundColor: const Color(0xFF4338CA),
+        const SnackBar(
+          content: Text('⚠️ Customer phone number is required to record the borrow.'),
+          backgroundColor: Color(0xFFEF4444),
           behavior: SnackBarBehavior.floating,
         ),
       );
+      _showQuickAddCustomer();
+      return;
+    }
+
+    if (customerPhoneController.text.trim() != normalizedPhone && mounted) {
+      setState(() => customerPhoneController.text = normalizedPhone);
     }
 
     final totals = calculateTotal() as Map<String, dynamic>;
@@ -3435,14 +3477,12 @@ class _SalesEntryPageState extends State<SalesEntryPage>
                       if (totalAmount > 0) ...[
                         const SizedBox(height: 8),
                         _buildBottomButton(
-                          label: 'Borrow',
+                          label: isLoading
+                              ? 'Recording...'
+                              : (_borrowWaitingForCustomer ? 'Record Borrow' : 'Borrow'),
                           icon: Icons.assignment_late_rounded,
                           color: const Color(0xFF8B5CF6),
                           isEnabled: !isLoading,
-                          // 🔧 FIX: was hardcoded to false, so the Borrow
-                          // button never showed a spinner while
-                          // submitAllSales(isBorrow: true) was in flight —
-                          // it looked unresponsive during the network call.
                           isLoading: isLoading,
                           onTap: isLoading ? null : borrowSale,
                         ),

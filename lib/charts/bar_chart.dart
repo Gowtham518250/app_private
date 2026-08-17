@@ -50,12 +50,46 @@ class RevenueBarChart extends StatelessWidget {
         return _buildEmptyChart(AppLocalizations.of(context).noSalesData);
       }
 
+      // Prefer AnalyticsEngine's canonical product aggregation. This avoids
+      // losing restored invoice lines when they use product_name instead of
+      // the legacy product alias.
       final map = <String, double>{};
-      for (final s in engine.filteredSalesCache) {
-        final p = s['product'] ?? 'Unknown';
-        final val = s['total'] is num ? (s['total'] as num).toDouble() : 0.0;
-        map[p] = (map[p] ?? 0.0) + val;
-    }
+      for (final entry in engine.productAnalyticsCache.entries) {
+        final data = entry.value;
+        final name = (data['display_name'] ?? data['name'] ?? entry.key)
+            .toString()
+            .trim();
+        final rawTotal = data['total'];
+        final total = rawTotal is num
+            ? rawTotal.toDouble()
+            : double.tryParse(rawTotal?.toString() ?? '') ?? 0.0;
+        if (name.isNotEmpty && total > 0) {
+          map[name] = (map[name] ?? 0.0) + total;
+        }
+      }
+
+      // Fallback for legacy/nested records not represented in the cache.
+      if (map.isEmpty) {
+        for (final s in engine.filteredSalesCache) {
+          final rawProduct =
+              s['product_name'] ?? s['product'] ?? s['item'] ?? s['name'];
+          final name = rawProduct?.toString().trim();
+          if (name == null || name.isEmpty) continue;
+
+          final rawTotal = s['total'] ?? s['line_total'];
+          final total = rawTotal is num
+              ? rawTotal.toDouble()
+              : double.tryParse(rawTotal?.toString() ?? '') ?? 0.0;
+
+          if (total > 0) {
+            map[name] = (map[name] ?? 0.0) + total;
+          }
+        }
+      }
+
+      if (map.isEmpty) {
+        return _buildEmptyChart(AppLocalizations.of(context).noProductData);
+      }
 
     final items = map.entries.toList();
     items.sort((a, b) => b.value.compareTo(a.value));

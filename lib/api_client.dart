@@ -1344,6 +1344,22 @@ class ApiClient {
     _lastConnectionTime = null;
   }
 
+  /// Reset transient authentication/network state after an explicit logout.
+  /// Does not clear tokens or user data; SessionLogoutService owns that cleanup.
+  static Future<void> resetAuthRuntimeState() async {
+    try {
+      await _resetRefreshState();
+      resetConnectionStatus();
+      if (kDebugMode) {
+        debugPrint('✅ ApiClient transient auth state reset');
+      }
+    } catch (e) {
+      if (kDebugMode) {
+        debugPrint('⚠️ ApiClient transient auth reset failed: $e');
+      }
+    }
+  }
+
   /// Upload a single file using multipart
   static Future<http.StreamedResponse> uploadFile(String path, File file) async {
     final fileName = file.path.split(Platform.pathSeparator).last;
