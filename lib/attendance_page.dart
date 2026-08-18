@@ -518,4 +518,515 @@ class _AttendancePageState extends State<AttendancePage>
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
                 Text('Staff Management', style: GoogleFonts.poppins(
-                    fontWeight: FontWeight.w80
+                    fontWeight: FontWeight.w800, fontSize: 18, color: const Color(0xFF1F2937))),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                  decoration: BoxDecoration(color: _primary.withValues(alpha: 0.1), borderRadius: BorderRadius.circular(20)),
+                  child: Text('${_staff.length} Active', style: GoogleFonts.poppins(
+                      fontSize: 11, color: _primary, fontWeight: FontWeight.bold)),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 12),
+          ..._staff.map((worker) => _workerAttendanceTile(worker)),
+          const SizedBox(height: 24),
+          const Divider(thickness: 1, height: 1),
+          const SizedBox(height: 24),
+        ],
+
+        // --- SHOPKEEPER (OWN) STATUS ---
+        Text('My Daily Status', style: GoogleFonts.poppins(
+            fontWeight: FontWeight.w700, fontSize: 16)),
+        const SizedBox(height: 12),
+        if (rec == null) ...[
+          _emptyAttendance(),
+        ] else ...[
+          // Status card
+          _statusCard(rec, ci, co),
+          const SizedBox(height: 16),
+          // Time cards
+          Row(children: [
+            Expanded(child: _timeCard('Check-In', rec['check_in_time'],
+                Icons.login, _present)),
+            const SizedBox(width: 12),
+            Expanded(child: _timeCard('Check-Out', rec['check_out_time'],
+                Icons.logout, _primary)),
+          ]),
+          if (ci) ...[
+            const SizedBox(height: 12),
+            _hoursCard(_liveHours, isLive: !co),
+          ],
+        ],
+
+        const SizedBox(height: 32),
+
+        // Guide
+        Text('Attendance Guide', style: GoogleFonts.poppins(
+            fontWeight: FontWeight.w700, fontSize: 16)),
+        const SizedBox(height: 12),
+        _guide('Tap "CHECK IN" for workers when they arrive', Icons.login, _present),
+        _guide('Tap "CHECK OUT" when they leave for the day', Icons.logout, _primary),
+        _guide('View full track record in the History tab', Icons.history, Colors.orange),
+      ]),
+    );
+  }
+
+  Widget _workerAttendanceTile(Worker worker) {
+    // Check today's attendance from backend records using worker_id
+    final today = _df.format(DateTime.now());
+    final workerRecords = _records.where((r) {
+      // Use worker_id if available, otherwise fall back to employee_id for backward compatibility.
+      // Compare as strings: worker.id is a String, but the API returns
+      // worker_id/employee_id as a raw JSON int, so a bare `==` here always
+      // failed and this tile never detected "already checked in".
+      final recordWorkerId = r['worker_id'] ?? r['employee_id'];
+      
+      // Explicit null check to prevent null pointer exception
+      if (recordWorkerId == null) return false;
+      
+      final recDate = (r['attendance_date'] ?? '').toString().split('T').first.trim();
+      return recordWorkerId.toString() == worker.id.toString() && recDate == today;
+    }).toList();
+
+    // A worker can have several sessions today (multiple check-in/outs), so
+    // "currently in" means ANY session is still open — not just the first
+    // record found — otherwise the button could get stuck on a closed
+    // session while a later one is actually open, or vice versa.
+    final openWorkerRecord = workerRecords.cast<Map?>().firstWhere(
+      (r) => r != null && r['check_in_time'] != null && r['check_out_time'] == null,
+      orElse: () => null,
+    );
+    final workerRecord = openWorkerRecord ?? (workerRecords.isNotEmpty ? workerRecords.last : null);
+    bool isIn = openWorkerRecord != null;
+    
+    // Calculate monthly hours from backend records
+    final workerId = int.tryParse(worker.id) ?? 0;
+    final monthlyHours = _calculateWorkerMonthlyHours(workerId);
+    final predictedSalary = worker.salary > 0 ? (monthlyHours / 200.0) * worker.salary : 0.0;
+    final isLateToday = workerRecord != null && _isLateCheckIn(workerRecord);
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 10),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(12),
+        boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.04), blurRadius: 4)]
+      ),
+      child: Column(
+        children: [
+          ListTile(
+            onTap: () => Navigator.push(
+              context,
+              MaterialPageRoute(builder: (_) => WorkerAttendanceDetailPage(worker: worker)),
+            ),
+            leading: CircleAvatar(
+              backgroundColor: _primary.withValues(alpha: 0.1),
+              child: Text(worker.name[0], style: TextStyle(color: _primary, fontWeight: FontWeight.bold)),
+            ),
+            title: Text(worker.name, style: GoogleFonts.poppins(fontWeight: FontWeight.w600, fontSize: 14), maxLines: 1, overflow: TextOverflow.ellipsis),
+            subtitle: Row(children: [
+              Flexible(
+                child: Text('${worker.position} • $monthlyHours hrs this month',
+                    style: const TextStyle(fontSize: 11, color: Colors.grey), maxLines: 1, overflow: TextOverflow.ellipsis),
+              ),
+              if (isLateToday) ...[
+                const SizedBox(width: 6),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                  decoration: BoxDecoration(color: Colors.orange.withValues(alpha: 0.15), borderRadius: BorderRadius.circular(6)),
+                  child: const Text('LATE', style: TextStyle(fontSize: 9, fontWeight: FontWeight.bold, color: Colors.orange)),
+                ),
+              ],
+            ]),
+            trailing: SizedBox(
+              width: 100,
+              child: ElevatedButton(
+                onPressed: () async {
+                  final verified = await _showVerifyPinDialog(worker);
+                  if (verified) {
+                    await _markWorkerAttendance(worker, isIn);
+                  }
+                },
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: isIn ? _absent : _present,
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                  minimumSize: const Size(80, 32),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                  elevation: 0,
+                ),
+                child: Text(
+                  isIn ? 'CHECK OUT' : 'CHECK IN',
+                  style: const TextStyle(fontSize: 10, fontWeight: FontWeight.bold),
+                ),
+              ),
+            ),
+          ),
+          if (worker.salary > 0)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Text('Predicted Salary:', style: GoogleFonts.poppins(fontSize: 11, color: Colors.grey)),
+                  Text('₹${predictedSalary.toStringAsFixed(2)}', style: GoogleFonts.poppins(fontSize: 12, fontWeight: FontWeight.bold, color: _primary)),
+                ],
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _emptyAttendance() {
+    return Container(
+      padding: const EdgeInsets.all(24),
+      decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(16),
+          boxShadow: [BoxShadow(
+              color: Colors.black.withValues(alpha: 0.05),
+              blurRadius: 10)]),
+      child: Column(children: [
+        Container(
+          width: 80, height: 80,
+          decoration: BoxDecoration(
+              color: const Color(0xFF6366F1).withValues(alpha: 0.1),
+              shape: BoxShape.circle),
+            child: const Icon(Icons.fingerprint, size: 44, color: Color(0xFF6366F1)),
+        ),
+        const SizedBox(height: 16),
+        Text("Not checked in yet", style: GoogleFonts.poppins(
+            fontWeight: FontWeight.w700, fontSize: 16)),
+        Text("Tap the Check In button below to mark attendance",
+            textAlign: TextAlign.center,
+            style: GoogleFonts.poppins(fontSize: 13, color: Colors.grey)),
+      ]),
+    );
+  }
+
+  Widget _statusCard(Map<String, dynamic> rec, bool ci, bool co) {
+    final status = co
+        ? 'PRESENT'
+        : (ci ? 'IN PROGRESS' : rec['status'] ?? 'PENDING');
+    final color = status == 'PRESENT'
+        ? _present
+        : (status == 'IN PROGRESS' ? Colors.orange : Colors.grey);
+
+    return Container(
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+          color: color.withValues(alpha: 0.08),
+          border: Border.all(color: color.withValues(alpha: 0.3)),
+          borderRadius: BorderRadius.circular(16)),
+      child: Row(children: [
+        CircleAvatar(backgroundColor: color, radius: 24,
+            child: Icon(
+                status == 'PRESENT' ? Icons.check : Icons.access_time,
+                color: Colors.white)),
+        const SizedBox(width: 14),
+        Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text(AppLocalizations.of(context).todayStatus, style: GoogleFonts.poppins(
+              fontSize: 12, color: Colors.grey.shade600)),
+          Text(status, style: GoogleFonts.poppins(
+              fontSize: 18, fontWeight: FontWeight.w700, color: color)),
+        ]),
+      ]),
+    );
+  }
+
+  Widget _timeCard(String label, dynamic time, IconData icon, Color color) {
+    String t = '--:--';
+    final parsed = _parseServerTime(time);
+    if (time != null) {
+      t = parsed != null ? DateFormat.jm().format(parsed) : 'N/A';
+    }
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(12),
+          boxShadow: [BoxShadow(
+              color: Colors.black.withValues(alpha: 0.05), blurRadius: 6)]),
+      child: Column(children: [
+        Icon(icon, color: color, size: 28),
+        const SizedBox(height: 8),
+        Text(label, style: GoogleFonts.poppins(
+            fontSize: 11, color: Colors.grey.shade500)),
+        Text(t, style: GoogleFonts.poppins(
+            fontSize: 16, fontWeight: FontWeight.w700, color: color)),
+      ]),
+    );
+  }
+
+  Widget _hoursCard(String hours, {bool isLive = false}) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+      decoration: BoxDecoration(
+          gradient: LinearGradient(
+              colors: isLive 
+                  ? [const Color(0xFF10B981), const Color(0xFF059669)]
+                  : [const Color(0xFF6366F1), const Color(0xFF8B5CF6)]),
+          borderRadius: BorderRadius.circular(12),
+          boxShadow: [
+            BoxShadow(
+              color: (isLive ? const Color(0xFF10B981) : const Color(0xFF6366F1)).withValues(alpha: 0.3),
+              blurRadius: 8, offset: const Offset(0, 4)
+            )
+          ]),
+      child: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            Row(children: [
+              if (isLive) ...[
+                const SizedBox(
+                  width: 8, height: 8,
+                  child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white70),
+                ),
+                const SizedBox(width: 10),
+              ],
+              Text(isLive ? 'Live Working Hours' : 'Working Hours', style: GoogleFonts.poppins(
+                  color: Colors.white70, fontSize: 13)),
+            ]),
+            Text('$hours hrs', style: GoogleFonts.poppins(
+                color: Colors.white, fontSize: 20,
+                fontWeight: FontWeight.w700)),
+          ]),
+    );
+  }
+
+  Widget _guide(String text, IconData icon, Color color) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: Row(children: [
+        Container(width: 36, height: 36,
+            decoration: BoxDecoration(
+                color: color.withValues(alpha: 0.1), shape: BoxShape.circle),
+            child: Icon(icon, size: 18, color: color)),
+        const SizedBox(width: 12),
+        Expanded(child: Text(text, style: GoogleFonts.poppins(
+            fontSize: 13, color: Colors.grey.shade700))),
+      ]),
+    );
+  }
+
+  Widget _historyTab() {
+    if (_loading) return const Center(child: CircularProgressIndicator());
+    if (_records.isEmpty) return Center(
+        child: Text('No attendance records', style: GoogleFonts.poppins()));
+    return ListView.builder(
+      padding: const EdgeInsets.all(16),
+      itemCount: _records.length,
+      itemBuilder: (_, i) {
+        final r = _records[i];
+        final st = r['status'] as String? ?? 'N/A';
+        final color = st == 'PRESENT' ? _present
+            : (st == 'HALF_DAY' ? Colors.orange : _absent);
+        return Container(
+          margin: const EdgeInsets.only(bottom: 10),
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(12),
+              boxShadow: [BoxShadow(
+                  color: Colors.black.withValues(alpha: 0.04), blurRadius: 6)]),
+          child: Row(children: [
+            Container(width: 40, height: 40,
+                decoration: BoxDecoration(
+                    color: color.withValues(alpha: 0.1), shape: BoxShape.circle),
+                child: Icon(
+                    st == 'PRESENT' ? Icons.check_circle_outline : Icons.cancel_outlined,
+                    color: color, size: 22)),
+            const SizedBox(width: 12),
+            Expanded(child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(r['attendance_date'] ?? '', style: GoogleFonts.poppins(
+                  fontWeight: FontWeight.w600, fontSize: 13)),
+              if (r['check_in_time'] != null)
+                Text('In: ${DateFormat.jm().format(DateTime.tryParse(r['check_in_time']) ?? DateTime.now())}',
+                    style: GoogleFonts.poppins(
+                        fontSize: 11, color: Colors.grey.shade500)),
+            ])),
+            Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                decoration: BoxDecoration(
+                    color: color.withValues(alpha: 0.1),
+                    borderRadius: BorderRadius.circular(8)),
+                child: Text(st, style: GoogleFonts.poppins(
+                    fontSize: 10, fontWeight: FontWeight.bold, color: color)),
+              ),
+              if (_isLateCheckIn(r))
+                Padding(
+                  padding: const EdgeInsets.only(top: 4),
+                  child: Text('LATE', style: GoogleFonts.poppins(
+                      fontSize: 9, fontWeight: FontWeight.bold, color: Colors.orange.shade700)),
+                ),
+            ]),
+          ]),
+        );
+      },
+    );
+  }
+
+  Widget _payrollTab() {
+    if (_loading) return const Center(child: CircularProgressIndicator());
+    if (_staff.isEmpty) {
+      return Center(
+          child: Text('Add staff to see payroll summaries', style: GoogleFonts.poppins(color: Colors.grey.shade600)));
+    }
+
+    double totalPayroll = 0;
+    final rows = _staff.map((w) {
+      final workerId = int.tryParse(w.id) ?? 0;
+      final hours = _calculateWorkerMonthlyHours(workerId);
+      final rate = w.salary > 0 ? w.salary / 200.0 : 0.0;
+      final amount = hours * rate;
+      totalPayroll += amount;
+      return (worker: w, hours: hours, rate: rate, amount: amount);
+    }).toList();
+
+    return ListView(
+      padding: const EdgeInsets.all(16),
+      children: [
+        Container(
+          padding: const EdgeInsets.all(18),
+          decoration: BoxDecoration(
+            gradient: const LinearGradient(colors: [Color(0xFF6366F1), Color(0xFF8B5CF6)]),
+            borderRadius: BorderRadius.circular(16),
+          ),
+          child: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+            Text('Total Payroll · ${DateFormat('MMMM').format(DateTime.now())}',
+                style: GoogleFonts.poppins(color: Colors.white70, fontSize: 13)),
+            Text('₹${totalPayroll.toStringAsFixed(0)}',
+                style: GoogleFonts.poppins(color: Colors.white, fontSize: 20, fontWeight: FontWeight.w800)),
+          ]),
+        ),
+        const SizedBox(height: 16),
+        ...rows.map((r) => Container(
+              margin: const EdgeInsets.only(bottom: 10),
+              padding: const EdgeInsets.all(14),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(12),
+                boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.04), blurRadius: 6)],
+              ),
+              child: InkWell(
+                onTap: () => Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (_) => WorkerAttendanceDetailPage(worker: r.worker)),
+                ),
+                child: Row(children: [
+                  CircleAvatar(
+                    backgroundColor: _primary.withValues(alpha: 0.1),
+                    child: Text(r.worker.name[0], style: TextStyle(color: _primary, fontWeight: FontWeight.bold)),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                      Text(r.worker.name, style: GoogleFonts.poppins(fontWeight: FontWeight.w600, fontSize: 14)),
+                      Text('${r.hours.toStringAsFixed(1)} hrs × ₹${r.rate.toStringAsFixed(2)}/hr',
+                          style: GoogleFonts.poppins(fontSize: 11, color: Colors.grey.shade500)),
+                    ]),
+                  ),
+                  Text('₹${r.amount.toStringAsFixed(0)}',
+                      style: GoogleFonts.poppins(fontWeight: FontWeight.w800, fontSize: 15, color: _primary)),
+                  const SizedBox(width: 4),
+                  Icon(Icons.chevron_right, color: Colors.grey.shade400),
+                ]),
+              ),
+            )),
+      ],
+    );
+  }
+
+  Widget _buildLanguageSwitcher() {
+    final langProvider = Provider.of<LanguageProvider>(context);
+    return PopupMenuButton<String>(
+      icon: const Icon(Icons.language, color: Colors.white, size: 24),
+      tooltip: 'Change Language',
+      onSelected: (code) => langProvider.setLanguage(code),
+      itemBuilder: (context) => LanguageProvider.languages.map((l) {
+        return PopupMenuItem<String>(
+          value: l['code'],
+          child: Text('${l['nativeName']} (${l['name']})'),
+        );
+      }).toList(),
+    );
+  }
+
+  Future<void> _markWorkerAttendance(Worker worker, bool isCurrentlyIn) async {
+    try {
+      if (isCurrentlyIn) {
+        final workerId = int.tryParse(worker.id.toString());
+        if (workerId == null || workerId <= 0) {
+          throw StateError('Invalid worker ID: ${worker.id}');
+        }
+        await OfflineAttendanceService.checkOut(
+          employeeId: workerId,
+          workerId: workerId,
+        );
+        _showSnack('✅ ${worker.name} checked out — saved offline and queued', _primary);
+      } else {
+        final workerId = int.tryParse(worker.id.toString());
+        if (workerId == null || workerId <= 0) {
+          throw StateError('Invalid worker ID: ${worker.id}');
+        }
+        await OfflineAttendanceService.checkIn(
+          employeeId: workerId,
+          workerId: workerId,
+        );
+        _showSnack('✅ ${worker.name} checked in — saved offline and queued', _present);
+      }
+      await _fetch();
+    } catch (e) {
+      _showSnack('❌ Attendance could not be saved: $e', _absent);
+    }
+  }
+
+  Future<bool> _showVerifyPinDialog(Worker worker) async {
+    final controller = TextEditingController();
+    final result = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('Enter PIN for ${worker.name}', style: GoogleFonts.poppins(fontWeight: FontWeight.bold)),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text('Please enter your 4-digit attendance PIN to verify identity.'),
+            const SizedBox(height: 16),
+            TextField(
+              controller: controller,
+              keyboardType: TextInputType.number,
+              obscureText: true,
+              maxLength: 4,
+              textAlign: TextAlign.center,
+              style: GoogleFonts.poppins(fontSize: 24, letterSpacing: 10, fontWeight: FontWeight.bold),
+              decoration: InputDecoration(
+                counterText: '',
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+                filled: true,
+                fillColor: _primary.withValues(alpha: 0.05),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('CANCEL')),
+          ElevatedButton(
+            onPressed: () {
+              if (controller.text == worker.pin) {
+                Navigator.pop(ctx, true);
+              } else {
+                _showSnack('❌ Invalid PIN. Please try again.', _absent);
+              }
+            },
+            style: ElevatedButton.styleFrom(backgroundColor: _primary, foregroundColor: Colors.white),
+            child: const Text('VERIFY'),
+          ),
+        ],
+      ),
+    );
+    return result ?? false;
+  }
+}
