@@ -1,0 +1,29 @@
+name: Guard confirmed payment reconciliation
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: python scripts/guard_confirmed_payment.py
+      - name: Commit and clean
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add lib/dashboard_page.dart
+          rm -f scripts/guard_confirmed_payment.py .github/workflows/guard-confirmed-payment.yml
+          git add -u scripts/guard_confirmed_payment.py .github/workflows/guard-confirmed-payment.yml
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m 'guard invoice reconciliation to confirmed payments'
+          git push
