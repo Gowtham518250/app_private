@@ -1,0 +1,214 @@
+name: Apply Dashboard Payment Sync Patch
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch-dashboard:
+    if: github.event_name == 'workflow_dispatch' || github.event.head_commit.message != 'fix: dashboard payment and invoice sync'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Patch dashboard invoice reconciliation
+        shell: bash
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+
+          path = Path('lib/dashboard_page.dart')
+          text = path.read_text(encoding='utf-8')
+          marker = 'DASHBOARD_PAYMENT_SYNC_V2'
+          if marker in text:
+              print('Dashboard patch already present; nothing to do.')
+              raise SystemExit(0)
+
+          anchor = '  Future<bool> _fetchInvoicesFromBackend() async {'
+          method = r'''  // DASHBOARD_PAYMENT_SYNC_V2: Reconcile existing local invoices with
+  // the canonical backend invoice state. The previous dashboard merge only
+  // added invoices that did not exist locally, so a backend PAID/PARTIAL update
+  // could never replace an older local UNPAID/PENDING copy.
+          Future<bool> _refreshExistingInvoiceStateFromBackend() async {
+            try {
+              final token = await SecureTokenStorage.getToken() ?? '';
+              if (token.isEmpty) return false;
+
+              final response = await ApiClient.getJson(
+                ApiClient.invoicesList,
+                headers: {'Authorization': 'Bearer $token'},
+              ).timeout(const Duration(seconds: 10));
+              if (response.statusCode != 200) return false;
+
+              final decoded = jsonDecode(response.body);
+              final List<dynamic> remote = decoded is List
+                  ? decoded
+                  : (decoded is Map && decoded['invoices'] is List
+                      ? decoded['invoices'] as List
+                      : (decoded is Map && decoded['results'] is List
+                          ? decoded['results'] as List
+                          : const <dynamic>[]));
+              if (remote.isEmpty) return false;
+
+              String keyOf(Map<String, dynamic> row) {
+                for (final key in const [
+                  'invoice_number',
+                  'sale_id',
+                  'invoice_id',
+                  'invoiceId',
+                  'backend_id',
+                  'id',
+                ]) {
+                  final value = row[key]?.toString().trim() ?? '';
+                  if (value.isNotEmpty && value != '0' && value != 'null') {
+                    return value.toLowerCase();
+                  }
+                }
+                return '';
+              }
+
+              double money(dynamic value) {
+                if (value is num) return value.toDouble();
+                return double.tryParse(value?.toString() ?? '') ?? 0.0;
+              }
+
+              final remoteById = <String, Map<String, dynamic>>{};
+              for (final raw in remote) {
+                if (raw is! Map) continue;
+                final row = Map<String, dynamic>.from(raw);
+                final id = keyOf(row);
+                if (id.isNotEmpty) remoteById[id] = row;
+              }
+
+              bool changed = false;
+              final localSales = await LocalStorageService.loadSales();
+              final updatedSales = localSales.map((raw) {
+                if (raw is! Map) return raw;
+                final row = Map<String, dynamic>.from(raw);
+                final remoteRow = remoteById[keyOf(row)];
+                if (remoteRow == null) return raw;
+
+                final remoteStatus = (remoteRow['payment_status'] ??
+                        remoteRow['status'])
+                    ?.toString();
+                final remotePaid = remoteRow['paid_amount'] ??
+                    remoteRow['amount_paid'] ??
+                    remoteRow['paid'];
+                final remoteMethod = remoteRow['payment_method'];
+                if (remoteStatus == null &&
+                    remotePaid == null &&
+                    remoteMethod == null) {
+                  return raw;
+                }
+
+                final next = <String, dynamic>{
+                  ...row,
+                  if (remoteStatus != null) 'payment_status': remoteStatus,
+                  if (remoteStatus != null) 'status': remoteStatus,
+                  if (remotePaid != null) 'paid_amount': money(remotePaid),
+                  if (remotePaid != null) 'amount_paid': money(remotePaid),
+                  if (remoteMethod != null) 'payment_method': remoteMethod,
+                  'sync_status': 'synced',
+                };
+                if (jsonEncode(next) != jsonEncode(row)) changed = true;
+                return next;
+              }).toList();
+
+              if (changed) {
+                await LocalStorageService.saveSales(updatedSales);
+              }
+
+              // Keep the dedicated local invoice ledger aligned as well. This
+              // prevents Invoice/Khata screens from re-showing stale PENDING
+              // after the dashboard has already received the backend ACK.
+              try {
+                final localInvoices = await LocalStorageService.loadLocalInvoices();
+                final updatedInvoices = localInvoices.map((raw) {
+                  if (raw is! Map) return raw;
+                  final row = Map<String, dynamic>.from(raw);
+                  final remoteRow = remoteById[keyOf(row)];
+                  if (remoteRow == null) return raw;
+                  final remoteStatus = (remoteRow['payment_status'] ??
+                          remoteRow['status'])
+                      ?.toString();
+                  final remotePaid = remoteRow['paid_amount'] ??
+                      remoteRow['amount_paid'] ??
+                      remoteRow['paid'];
+                  final remoteMethod = remoteRow['payment_method'];
+                  return {
+                    ...row,
+                    if (remoteStatus != null) 'payment_status': remoteStatus,
+                    if (remoteStatus != null) 'status': remoteStatus,
+                    if (remotePaid != null) 'paid_amount': money(remotePaid),
+                    if (remotePaid != null) 'amount_paid': money(remotePaid),
+                    if (remoteMethod != null) 'payment_method': remoteMethod,
+                    'sync_status': 'synced',
+                  };
+                }).toList();
+                await LocalStorageService.saveLocalInvoices(updatedInvoices);
+              } catch (e) {
+                if (kDebugMode) {
+                  debugPrint('⚠️ Local invoice ledger refresh skipped: $e');
+                }
+              }
+
+              return changed;
+            } catch (e) {
+              if (kDebugMode) {
+                debugPrint('⚠️ Existing invoice state refresh failed: $e');
+              }
+              return false;
+            }
+          }
+
+'''
+          if anchor not in text:
+              raise SystemExit('Dashboard anchor not found; refusing to modify file.')
+          text = text.replace(anchor, method + anchor, 1)
+
+          old = """            final changed = await _fetchInvoicesFromBackend();
+            if (changed && mounted) {"""
+          new = """            final changed = await _fetchInvoicesFromBackend();
+            final paymentStateChanged = await _refreshExistingInvoiceStateFromBackend();
+            if ((changed || paymentStateChanged) && mounted) {"""
+          if old not in text:
+              raise SystemExit('Dashboard reconciliation call site not found; refusing to modify file.')
+          text = text.replace(old, new, 1)
+
+          old_payment = """      await SyncService.updateSalePayment(invoiceNumber, newStatus, newPaid);
+      await SyncService.processQueueSafe();
+      SyncService.triggerDashboardRefresh();"""
+          new_payment = """      await SyncService.updateSalePayment(invoiceNumber, newStatus, newPaid);
+      await SyncService.processQueueSafe();
+      // Pull the canonical server state back before refreshing the dashboard so
+      // a successful payment ACK cannot be immediately overwritten by stale
+      // local PENDING data.
+      await _refreshExistingInvoiceStateFromBackend();
+      SyncService.triggerDashboardRefresh();"""
+          if old_payment not in text:
+              raise SystemExit('Payment reconciliation call site not found; refusing to modify file.')
+          text = text.replace(old_payment, new_payment, 1)
+
+          path.write_text(text, encoding='utf-8')
+          print('Dashboard payment/invoice synchronization patch applied.')
+          PY
+
+      - name: Commit and push dashboard patch
+        shell: bash
+        run: |
+          if git diff --quiet -- lib/dashboard_page.dart; then
+            echo "No dashboard changes needed."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add lib/dashboard_page.dart
+          git commit -m "fix: dashboard payment and invoice sync"
+          git push origin main
