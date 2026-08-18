@@ -1107,6 +1107,18 @@ class LocalStorageService {
       return '';
     }
 
+    // Tracks phone -> the canonical unified-ledger key that phone resolved
+    // to. Without this, a customer who has an id-keyed entry (built from
+    // their invoices) and ALSO a legacy phone-only Khata adjustment ends up
+    // as two disconnected ledger rows: the id-keyed row keeps the invoice
+    // balance untouched, and the phone-keyed row silently absorbs any
+    // payment made against it. Since only positive balances are shown
+    // (`bal > 0.01`), a payment that only reduced the orphaned phone row
+    // makes the money "vanish" — the visible total never goes down even
+    // though the payment really was recorded. This index lets legacy
+    // Khata-balance adjustments always land on the SAME row the invoices use.
+    final Map<String, String> phoneToKey = {};
+
     Map<String, dynamic> ensureCustomer({
       dynamic customerId,
       dynamic phone,
@@ -1114,6 +1126,11 @@ class LocalStorageService {
     }) {
       final key = customerKey(customerId: customerId, phone: phone);
       if (key.isEmpty) return {};
+
+      final normalizedPhone = phone?.toString().trim() ?? '';
+      if (normalizedPhone.isNotEmpty) {
+        phoneToKey.putIfAbsent(normalizedPhone, () => key);
+      }
 
       return unified.putIfAbsent(
         key,
@@ -1203,9 +1220,14 @@ class LocalStorageService {
     }
 
     // Legacy manual Khata adjustments are additive for records that have not
-    // been attached to a canonical invoice yet.
+    // been attached to a canonical invoice yet. Resolve through phoneToKey
+    // first so this always lands on the SAME row the customer's invoices
+    // use — otherwise a payment recorded against this phone number (which
+    // decrements this balance) can end up on an orphaned duplicate row that
+    // never shows in the pending list, making the payment look like it had
+    // no effect on the customer's outstanding total.
     for (final pair in khataBalances.entries) {
-      final key = customerKey(phone: pair.key);
+      final key = phoneToKey[pair.key.trim()] ?? customerKey(phone: pair.key);
       if (key.isEmpty) continue;
 
       final entry = unified.putIfAbsent(
