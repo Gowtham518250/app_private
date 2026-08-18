@@ -1,3 +1,4 @@
+# Trigger verified production-fix run.
 name: Apply Production Fixes
 
 on:
@@ -29,97 +30,61 @@ jobs:
         shell: python
         run: |
           from pathlib import Path
-
           def replace(path, old, new):
-              p = Path(path)
-              s = p.read_text(encoding='utf-8')
-              if old not in s:
-                  raise SystemExit(f'PATCH TARGET NOT FOUND: {path}: {old[:120]!r}')
-              p.write_text(s.replace(old, new, 1), encoding='utf-8')
-              print(f'patched {path}')
+              p=Path(path); s=p.read_text(encoding='utf-8')
+              if old not in s: raise SystemExit(f'PATCH TARGET NOT FOUND: {path}: {old[:120]!r}')
+              p.write_text(s.replace(old,new,1),encoding='utf-8')
 
-          # 1) Sales/invoice sync: send actual GST tax. calculateTotal exposes
-          # cgst/sgst, while SaleService previously looked for a nonexistent
-          # totals['tax'], causing backend line-total validation failures when
-          # GST was enabled and leaving the invoice absent from the cloud.
-          replace(
-              'lib/sale_service.dart',
-              "'tax': withTax ? (totals['tax'] ?? 0.0) : 0.0,",
-              "'tax': withTax ? ((totals['cgst'] as num?)?.toDouble() ?? 0.0) + ((totals['sgst'] as num?)?.toDouble() ?? 0.0) : 0.0,",
-          )
+          replace('lib/sale_service.dart', "'tax': withTax ? (totals['tax'] ?? 0.0) : 0.0,", "'tax': withTax ? ((totals['cgst'] as num?)?.toDouble() ?? 0.0) + ((totals['sgst'] as num?)?.toDouble() ?? 0.0) : 0.0,")
 
-          # 2) Sales/invoice sync: honor per-line discounts. The UI total was
-          # discount-aware but the API line items were not, so backend subtotal
-          # validation could reject an otherwise valid discounted bill.
-          replace(
-              'lib/sales_entry_page.dart',
-              "final gstPct    = double.tryParse(e['gst']?.text.trim() ?? '0') ?? 0.0;\n      \n      final lineSub   = qty * price;",
-              "final gstPct    = double.tryParse(e['gst']?.text.trim() ?? '0') ?? 0.0;\n      final discount  = double.tryParse(e['discount']?.text.trim() ?? '0') ?? 0.0;\n      final effectivePrice = math.max(0.0, price - discount);\n      \n      final lineSub   = qty * effectivePrice;",
-          )
-          replace(
-              'lib/sales_entry_page.dart',
-              "'price':        price.toString(),\n        'qty':          qty,",
-              "'price':        effectivePrice.toString(),\n        'qty':          qty,\n        'discount':     discount.toString(),",
-          )
+          replace('lib/sales_entry_page.dart', "final gstPct    = double.tryParse(e['gst']?.text.trim() ?? '0') ?? 0.0;\n      \n      final lineSub   = qty * price;", "final gstPct    = double.tryParse(e['gst']?.text.trim() ?? '0') ?? 0.0;\n      final discount  = double.tryParse(e['discount']?.text.trim() ?? '0') ?? 0.0;\n      final effectivePrice = math.max(0.0, price - discount);\n      \n      final lineSub   = qty * effectivePrice;")
+          replace('lib/sales_entry_page.dart', "'price':        price.toString(),\n        'qty':          qty,", "'price':        effectivePrice.toString(),\n        'qty':          qty,\n        'discount':     discount.toString(),")
 
-          # 3) Staff attendance is intentionally one mark per employee per
-          # calendar day. The backend already enforces this; the offline layer
-          # previously created session_1/session_2 after checkout, making the
-          # phone UI disagree with the server. Keep the first durable record
-          # and make subsequent check-in attempts a safe no-op.
-          p = Path('lib/attendance_offline_service.dart')
-          s = p.read_text(encoding='utf-8')
-          start = s.index('  /// Starts a new attendance session.')
-          end = s.index('  /// Closes the currently open session', start)
-          new_checkin = '''  /// Marks attendance once per employee per calendar day.\n  /// The backend is the final authority and also rejects duplicate daily\n  /// check-ins; the offline store mirrors that invariant so the UI cannot\n  /// create multiple sessions that later conflict with the server.\n  static Future<bool> checkIn({required int employeeId,int? workerId}) async {\n    final now=DateTime.now();\n    final date=_date(now);\n    final sessions=await _findTodaySessions(employeeId:employeeId,workerId:workerId,date:date);\n    if(sessions.isNotEmpty) return false;\n\n    const sessionIndex=0;\n    final operationId='ATT_IN_${workerId??employeeId}_${date}';\n    await _upsertSession(employeeId:employeeId,workerId:workerId,date:date,sessionIndex:sessionIndex,checkIn:now,status:'PRESENT');\n    final queued=await SyncQueueManager.enqueue('attendance_check_in',{'operation_id':operationId,'idempotency_key':operationId,'employee_id':employeeId,'worker_id':workerId,'attendance_date':date,'session_index':sessionIndex});\n    if(!queued)throw StateError('Unable to persist attendance check-in to durable outbox');\n    return true;\n  }\n\n'''
-          s = s[:start] + new_checkin + s[end:]
-          p.write_text(s, encoding='utf-8')
+          p=Path('lib/attendance_offline_service.dart'); s=p.read_text(encoding='utf-8')
+          start=s.index('  /// Starts a new attendance session.'); end=s.index('  /// Closes the currently open session',start)
+          new='''  /// Marks attendance once per employee per calendar day.\n  /// The backend is the final authority and rejects duplicate daily marks.\n  static Future<bool> checkIn({required int employeeId,int? workerId}) async {\n    final now=DateTime.now();\n    final date=_date(now);\n    final sessions=await _findTodaySessions(employeeId:employeeId,workerId:workerId,date:date);\n    if(sessions.isNotEmpty)return false;\n    const sessionIndex=0;\n    final operationId='ATT_IN_${workerId??employeeId}_${date}';\n    await _upsertSession(employeeId:employeeId,workerId:workerId,date:date,sessionIndex:sessionIndex,checkIn:now,status:'PRESENT');\n    final queued=await SyncQueueManager.enqueue('attendance_check_in',{'operation_id':operationId,'idempotency_key':operationId,'employee_id':employeeId,'worker_id':workerId,'attendance_date':date,'session_index':sessionIndex});\n    if(!queued)throw StateError('Unable to persist attendance check-in to durable outbox');\n    return true;\n  }\n\n'''
+          p.write_text(s[:start]+new+s[end:],encoding='utf-8')
 
-          # 4) Payment dedup: notifications and bank SMS for the same payment
-          # previously used different app-family buckets, so the same payment
-          # could be emitted twice when no UTR was available. Use a common UPI
-          # family and a shorter time bucket for the non-UTR fallback.
-          replace(
-              'lib/payment_event.dart',
-              "final fiveMinBucket = (timestamp.minute / 5).floor();",
-              "final twoMinBucket = ((timestamp.hour * 60 + timestamp.minute) / 2).floor();",
-          )
-          replace(
-              'lib/payment_event.dart',
-              "'$appFamily'\n        '$hourBucket$fiveMinBucket';",
-              "'$appFamily'\n        '$hourBucket$twoMinBucket';",
-          )
-          replace(
-              'lib/payment_event.dart',
-              "// Bank SMS and all bank apps share one family —\n      // the SMS confirming a PhonePe payment comes from the bank, not PhonePe.\n      // So we use a generic 'bank' bucket for all bank-sourced events.\n      case PaymentApp.bankSms:\n      case PaymentApp.bankApp:\n      case PaymentApp.icici:\n      case PaymentApp.sbiYono:\n      case PaymentApp.axis:\n      case PaymentApp.hdfc:        return 'bank';\n      default:                     return 'upi';",
-              "// All UPI/payment channels share one family for the non-UTR\n      // fallback so a payment-app notification and its bank SMS can\n      // deduplicate across sources. The shorter time bucket above reduces\n      // the chance of suppressing a genuinely separate same-amount payment.\n      case PaymentApp.googlePay:\n      case PaymentApp.phonePe:\n      case PaymentApp.paytm:\n      case PaymentApp.amazonPay:\n      case PaymentApp.bhim:\n      case PaymentApp.whatsappPay:\n      case PaymentApp.bankSms:\n      case PaymentApp.bankApp:\n      case PaymentApp.icici:\n      case PaymentApp.sbiYono:\n      case PaymentApp.axis:\n      case PaymentApp.hdfc:\n      case PaymentApp.cred:\n      case PaymentApp.payzapp:\n      case PaymentApp.unknown:\n        return 'upi';\n      default:\n        return 'upi';",
-          )
+          replace('lib/payment_event.dart', "final fiveMinBucket = (timestamp.minute / 5).floor();", "final twoMinBucket = ((timestamp.hour * 60 + timestamp.minute) / 2).floor();")
+          replace('lib/payment_event.dart', "'$appFamily'\n        '$hourBucket$fiveMinBucket';", "'$appFamily'\n        '$hourBucket$twoMinBucket';")
+          old="""// Bank SMS and all bank apps share one family —
+      // the SMS confirming a PhonePe payment comes from the bank, not PhonePe.
+      // So we use a generic 'bank' bucket for all bank-sourced events.
+      case PaymentApp.bankSms:
+      case PaymentApp.bankApp:
+      case PaymentApp.icici:
+      case PaymentApp.sbiYono:
+      case PaymentApp.axis:
+      case PaymentApp.hdfc:        return 'bank';
+      default:                     return 'upi';"""
+          new="""// All payment channels share one family for the non-UTR fallback
+      // so an app notification and its bank SMS can deduplicate across sources.
+      case PaymentApp.googlePay:
+      case PaymentApp.phonePe:
+      case PaymentApp.paytm:
+      case PaymentApp.amazonPay:
+      case PaymentApp.bhim:
+      case PaymentApp.whatsappPay:
+      case PaymentApp.bankSms:
+      case PaymentApp.bankApp:
+      case PaymentApp.icici:
+      case PaymentApp.sbiYono:
+      case PaymentApp.axis:
+      case PaymentApp.hdfc:
+      case PaymentApp.cred:
+      case PaymentApp.payzapp:
+      case PaymentApp.unknown:
+        return 'upi';
+      default:
+        return 'upi';"""
+          replace('lib/payment_event.dart',old,new)
 
-          # 5) Live payment scorer: the security parameter already exists but
-          # the direct analyze() path forgot to pass it, allowing an unverified
-          # package to receive the trusted-bank-app boost in that path.
-          replace(
-              'lib/payment_detection_service.dart',
-              "      source: source,\n    );\n\n    score -= fraud.riskScore * 0.35;",
-              "      source: source,\n      isUnverifiedApp: false,\n    );\n\n    score -= fraud.riskScore * 0.35;",
-          )
+          # Static analyze() has no unverified-package context, so explicitly
+          # keep it on the conservative non-fallback path. Live notifications
+          # pass the real flag through _processText/_runPipeline.
+          replace('lib/payment_detection_service.dart', "      source: source,\n    );\n\n    score -= fraud.riskScore * 0.35;", "      source: source,\n      isUnverifiedApp: false,\n    );\n\n    score -= fraud.riskScore * 0.35;")
 
-          # 6) UI attendance: a duplicate daily mark must be visible as an
-          # already-marked state, not as a new check-in/check-out session.
-          replace(
-              'lib/attendance_page.dart',
-              "      if (_mySession == null) {\n        await OfflineAttendanceService.checkIn(employeeId: _userId!);\n        _showSnack('✅ Checked In — saved offline and queued for sync', _present);\n      } else {",
-              "      if (_mySession == null) {\n        final marked = await OfflineAttendanceService.checkIn(employeeId: _userId!);\n        if (!marked) {\n          _showSnack('ℹ️ Attendance already marked for today', _primary);\n          await _fetch();\n          return;\n        }\n        _showSnack('✅ Attendance marked for today — saved offline and queued for sync', _present);\n      } else {",
-          )
-
-          # 7) Keep the offline attendance source-of-truth aligned with the
-          # one-mark-per-day business rule: today's existing record means the
-          # button is not allowed to create a second session.
-          replace(
-              'lib/attendance_page.dart',
-              "  Future<void> _refreshMySession() async {\n    if (_userId == null) return;\n    final open = await OfflineAttendanceService.openSessionToday(employeeId: _userId!);\n    if (mounted) setState(() => _mySession = open);\n  }",
-              "  Future<void> _refreshMySession() async {\n    if (_userId == null) return;\n    final open = await OfflineAttendanceService.openSessionToday(employeeId: _userId!);\n    if (mounted) setState(() => _mySession = open);\n  }",
-          )
+          replace('lib/attendance_page.dart', "      if (_mySession == null) {\n        await OfflineAttendanceService.checkIn(employeeId: _userId!);\n        _showSnack('✅ Checked In — saved offline and queued for sync', _present);\n      } else {", "      if (_mySession == null) {\n        final marked = await OfflineAttendanceService.checkIn(employeeId: _userId!);\n        if (!marked) {\n          _showSnack('ℹ️ Attendance already marked for today', _primary);\n          await _fetch();\n          return;\n        }\n        _showSnack('✅ Attendance marked for today — saved offline and queued for sync', _present);\n      } else {")
 
       - name: Format and validate Flutter
         run: |
