@@ -1,0 +1,110 @@
+#!/usr/bin/env python3
+"""
+Safely replaces every `.withValues(alpha: <EXPR>)` with `.withOpacity(<EXPR>)`
+across all .dart files under lib/, where <EXPR> can be any arbitrarily
+complex expression (ternaries, math, nested function calls with their own
+parens, etc). Uses paren-depth tracking instead of regex, so it can't be
+tricked by nested parentheses inside the alpha expression.
+
+Usage:
+    python3 fix_with_values.py [lib_dir]
+
+Prints a summary of every file changed and how many replacements were made.
+Makes a .bak backup of each modified file before writing.
+"""
+import sys
+import re
+from pathlib import Path
+
+MARKER = ".withValues("
+
+def find_matching_close(s: str, open_idx: int) -> int:
+    """Given index of the '(' right after '.withValues', return index of
+    its matching ')' by tracking paren depth. Returns -1 if unbalanced."""
+    depth = 0
+    i = open_idx
+    while i < len(s):
+        c = s[i]
+        if c == '(':
+            depth += 1
+        elif c == ')':
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    return -1
+
+def process_text(text: str):
+    out = []
+    i = 0
+    count = 0
+    n = len(text)
+    while i < n:
+        idx = text.find(MARKER, i)
+        if idx == -1:
+            out.append(text[i:])
+            break
+        # copy everything up to and including ".withValues"
+        prefix_end = idx + len(".withValues")
+        out.append(text[i:prefix_end - len(".withValues")])  # up to the dot
+        open_paren = idx + len(MARKER) - 1  # index of '('
+        close_paren = find_matching_close(text, open_paren)
+        if close_paren == -1:
+            # unbalanced, bail out safely, copy rest verbatim
+            out.append(text[idx:])
+            break
+        args = text[open_paren + 1:close_paren]  # inside the parens
+        # Expect args like: alpha: <EXPR>  (possibly with other named args
+        # too, e.g. alpha: 0.2, red: ... ) — we only handle the common
+        # single-arg `alpha: X` case safely; anything else is left untouched
+        # so nothing is silently corrupted.
+        m = re.match(r'^\s*alpha\s*:\s*(.*)$', args, re.DOTALL)
+        if m:
+            expr = m.group(1)
+            out.append(f".withOpacity({expr})")
+            count += 1
+        else:
+            # Not a simple alpha-only call (e.g. has red/green/blue/alpha
+            # together) — leave completely untouched, flag for manual review.
+            out.append(text[idx:close_paren + 1])
+        i = close_paren + 1
+    return "".join(out), count
+
+def main():
+    lib_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("lib")
+    if not lib_dir.exists():
+        print(f"Directory not found: {lib_dir}")
+        sys.exit(1)
+
+    total_files = 0
+    total_replacements = 0
+    skipped_complex = []
+
+    for dart_file in sorted(lib_dir.rglob("*.dart")):
+        text = dart_file.read_text(encoding="utf-8")
+        if ".withValues(" not in text:
+            continue
+        new_text, count = process_text(text)
+        if count > 0:
+            backup = dart_file.with_suffix(dart_file.suffix + ".bak")
+            backup.write_text(text, encoding="utf-8")
+            dart_file.write_text(new_text, encoding="utf-8")
+            total_files += 1
+            total_replacements += count
+            print(f"✅ {dart_file}: {count} replaced")
+        remaining = new_text.count(".withValues(")
+        if remaining > 0:
+            skipped_complex.append((str(dart_file), remaining))
+
+    print("\n--- Summary ---")
+    print(f"Files modified:     {total_files}")
+    print(f"Total replacements: {total_replacements}")
+    if skipped_complex:
+        print("\n⚠️  Left untouched (multi-arg withValues, needs manual review):")
+        for f, n in skipped_complex:
+            print(f"   {f}: {n} remaining")
+    else:
+        print("\nNo remaining .withValues( calls that need manual review.")
+
+if __name__ == "__main__":
+    main()
