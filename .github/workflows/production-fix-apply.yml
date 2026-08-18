@@ -24,83 +24,261 @@ jobs:
           channel: stable
           flutter-version: '3.41.9'
           cache: true
-      - name: Apply deterministic bug fixes
+      - name: Apply production fixes
         shell: python
         run: |
           from pathlib import Path
-          def replace(path, old, new):
+          def replace(path, old, new, count=1):
               p=Path(path); s=p.read_text(encoding='utf-8')
-              if old not in s: raise SystemExit(f'PATCH TARGET NOT FOUND: {path}: {old[:120]!r}')
-              p.write_text(s.replace(old,new,1),encoding='utf-8')
+              if old not in s: raise SystemExit(f'PATCH TARGET NOT FOUND: {path}: {old[:160]!r}')
+              p.write_text(s.replace(old,new,count),encoding='utf-8')
 
-          # Invoice sync: send the real GST tax exposed by calculateTotal().
-          replace('lib/sale_service.dart', "'tax': withTax ? (totals['tax'] ?? 0.0) : 0.0,", "'tax': withTax ? ((totals['cgst'] as num?)?.toDouble() ?? 0.0) + ((totals['sgst'] as num?)?.toDouble() ?? 0.0) : 0.0,")
+          # ------------------------------------------------------------------
+          # Payment detection: a positive payment below the remaining balance
+          # is a valid partial payment. Exact means the remaining amount is
+          # actually settled; do not use a 50% threshold or a ₹2 tolerance.
+          # ------------------------------------------------------------------
+          replace('lib/payment_detection_service.dart', """    final tol  = math.max(remaining * 0.05, 2.0);
+    final diff = (detected - remaining).abs();
 
-          # Discounted line items must match the subtotal sent to the backend.
-          replace('lib/sales_entry_page.dart', "final gstPct    = double.tryParse(e['gst']?.text.trim() ?? '0') ?? 0.0;\n      \n      final lineSub   = qty * price;", "final gstPct    = double.tryParse(e['gst']?.text.trim() ?? '0') ?? 0.0;\n      final discount  = double.tryParse(e['discount']?.text.trim() ?? '0') ?? 0.0;\n      final effectivePrice = math.max(0.0, price - discount);\n      \n      final lineSub   = qty * effectivePrice;")
-          replace('lib/sales_entry_page.dart', "'price':        price.toString(),\n        'qty':          qty,", "'price':        effectivePrice.toString(),\n        'qty':          qty,\n        'discount':     discount.toString(),")
-
-          # Cumulative partial payments: keep PaymentDetectionService's bill
-          # context in sync with the UI's cumulative _paidAmount.
-          replace('lib/sales_entry_page.dart', "          if (!event.isFailed) {\n            _paidAmount += event.amount;", "          if (!event.isFailed) {\n            PaymentDetectionService().billContext.recordPartial(event.amount);\n            _paidAmount += event.amount;")
-
-          # Attendance is one mark per calendar day, matching the backend.
-          p=Path('lib/attendance_offline_service.dart'); s=p.read_text(encoding='utf-8')
-          start=s.index('  /// Starts a new attendance session.'); end=s.index('  /// Closes the currently open session',start)
-          new='''  /// Marks attendance once per employee per calendar day.\n  /// The backend is the final authority and rejects duplicate daily marks.\n  static Future<bool> checkIn({required int employeeId,int? workerId}) async {\n    final now=DateTime.now();\n    final date=_date(now);\n    final sessions=await _findTodaySessions(employeeId:employeeId,workerId:workerId,date:date);\n    if(sessions.isNotEmpty)return false;\n    const sessionIndex=0;\n    final operationId='ATT_IN_${workerId??employeeId}_${date}';\n    await _upsertSession(employeeId:employeeId,workerId:workerId,date:date,sessionIndex:sessionIndex,checkIn:now,status:'PRESENT');\n    final queued=await SyncQueueManager.enqueue('attendance_check_in',{'operation_id':operationId,'idempotency_key':operationId,'employee_id':employeeId,'worker_id':workerId,'attendance_date':date,'session_index':sessionIndex});\n    if(!queued)throw StateError('Unable to persist attendance check-in to durable outbox');\n    return true;\n  }\n\n'''
-          p.write_text(s[:start]+new+s[end:],encoding='utf-8')
-
-          # Non-UTR payment dedup must work across app notification + bank SMS.
-          replace('lib/payment_event.dart', "final fiveMinBucket = (timestamp.minute / 5).floor();", "final twoMinBucket = ((timestamp.hour * 60 + timestamp.minute) / 2).floor();")
-          replace('lib/payment_event.dart', "'$appFamily'\n        '$hourBucket$fiveMinBucket';", "'$appFamily'\n        '$hourBucket$twoMinBucket';")
-          old="""// Bank SMS and all bank apps share one family —
-      // the SMS confirming a PhonePe payment comes from the bank, not PhonePe.
-      // So we use a generic 'bank' bucket for all bank-sourced events.
-      case PaymentApp.bankSms:
-      case PaymentApp.bankApp:
-      case PaymentApp.icici:
-      case PaymentApp.sbiYono:
-      case PaymentApp.axis:
-      case PaymentApp.hdfc:        return 'bank';
-      default:                     return 'upi';"""
-          new="""// All payment channels share one family for the non-UTR fallback
-      // so an app notification and its bank SMS can deduplicate across sources.
-      case PaymentApp.googlePay:
-      case PaymentApp.phonePe:
-      case PaymentApp.paytm:
-      case PaymentApp.amazonPay:
-      case PaymentApp.bhim:
-      case PaymentApp.whatsappPay:
-      case PaymentApp.bankSms:
-      case PaymentApp.bankApp:
-      case PaymentApp.icici:
-      case PaymentApp.sbiYono:
-      case PaymentApp.axis:
-      case PaymentApp.hdfc:
-      case PaymentApp.cred:
-      case PaymentApp.payzapp:
-      case PaymentApp.unknown:
-        return 'upi';
-      default:
-        return 'upi';"""
-          replace('lib/payment_event.dart',old,new)
-
-          # A partial payment is any positive amount below the remaining due;
-          # requiring 50% of remaining made ₹2 on a ₹10 bill look like a mismatch.
-          replace('lib/payment_detection_service.dart', """    if (diff <= tol)                          return BillMatchResult.exact;
+    if (diff <= tol)                          return BillMatchResult.exact;
     if (detected >= remaining * 0.5 &&
         detected  < remaining - tol)          return BillMatchResult.partial;
     if (detected  > expectedAmount! * 2.0)    return BillMatchResult.suspicious;
-    return BillMatchResult.mismatch;""", """    if (diff <= tol)                       return BillMatchResult.exact;
+    return BillMatchResult.mismatch;""", """    const tol = 0.01;
+    final diff = (detected - remaining).abs();
+
+    if (diff <= tol) return BillMatchResult.exact;
     if (detected > 0 && detected < remaining - tol) return BillMatchResult.partial;
-    if (detected > expectedAmount! * 2.0)   return BillMatchResult.suspicious;
+    if (detected > expectedAmount! * 2.0) return BillMatchResult.suspicious;
     return BillMatchResult.mismatch;""")
 
-          # Keep the direct analyze() path conservative; live notification
-          # processing already passes the actual unverified-package flag.
-          replace('lib/payment_detection_service.dart', "      source: source,\n    );\n\n    score -= fraud.riskScore * 0.35;", "      source: source,\n      isUnverifiedApp: false,\n    );\n\n    score -= fraud.riskScore * 0.35;")
+          # A verified payment-app notification plus the active local QR bill
+          # is a valid local confirmation anchor even for a partial payment.
+          replace('lib/payment_detection_service.dart', """      final strongVerifiedAppBillAnchor = source == 'notification' &&
+          isTrustedApp &&
+          billResult == BillMatchResult.exact &&
+          _Classifier.hasStructuredPaymentContext(text);""", """      final strongVerifiedAppBillAnchor = source == 'notification' &&
+          isTrustedApp &&
+          (billResult == BillMatchResult.exact || billResult == BillMatchResult.partial) &&
+          _Classifier.hasStructuredPaymentContext(text);""")
 
-          replace('lib/attendance_page.dart', "      if (_mySession == null) {\n        await OfflineAttendanceService.checkIn(employeeId: _userId!);\n        _showSnack('✅ Checked In — saved offline and queued for sync', _present);\n      } else {", "      if (_mySession == null) {\n        final marked = await OfflineAttendanceService.checkIn(employeeId: _userId!);\n        if (!marked) {\n          _showSnack('ℹ️ Attendance already marked for today', _primary);\n          await _fetch();\n          return;\n        }\n        _showSnack('✅ Attendance marked for today — saved offline and queued for sync', _present);\n      } else {")
+          # Do not downgrade valid partial QR payments to LIKELY merely because
+          # they are partial. The local QR session is the bill-match anchor.
+          replace('lib/payment_detection_service.dart', """      // Partial payments always stay LIKELY
+      final finalDecision = (isPartial && decision == PaymentDecision.confirmed)
+          ? PaymentDecision.likely
+          : decision;""", """      // A valid partial payment is a confirmed payment event when the
+      // local QR session provides a trusted bill-match anchor.
+      final finalDecision = decision;""")
+
+          # Local sale/invoice settlement must accumulate payments instead of
+          # requiring payment == current due and setting paid = total.
+          replace('lib/payment_detection_service.dart', """          final due = (total - paid).clamp(0.0, double.infinity);
+          if ((due - amount).abs() > 1.0) continue;""", """          final due = (total - paid).clamp(0.0, double.infinity);
+          if (due <= 0.01 || amount > due + 0.01) continue;""", count=2)
+          replace('lib/payment_detection_service.dart', """          sale['payment_status'] = 'PAID';
+          sale['paid_amount'] = total;""", """          final newPaid = math.min(total, paid + amount);
+          sale['paid_amount'] = newPaid;
+          sale['payment_status'] = newPaid >= total - 0.01 ? 'PAID' : 'PARTIAL';""")
+          replace('lib/payment_detection_service.dart', """          invoice['status'] = 'PAID';
+          invoice['payment_status'] = 'PAID';
+          invoice['paid_amount'] = total;""", """          final newPaid = math.min(total, paid + amount);
+          invoice['paid_amount'] = newPaid;
+          invoice['payment_status'] = newPaid >= total - 0.01 ? 'PAID' : 'PARTIAL';
+          invoice['status'] = invoice['payment_status'];""")
+
+          # ------------------------------------------------------------------
+          # Payment event fingerprint: keep app families distinct when no UTR
+          # exists. A same-value payment in two different UPI apps within a
+          # short window must not be silently merged.
+          # ------------------------------------------------------------------
+          replace('lib/payment_event.dart', "final twoMinBucket = ((timestamp.hour * 60 + timestamp.minute) / 2).floor();", "final fiveMinBucket = (timestamp.minute / 5).floor();")
+          replace('lib/payment_event.dart', "'$appFamily'\n        '$hourBucket$twoMinBucket';", "'$appFamily'\n        '$hourBucket$fiveMinBucket';")
+
+          # ------------------------------------------------------------------
+          # Sales Entry provider: payment detection is local, user-controlled,
+          # and paidAmount is the amount actually received, not the bill total.
+          # ------------------------------------------------------------------
+          replace('lib/features/sales_entry/controllers/sales_entry_provider.dart', "import 'dart:convert';", "import 'dart:async';\nimport 'dart:convert';")
+          replace('lib/features/sales_entry/controllers/sales_entry_provider.dart', "import '../../../sale_service.dart';", "import '../../../sale_service.dart';\nimport '../../../payment_detection_service.dart';\nimport '../../../payment_event.dart';")
+          replace('lib/features/sales_entry/controllers/sales_entry_provider.dart', "  String shopEmail = '';", """  String shopEmail = '';
+
+  bool paymentDetectionEnabled = false;
+  final PaymentDetectionService _paymentDetectionService = PaymentDetectionService();
+  StreamSubscription<PaymentEvent>? _paymentSubscription;
+
+  double get remainingDue => math.max(0.0, totalAmount - paidAmount);
+
+  Future<void> enablePaymentDetection() async {
+    if (!isOnlinePayment || totalAmount <= 0) return;
+    await disablePaymentDetection();
+    _paymentDetectionService.setBillExpected(totalAmount);
+    _paymentSubscription = _paymentDetectionService.onPaymentDetected.listen((event) {
+      if (!paymentDetectionEnabled) return;
+      if (event.decision != PaymentDecision.confirmed || event.isFailed || event.amount <= 0) return;
+      final nextPaid = math.min(totalAmount, paidAmount + event.amount);
+      paidAmount = nextPaid;
+      paymentStatus = remainingDue <= 0.01 ? 'PAID' : 'PARTIAL';
+      notifyListeners();
+      if (nextPaid >= totalAmount - 0.01) {
+        Future<void>.microtask(disablePaymentDetection);
+      }
+    });
+    paymentDetectionEnabled = true;
+    notifyListeners();
+    await _paymentDetectionService.start();
+  }
+
+  Future<void> disablePaymentDetection() async {
+    paymentDetectionEnabled = false;
+    await _paymentSubscription?.cancel();
+    _paymentSubscription = null;
+    await _paymentDetectionService.stop();
+    notifyListeners();
+  }""")
+          replace('lib/features/sales_entry/controllers/sales_entry_provider.dart', "import 'package:flutter/foundation.dart' show kDebugMode;", "import 'package:flutter/foundation.dart' show kDebugMode;\nimport 'dart:math' as math;")
+          replace('lib/features/sales_entry/controllers/sales_entry_provider.dart', "        paidAmount: totalAmount,", "        paidAmount: paidAmount,")
+          replace('lib/features/sales_entry/controllers/sales_entry_provider.dart', "        paymentMethod: isOnlinePayment ? 'Online' : 'Cash',", "        paymentMethod: isOnlinePayment ? 'Online' : 'Cash',")
+          replace('lib/features/sales_entry/controllers/sales_entry_provider.dart', "  void _clearForm() {\n    entries.clear();", "  void _clearForm() {\n    unawaited(disablePaymentDetection());\n    paidAmount = 0.0;\n    paymentStatus = null;\n    entries.clear();")
+          replace('lib/features/sales_entry/controllers/sales_entry_provider.dart', "  @override\n  void dispose() {", "  @override\n  void dispose() {\n    unawaited(_paymentSubscription?.cancel());\n    unawaited(_paymentDetectionService.stop());")
+
+          # ------------------------------------------------------------------
+          # UPI QR UI: explicit enable/disable control and live received/due.
+          # ------------------------------------------------------------------
+          replace('lib/features/sales_entry/widgets/smart_payment_section.dart', "import 'package:qr_flutter/qr_flutter.dart';", "import 'package:qr_flutter/qr_flutter.dart';")
+          old="""                      const SizedBox(height: 12),
+                      AnimatedBuilder(
+                        animation: _pulseController,
+                        builder: (context, child) => Text(
+                          'Scan to Pay Exactly ₹${provider.totalAmount.toStringAsFixed(2)}',
+                          style: GoogleFonts.poppins(
+                            fontSize: 13,
+                            fontWeight: FontWeight.bold,
+                            color: Color.lerp(
+                              const Color(0xFF4F46E5),
+                              const Color(0xFF6366F1),
+                              _pulseController.value,
+                            ),
+                          ),
+                        ),
+                      ),"""
+          new="""                      const SizedBox(height: 12),
+                      AnimatedBuilder(
+                        animation: _pulseController,
+                        builder: (context, child) => Text(
+                          'Scan to Pay ₹${provider.remainingDue.toStringAsFixed(2)} remaining',
+                          style: GoogleFonts.poppins(
+                            fontSize: 13,
+                            fontWeight: FontWeight.bold,
+                            color: Color.lerp(
+                              const Color(0xFF4F46E5),
+                              const Color(0xFF6366F1),
+                              _pulseController.value,
+                            ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      Text(
+                        'Received ₹${provider.paidAmount.toStringAsFixed(2)}  •  Due ₹${provider.remainingDue.toStringAsFixed(2)}',
+                        style: GoogleFonts.poppins(fontSize: 13, fontWeight: FontWeight.w600),
+                      ),
+                      const SizedBox(height: 12),
+                      SizedBox(
+                        width: double.infinity,
+                        child: FilledButton.icon(
+                          onPressed: provider.paymentDetectionEnabled
+                              ? provider.disablePaymentDetection
+                              : provider.enablePaymentDetection,
+                          icon: Icon(provider.paymentDetectionEnabled ? Icons.stop_circle_outlined : Icons.sensors_rounded),
+                          label: Text(provider.paymentDetectionEnabled ? 'Stop Payment Detection' : 'Enable Payment Detection'),
+                        ),
+                      ),
+                      const SizedBox(height: 6),
+                      Text(
+                        provider.paymentDetectionEnabled ? '🟢 Listening for UPI payments in real time' : '⚪ Payment detection is off',
+                        style: GoogleFonts.poppins(fontSize: 11, fontWeight: FontWeight.w500),
+                      ),"""
+          replace('lib/features/sales_entry/widgets/smart_payment_section.dart', old, new)
+
+          # ------------------------------------------------------------------
+          # Voice billing: never create zero-price items from uncertain speech;
+          # prevent duplicate listen calls and ignore empty final transcripts.
+          # ------------------------------------------------------------------
+          replace('lib/features/voice_billing_service.dart', """  void startListening(Function(String) onResult) async {
+    if (!_speechEnabled) {""", """  void startListening(Function(String) onResult) async {
+    if (_speechToText.isListening) return;
+    if (!_speechEnabled) {""")
+          replace('lib/features/voice_billing_service.dart', """        if (result.finalResult) {
+          onResult(result.recognizedWords);
+        }""", """        if (result.finalResult) {
+          final words = result.recognizedWords.trim();
+          if (words.isNotEmpty) onResult(words);
+        }""")
+          old_fallback="""    // Fallback: naive parser for simple cases
+    String lowercased = text.toLowerCase()
+      .replaceAll('one', '1').replaceAll('a ', '1 ').replaceAll('an ', '1 ')
+      .replaceAll('two', '2').replaceAll('three', '3').replaceAll('four', '4')
+      .replaceAll('five', '5').replaceAll('six', '6').replaceAll('seven', '7')
+      .replaceAll('eight', '8').replaceAll('nine', '9').replaceAll('ten', '10');
+
+    lowercased = lowercased.replaceAll('add', '').replaceAll('and', '').replaceAll('please', '').trim();
+
+    final simpleParts = lowercased.split(RegExp(r'\\s+'));
+    int currentQty = 1;
+
+    for (int i = 0; i < simpleParts.length; i++) {
+      final part = simpleParts[i];
+      if (int.tryParse(part) != null) {
+        currentQty = int.parse(part);
+      } else {
+        if (part.length > 2) {
+          result['items'].add({
+            'product_name': part,
+            'price': 0.0,
+            'qty': currentQty,
+            'unit': 'piece',
+          });
+          currentQty = 1;
+        }
+      }
+    }
+
+    result['success'] = result['items'].isNotEmpty;
+    if (result['success']) {
+      if (kDebugMode) debugPrint('✅ Fallback parser matched: ${result['items'].length} items');
+    }
+    
+    return result;"""
+          new_fallback="""    // No safe product+price parse was found. Never manufacture a ₹0 line item.
+    result['success'] = false;
+    result['error'] = 'Could not determine product and price. Please say the product and price, for example: 2 water 50.';
+    return result;"""
+          replace('lib/features/voice_billing_service.dart', old_fallback, new_fallback)
+
+          # ------------------------------------------------------------------
+          # Payment processing: local UI callback must happen BEFORE any
+          # backend/network work. Backend sync is downstream only.
+          # ------------------------------------------------------------------
+          replace('lib/payment_processing_manager.dart', """  Future<void> handlePaymentDetected(PaymentEvent payment) async {
+    try {
+      if (kDebugMode) print('$_tag Detected: ₹${payment.amount} from ${payment.detectionSource}');
+      
+      if (_isOnline) {""", """  Future<void> handlePaymentDetected(PaymentEvent payment) async {
+    try {
+      if (kDebugMode) print('$_tag Detected: ₹${payment.amount} from ${payment.detectionSource}');
+      // Real-time billing feedback is local and must never wait for Render/API.
+      onPaymentDetected?.call(payment);
+      
+      if (_isOnline) {""")
+          replace('lib/payment_processing_manager.dart', """      onPaymentDetected?.call(payment);
+    } catch (e) {""", """    } catch (e) {""")
+
+          # Purchase orders: preserve the local client id so the sync layer can
+          # reconcile the backend integer id after creation.
+          replace('lib/purchase_order_page.dart', """      'supplier_name': (order['supplier_name'] ?? order['supplier'] ?? '').toString().trim(),""", """      'client_id': order['id']?.toString(),
+      'supplier_name': (order['supplier_name'] ?? order['supplier'] ?? '').toString().trim(),""")
 
       - name: Format and validate Flutter
         run: |
@@ -117,5 +295,5 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add lib .github/workflows/production-fix-apply.yml
           git rm -f .github/workflows/production-fix-apply.yml
-          git commit -m "Fix production billing payment and attendance bugs [production-fix-applied]"
+          git commit -m "Fix production QR payments voice billing sales and sync [production-fix-applied]"
           git push origin production-fix-2026-08-18
