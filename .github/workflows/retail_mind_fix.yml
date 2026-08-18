@@ -3,6 +3,8 @@ name: Retail Mind targeted fix
 on:
   push:
     branches: [fix/attendance-payment-sync]
+  pull_request:
+    branches: [fix/attendance-payment-sync]
   workflow_dispatch:
 
 permissions:
@@ -22,7 +24,6 @@ jobs:
         run: |
           python3 - <<'PY'
           from pathlib import Path
-          import re
 
           def edit(path, fn):
               p = Path(path)
@@ -35,21 +36,9 @@ jobs:
               else:
                   print('UNCHANGED', path)
 
-          # 1) Attendance queue: ACK local state after a successful backend sync,
-          #    treat backend idempotent 409s as success, and retry attendance as critical.
           def sync_fix(s):
-              s = s.replace(
-                  "static Future<bool> checkInWorker(String workerId) async {",
-                  "static Future<bool> checkInWorker(String workerId) async {"
-              )
-              s = s.replace(
-                  "if (res.statusCode == 200 || res.statusCode == 201) {\n        if (kDebugMode) debugPrint('✅ Worker checked in: $workerId');",
-                  "if (res.statusCode == 200 || res.statusCode == 201 || res.statusCode == 409) {\n        if (kDebugMode) debugPrint('✅ Worker check-in accepted/idempotent: $workerId (${res.statusCode})');"
-              )
-              s = s.replace(
-                  "if (res.statusCode == 200 || res.statusCode == 201) {\n        if (kDebugMode) debugPrint('✅ Worker checked out: $workerId');",
-                  "if (res.statusCode == 200 || res.statusCode == 201 || res.statusCode == 409) {\n        if (kDebugMode) debugPrint('✅ Worker check-out accepted/idempotent: $workerId (${res.statusCode})');"
-              )
+              s = s.replace("if (res.statusCode == 200 || res.statusCode == 201) {\n        if (kDebugMode) debugPrint('✅ Worker checked in: $workerId');", "if (res.statusCode == 200 || res.statusCode == 201 || res.statusCode == 409) {\n        if (kDebugMode) debugPrint('✅ Worker check-in accepted/idempotent: $workerId (${res.statusCode})');")
+              s = s.replace("if (res.statusCode == 200 || res.statusCode == 201) {\n        if (kDebugMode) debugPrint('✅ Worker checked out: $workerId');", "if (res.statusCode == 200 || res.statusCode == 201 || res.statusCode == 409) {\n        if (kDebugMode) debugPrint('✅ Worker check-out accepted/idempotent: $workerId (${res.statusCode})');")
               old = """            if (action == 'save_sale' || action == 'sync_sale') {
               final saleId = data['sale_id']?.toString() ?? data['invoice_number']?.toString() ?? '';
               if (saleId.isNotEmpty) {
@@ -75,43 +64,25 @@ jobs:
               }
             }
 
-            // Attendance uses the same durable ACK rule as sales. Once the backend
-            // accepts the operation (including an idempotent 409), clear local_pending
-            // before removing the outbox item. This prevents stale local attendance
-            // from winning reconciliation after a successful sync.
             if (action == 'attendance_check_in' || action == 'attendance_check_out') {
-              final employeeId = int.tryParse(
-                (data['employee_id'] ?? data['worker_id'] ?? data['workerId'] ?? '').toString(),
-              );
+              final employeeId = int.tryParse((data['employee_id'] ?? data['worker_id'] ?? data['workerId'] ?? '').toString());
               final workerId = int.tryParse((data['worker_id'] ?? '').toString());
               final date = (data['attendance_date'] ?? '').toString().split('T').first;
               if (employeeId == null || date.isEmpty) {
                 success = false;
                 throw StateError('LOCAL_ATTENDANCE_ACK_FAILED:invalid_identity');
               }
-              await AttendanceOfflineService.markSynced(
-                employeeId: employeeId,
-                workerId: workerId,
-                date: date,
-              );
+              await AttendanceOfflineService.markSynced(employeeId: employeeId, workerId: workerId, date: date);
               SyncService.triggerDashboardRefresh();
             }
 
             if (success) {"""
-              if old not in s:
-                  raise SystemExit('Expected sync ACK block not found')
+              if old not in s: raise SystemExit('sync ACK block not found')
               s = s.replace(old, new, 1)
-              s = s.replace(
-                  "'update_purchase_order_status',\n            };",
-                  "'update_purchase_order_status',\n              'attendance_check_in',\n              'attendance_check_out',\n            };"
-              )
+              s = s.replace("'update_purchase_order_status',\n            };", "'update_purchase_order_status',\n              'attendance_check_in',\n              'attendance_check_out',\n            };")
               return s
-
           edit('lib/sync_service.dart', sync_fix)
 
-          # 2) Payment settlement: Khata payment must also settle the canonical
-          #    invoice record when an invoice_id exists. If invoice settlement fails,
-          #    keep the durable queue item so it retries instead of reporting success.
           def khata_fix(s):
               needle = """      if (res.statusCode == 200 || res.statusCode == 201) {
         return true;
@@ -122,102 +93,63 @@ jobs:
       }
 """
               repl = """      if (res.statusCode == 200 || res.statusCode == 201 || res.statusCode == 409) {
-        // The Khata endpoint records the customer-level payment. For invoice-linked
-        // payments we must also update the canonical invoice payment ledger; otherwise
-        // a fresh app download correctly restores the invoice as still pending.
         final invoiceId = int.tryParse((payload['invoice_id'] ?? '').toString());
         if (invoiceId != null && invoiceId > 0) {
           final invoicePayload = <String, dynamic>{
             'invoice_id': invoiceId,
-            if ((payload['invoice_number'] ?? '').toString().trim().isNotEmpty)
-              'invoice_number': payload['invoice_number'],
+            if ((payload['invoice_number'] ?? '').toString().trim().isNotEmpty) 'invoice_number': payload['invoice_number'],
             'amount': payload['amount'],
             'payment_method': payload['payment_method'] ?? 'CASH',
-            if ((payload['notes'] ?? '').toString().trim().isNotEmpty)
-              'notes': payload['notes'],
-            if ((payload['payment_date'] ?? '').toString().trim().isNotEmpty)
-              'payment_date': payload['payment_date'],
-            if ((payload['idempotency_key'] ?? '').toString().trim().isNotEmpty)
-              'idempotency_key': payload['idempotency_key'],
+            if ((payload['notes'] ?? '').toString().trim().isNotEmpty) 'notes': payload['notes'],
+            if ((payload['payment_date'] ?? '').toString().trim().isNotEmpty) 'payment_date': payload['payment_date'],
+            if ((payload['idempotency_key'] ?? '').toString().trim().isNotEmpty) 'idempotency_key': payload['idempotency_key'],
           };
-          final invoiceRes = await ApiClient.postJson(
-            ApiClient.invoicesPayments,
-            invoicePayload,
-            headers: {'Authorization': 'Bearer $token'},
-          ).timeout(const Duration(seconds: 15));
-          final invoiceOk = invoiceRes.statusCode == 200 ||
-              invoiceRes.statusCode == 201 ||
-              invoiceRes.statusCode == 409;
-          if (!invoiceOk) {
-            if (kDebugMode) {
-              debugPrint('❌ Canonical invoice payment sync rejected: ${invoiceRes.statusCode} ${invoiceRes.body}');
-            }
-            return false;
-          }
+          final invoiceRes = await ApiClient.postJson(ApiClient.invoicesPayments, invoicePayload, headers: {'Authorization': 'Bearer $token'}).timeout(const Duration(seconds: 15));
+          final invoiceOk = invoiceRes.statusCode == 200 || invoiceRes.statusCode == 201 || invoiceRes.statusCode == 409;
+          if (!invoiceOk) return false;
         }
         return true;
       }
 """
-              if needle not in s:
-                  raise SystemExit('Expected Khata success block not found')
+              if needle not in s: raise SystemExit('Khata success block not found')
               return s.replace(needle, repl, 1)
-
           edit('lib/sync_service.dart', khata_fix)
 
-          # 3) APGB bank SMS support. The real SMS shown by the user is AD-APGB-T;
-          #    APGB must be treated as a legitimate entity code without weakening
-          #    the spoof/fraud gates.
           def payment_fix(s):
               s = s.replace("'BHIMUP', 'CREDCL', 'FRCHRG', 'MOBKWK',", "'BHIMUP', 'CREDCL', 'FRCHRG', 'MOBKWK', 'APGB',")
               s = s.replace("'UBISMS','UBIBNK','UNIONB','INDBNK','INDIANB',", "'UBISMS','UBIBNK','UNIONB','INDBNK','INDIANB','APGB','ANDHRAPGB',")
               return s
-
           edit('lib/payment_detection_service.dart', payment_fix)
 
-          # 4) Drain SMS messages received while the app was killed. The native
-          #    background receiver already persists them; main() now feeds them into
-          #    the same trusted payment parser on next startup.
           def main_fix(s):
               if "import 'sms_background_receiver.dart';" not in s:
                   s = s.replace("import 'payment_detection_service.dart';", "import 'payment_detection_service.dart';\nimport 'sms_background_receiver.dart';", 1)
               needle = "      await pds.start();"
               repl = """      await pds.start();
-
-      // Recover SMS messages captured while the app process was killed. The
-      // background receiver is deliberately dumb/durable; the main isolate is
-      // the single place that runs the normal fraud-safe parser.
       try {
         final pendingSms = await getPendingBackgroundSms();
         for (final sms in pendingSms) {
           pds.handleSms(sms['sender'] ?? '', sms['body'] ?? '');
         }
-        if (kDebugMode && pendingSms.isNotEmpty) {
-          debugPrint('✅ Replayed ${pendingSms.length} background SMS payment event(s)');
-        }
+        if (kDebugMode && pendingSms.isNotEmpty) debugPrint('✅ Replayed ${pendingSms.length} background SMS payment event(s)');
       } catch (e) {
         if (kDebugMode) debugPrint('⚠️ Background SMS replay failed: $e');
       }"""
-              if needle not in s:
-                  raise SystemExit('Payment detector startup block not found')
+              if needle not in s: raise SystemExit('PDS startup block not found')
               return s.replace(needle, repl, 1)
-
           edit('lib/main.dart', main_fix)
 
-          # 5) Prevent rapid double-taps on worker attendance from creating multiple
-          #    outbox operations for the same worker/day.
           def attendance_fix(s):
               marker = "  List<Worker> _staff = [];\n"
               if "_attendanceActionKeys" not in s:
                   s = s.replace(marker, marker + "  final Set<String> _attendanceActionKeys = <String>{};\n", 1)
               sig = "  Future<void> _markWorkerAttendance(Worker worker, bool isCurrentlyIn) async {\n    try {"
-              if sig not in s:
-                  raise SystemExit('Worker attendance method signature not found')
-              repl = """  Future<void> _markWorkerAttendance(Worker worker, bool isCurrentlyIn) async {
+              if sig not in s: raise SystemExit('worker attendance method not found')
+              s = s.replace(sig, """  Future<void> _markWorkerAttendance(Worker worker, bool isCurrentlyIn) async {
     final actionKey = '${worker.id}:${_df.format(DateTime.now())}';
     if (_attendanceActionKeys.contains(actionKey)) return;
     _attendanceActionKeys.add(actionKey);
-    try {"""
-              s = s.replace(sig, repl, 1)
+    try {""", 1)
               old_end = """    } catch (e) {
       _showSnack('❌ Attendance action failed: $e', _absent);
     }
@@ -230,14 +162,10 @@ jobs:
     }
   }
 """
-              if old_end not in s:
-                  raise SystemExit('Worker attendance error/finally block not found')
+              if old_end not in s: raise SystemExit('worker attendance end not found')
               return s.replace(old_end, new_end, 1)
-
           edit('lib/attendance_page.dart', attendance_fix)
           PY
-
-          # Remove this one-shot workflow so the repository contains only app changes.
           rm -f .github/workflows/retail_mind_fix.yml
 
       - name: Commit and push fixes
@@ -245,11 +173,7 @@ jobs:
         run: |
           git config user.name "Retail Mind Fix Bot"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add lib .github/workflows/retail_mind_fix.yml
-          git rm -f .github/workflows/retail_mind_fix.yml 2>/dev/null || true
-          if git diff --cached --quiet; then
-            echo "No changes to commit"
-            exit 0
-          fi
+          git add lib
+          if git diff --cached --quiet; then exit 0; fi
           git commit -m "fix: attendance payment detection and invoice sync [retail-mind-auto-fix]"
           git push origin HEAD:fix/attendance-payment-sync
