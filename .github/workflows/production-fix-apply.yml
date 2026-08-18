@@ -19,13 +19,11 @@ jobs:
         with:
           ref: production-fix-2026-08-18
           fetch-depth: 0
-
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
           flutter-version: '3.41.9'
           cache: true
-
       - name: Apply deterministic bug fixes
         shell: python
         run: |
@@ -35,16 +33,24 @@ jobs:
               if old not in s: raise SystemExit(f'PATCH TARGET NOT FOUND: {path}: {old[:120]!r}')
               p.write_text(s.replace(old,new,1),encoding='utf-8')
 
+          # Invoice sync: send the real GST tax exposed by calculateTotal().
           replace('lib/sale_service.dart', "'tax': withTax ? (totals['tax'] ?? 0.0) : 0.0,", "'tax': withTax ? ((totals['cgst'] as num?)?.toDouble() ?? 0.0) + ((totals['sgst'] as num?)?.toDouble() ?? 0.0) : 0.0,")
 
+          # Discounted line items must match the subtotal sent to the backend.
           replace('lib/sales_entry_page.dart', "final gstPct    = double.tryParse(e['gst']?.text.trim() ?? '0') ?? 0.0;\n      \n      final lineSub   = qty * price;", "final gstPct    = double.tryParse(e['gst']?.text.trim() ?? '0') ?? 0.0;\n      final discount  = double.tryParse(e['discount']?.text.trim() ?? '0') ?? 0.0;\n      final effectivePrice = math.max(0.0, price - discount);\n      \n      final lineSub   = qty * effectivePrice;")
           replace('lib/sales_entry_page.dart', "'price':        price.toString(),\n        'qty':          qty,", "'price':        effectivePrice.toString(),\n        'qty':          qty,\n        'discount':     discount.toString(),")
 
+          # Cumulative partial payments: keep PaymentDetectionService's bill
+          # context in sync with the UI's cumulative _paidAmount.
+          replace('lib/sales_entry_page.dart', "          if (!event.isFailed) {\n            _paidAmount += event.amount;", "          if (!event.isFailed) {\n            PaymentDetectionService().billContext.recordPartial(event.amount);\n            _paidAmount += event.amount;")
+
+          # Attendance is one mark per calendar day, matching the backend.
           p=Path('lib/attendance_offline_service.dart'); s=p.read_text(encoding='utf-8')
           start=s.index('  /// Starts a new attendance session.'); end=s.index('  /// Closes the currently open session',start)
           new='''  /// Marks attendance once per employee per calendar day.\n  /// The backend is the final authority and rejects duplicate daily marks.\n  static Future<bool> checkIn({required int employeeId,int? workerId}) async {\n    final now=DateTime.now();\n    final date=_date(now);\n    final sessions=await _findTodaySessions(employeeId:employeeId,workerId:workerId,date:date);\n    if(sessions.isNotEmpty)return false;\n    const sessionIndex=0;\n    final operationId='ATT_IN_${workerId??employeeId}_${date}';\n    await _upsertSession(employeeId:employeeId,workerId:workerId,date:date,sessionIndex:sessionIndex,checkIn:now,status:'PRESENT');\n    final queued=await SyncQueueManager.enqueue('attendance_check_in',{'operation_id':operationId,'idempotency_key':operationId,'employee_id':employeeId,'worker_id':workerId,'attendance_date':date,'session_index':sessionIndex});\n    if(!queued)throw StateError('Unable to persist attendance check-in to durable outbox');\n    return true;\n  }\n\n'''
           p.write_text(s[:start]+new+s[end:],encoding='utf-8')
 
+          # Non-UTR payment dedup must work across app notification + bank SMS.
           replace('lib/payment_event.dart', "final fiveMinBucket = (timestamp.minute / 5).floor();", "final twoMinBucket = ((timestamp.hour * 60 + timestamp.minute) / 2).floor();")
           replace('lib/payment_event.dart', "'$appFamily'\n        '$hourBucket$fiveMinBucket';", "'$appFamily'\n        '$hourBucket$twoMinBucket';")
           old="""// Bank SMS and all bank apps share one family —
@@ -79,9 +85,19 @@ jobs:
         return 'upi';"""
           replace('lib/payment_event.dart',old,new)
 
-          # Static analyze() has no unverified-package context, so explicitly
-          # keep it on the conservative non-fallback path. Live notifications
-          # pass the real flag through _processText/_runPipeline.
+          # A partial payment is any positive amount below the remaining due;
+          # requiring 50% of remaining made ₹2 on a ₹10 bill look like a mismatch.
+          replace('lib/payment_detection_service.dart', """    if (diff <= tol)                          return BillMatchResult.exact;
+    if (detected >= remaining * 0.5 &&
+        detected  < remaining - tol)          return BillMatchResult.partial;
+    if (detected  > expectedAmount! * 2.0)    return BillMatchResult.suspicious;
+    return BillMatchResult.mismatch;""", """    if (diff <= tol)                       return BillMatchResult.exact;
+    if (detected > 0 && detected < remaining - tol) return BillMatchResult.partial;
+    if (detected > expectedAmount! * 2.0)   return BillMatchResult.suspicious;
+    return BillMatchResult.mismatch;""")
+
+          # Keep the direct analyze() path conservative; live notification
+          # processing already passes the actual unverified-package flag.
           replace('lib/payment_detection_service.dart', "      source: source,\n    );\n\n    score -= fraud.riskScore * 0.35;", "      source: source,\n      isUnverifiedApp: false,\n    );\n\n    score -= fraud.riskScore * 0.35;")
 
           replace('lib/attendance_page.dart', "      if (_mySession == null) {\n        await OfflineAttendanceService.checkIn(employeeId: _userId!);\n        _showSnack('✅ Checked In — saved offline and queued for sync', _present);\n      } else {", "      if (_mySession == null) {\n        final marked = await OfflineAttendanceService.checkIn(employeeId: _userId!);\n        if (!marked) {\n          _showSnack('ℹ️ Attendance already marked for today', _primary);\n          await _fetch();\n          return;\n        }\n        _showSnack('✅ Attendance marked for today — saved offline and queued for sync', _present);\n      } else {")
@@ -92,10 +108,8 @@ jobs:
           dart format lib
           flutter analyze
           flutter test
-
       - name: Build debug APK
         run: flutter build apk --debug
-
       - name: Commit verified fixes and remove temporary workflow
         shell: bash
         run: |
