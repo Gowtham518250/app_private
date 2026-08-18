@@ -535,6 +535,10 @@ class _DashboardPageState extends State<DashboardPage>
 
   Future<void> _reconcileDetectedPaymentToInvoice(dynamic event) async {
     try {
+      // Never mutate invoice money for a LIKELY notification. The detection
+      // engine requires an independent confirmation anchor; only CONFIRMED
+      // events may automatically settle or partially settle an invoice.
+      if (event.decision != PaymentDecision.confirmed) return;
       final amount = (event.amount as num?)?.toDouble() ?? 0.0;
       if (amount <= 0) return;
       final rawInvoices = await LocalStorageService.loadLocalInvoices();
