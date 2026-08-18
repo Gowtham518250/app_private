@@ -1,0 +1,35 @@
+name: Payment invoice attendance fix runner
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Apply fix script
+        run: python scripts/apply_payment_invoice_attendance_fix.py
+      - name: Commit fixed sources
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add lib/dashboard_page.dart lib/payment_detection_service.dart lib/sync_service.dart
+          git rm --cached scripts/apply_payment_invoice_attendance_fix.py 2>/dev/null || true
+          rm -f scripts/apply_payment_invoice_attendance_fix.py
+          git rm --cached .github/workflows/apply-payment-invoice-attendance-fix.yml 2>/dev/null || true
+          rm -f .github/workflows/apply-payment-invoice-attendance-fix.yml
+          if git diff --cached --quiet; then
+            echo 'No source changes required.'
+            exit 0
+          fi
+          git commit -m 'fix payment invoice attendance sync'
+          git push
