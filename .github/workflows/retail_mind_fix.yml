@@ -2,9 +2,9 @@ name: Retail Mind targeted fix
 
 on:
   push:
-    branches: [fix/attendance-payment-sync]
+    branches: [fix/attendance-payment-sync, main]
   pull_request:
-    branches: [fix/attendance-payment-sync]
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -176,4 +176,4 @@ jobs:
           git add lib
           if git diff --cached --quiet; then exit 0; fi
           git commit -m "fix: attendance payment detection and invoice sync [retail-mind-auto-fix]"
-          git push origin HEAD:fix/attendance-payment-sync
+          git push origin HEAD:main
