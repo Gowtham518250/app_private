@@ -514,6 +514,12 @@ class _DashboardPageState extends State<DashboardPage>
           if (kDebugMode) debugPrint('Provider error: $e');
         }
       }
+
+      // Financial state must not depend on the notification UI. Reconcile the
+      // detected payment against the canonical local invoice ledger and queue
+      // the exact new paid amount for backend persistence. This also handles
+      // PARTIAL payments (the old detector only auto-settled exact full dues).
+      unawaited(_reconcileDetectedPaymentToInvoice(event));
     });
 
     // 🚀 100/100 Real-Time Sync: React to background pulse updates

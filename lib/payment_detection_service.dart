@@ -1004,7 +1004,7 @@ abstract class _BankNameValidator {
   static final realBankKeywords = RegExp(
     r'\b(hdfc|sbi|icici|axis|kotak|pnb|canara|bob|yes\s+bank|idfc|indus'
     r'|Union\s+Bank|United\s+Commerce|Ujjivan|RBL|Federal|Karmaveer'
-    r'|DCB|Bandhan|IDFCB|HSBC|SCB|Standard|Citi|DLB|ICICI|IOB|UBI|BoB|CBI)\b',
+    r'|DCB|Bandhan|IDFCB|HSBC|SCB|Standard|Citi|DLB|ICICI|IOB|UBI|BoB|CBI|APGB|Andhra\s+Pradesh\s+Grameena\s+Bank|Andhra\s+Pradesh\s+Gramin\s+Bank)\b',
     caseSensitive: false,
   );
 
@@ -1318,7 +1318,7 @@ abstract class _SenderValidator {
   // not as proof of settlement (see the confidence-tier flag added below).
   static final _knownEntityCodes = <String>{
     // Format: the portion after the 2-char carrier prefix and hyphen.
-    'HDFCBK', 'HDFCBN', 'SBIINB', 'SBIPSG', 'ICICIB', 'ICICIT', 'AXISBK',
+    'HDFCBK', 'HDFCBN', 'APGB', 'SBIINB', 'SBIPSG', 'ICICIB', 'ICICIT', 'AXISBK',
     'AXISBN', 'KOTAKB', 'PNBSMS', 'UNIONB', 'IDFCFB', 'RBLBNK', 'YESBNK',
     'INDBNK', 'CANBNK', 'BOBIBK', 'PAYTM', 'PHONPE', 'GOOGPY', 'AMZNPY',
     'BHIMUP', 'CREDCL', 'FRCHRG', 'MOBKWK',

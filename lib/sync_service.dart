@@ -125,6 +125,30 @@ class SyncService {
         return false;
       }
 
+      // Backend guard: suppress duplicate check-in POSTs for the same employee/day.
+      try {
+        final today = DateTime.now().toIso8601String().split('T').first;
+        final existing = await ApiClient.getJson(
+          '${ApiClient.attendancePrefix}/date/$today?employee_id=$workerId',
+          headers: {'Authorization': 'Bearer $token'},
+        ).timeout(const Duration(seconds: 8));
+        if (existing.statusCode == 200) {
+          final decoded = jsonDecode(existing.body);
+          final records = decoded is List ? decoded : (decoded is Map && decoded['records'] is List ? decoded['records'] as List : const []);
+          final alreadyRecorded = records.any((raw) {
+            if (raw is! Map) return false;
+            final employee = raw['employee_id'] ?? raw['worker_id'];
+            return employee?.toString() == workerId.toString();
+          });
+          if (alreadyRecorded) {
+            if (kDebugMode) debugPrint('✅ Attendance already exists for $workerId today; duplicate check-in suppressed');
+            return true;
+          }
+        }
+      } catch (e) {
+        if (kDebugMode) debugPrint('⚠️ Attendance preflight failed; continuing with authenticated check-in: $e');
+      }
+
       final res = await ApiClient.postJson(
         '${ApiClient.checkIn}?employee_id=$workerId',
         {},
@@ -836,7 +860,12 @@ class SyncService {
               await SyncQueueManager.remove(actionId);
               successCount++;
               consecutiveNetworkFailures = 0;
-              if (action == 'create_purchase_order' || action == 'update_purchase_order_status') {
+              if (action == 'create_purchase_order' ||
+                  action == 'update_purchase_order_status' ||
+                  action == 'update_payment' ||
+                  action == 'update_invoice_payment' ||
+                  action == 'update_invoice_paid' ||
+                  action == 'update_invoice_unpaid') {
                 SyncService.triggerDashboardRefresh();
               }
             }
