@@ -1,0 +1,68 @@
+name: Frontend Sync Followup
+on:
+  push:
+    branches: [production-fix-2026-08-18]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  patch:
+    if: ${{ !contains(github.event.head_commit.message, '[frontend-sync-followup-applied]') && !contains(github.event.head_commit.message, '[production-fix-applied]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: production-fix-2026-08-18
+          fetch-depth: 0
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: '3.41.9'
+          cache: true
+      - name: Patch purchase order reconciliation
+        shell: python
+        run: |
+          from pathlib import Path
+          def replace(path, old, new):
+              p=Path(path); s=p.read_text(encoding='utf-8')
+              if old not in s: raise SystemExit(f'PATCH TARGET NOT FOUND: {path}')
+              p.write_text(s.replace(old,new,1),encoding='utf-8')
+          old="""      final success = res.statusCode == 200 || res.statusCode == 201;
+      if (!success && kDebugMode) debugPrint('❌ Purchase order backend rejected sync: ${res.statusCode} ${res.body}');
+      return success;"""
+          new="""      final success = res.statusCode == 200 || res.statusCode == 201;
+      if (success && data['client_id'] != null) {
+        try {
+          final decoded = jsonDecode(res.body);
+          final serverId = decoded is Map ? decoded['id'] : null;
+          if (serverId != null) {
+            final orders = await LocalStorageService.loadPurchaseOrders();
+            final idx = orders.indexWhere((o) => o['id']?.toString() == data['client_id'].toString());
+            if (idx >= 0) {
+              orders[idx]['server_id'] = serverId;
+              orders[idx]['id'] = serverId;
+              orders[idx]['sync_status'] = 'SYNCED';
+              await LocalStorageService.savePurchaseOrders(orders);
+            }
+          }
+        } catch (_) {}
+      }
+      if (!success && kDebugMode) debugPrint('❌ Purchase order backend rejected sync: ${res.statusCode} ${res.body}');
+      return success;"""
+          replace('lib/sync_service.dart', old, new)
+      - name: Validate
+        run: |
+          flutter pub get
+          dart format lib
+          flutter analyze
+          flutter test
+          flutter build apk --debug
+      - name: Commit and remove workflow
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add lib/sync_service.dart .github/workflows/production-fix-sync-followup.yml
+          git rm -f .github/workflows/production-fix-sync-followup.yml
+          git commit -m "Fix purchase order server ID reconciliation [frontend-sync-followup-applied]"
+          git push origin production-fix-2026-08-18
