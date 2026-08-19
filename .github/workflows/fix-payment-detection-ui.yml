@@ -1,0 +1,110 @@
+name: Keep Payment Detection Controls Visible
+
+on:
+  push:
+    branches: [production-fix-2026-08-18]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: ${{ !contains(github.event.head_commit.message, '[payment-detection-ui-fixed]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: production-fix-2026-08-18
+          fetch-depth: 0
+
+      - name: Patch payment detection UI and compile error
+        shell: python
+        run: |
+          from pathlib import Path
+
+          def replace(path, old, new):
+              p = Path(path)
+              text = p.read_text(encoding='utf-8')
+              if old not in text:
+                  raise SystemExit(f'TARGET NOT FOUND: {path}: {old[:180]!r}')
+              p.write_text(text.replace(old, new, 1), encoding='utf-8')
+
+          # The screenshot's release-build error is caused by two different
+          # PaymentDecision enums being imported into dashboard_page.dart.
+          # payment_state.dart should reuse the canonical enum from
+          # payment_event.dart rather than declaring a second enum.
+          provider = Path('lib/providers/payment_state.dart')
+          text = provider.read_text(encoding='utf-8')
+          duplicate_enum = "enum PaymentDecision { confirmed, likely, tentative, suspicious, rejected }\n"
+          if duplicate_enum in text:
+              text = text.replace(duplicate_enum, '', 1)
+              provider.write_text(text, encoding='utf-8')
+
+          dashboard = Path('lib/dashboard_page.dart')
+          text = dashboard.read_text(encoding='utf-8')
+
+          # Make the existing permission dialog usable as a persistent settings
+          # control. It must remain callable even after permissions are granted.
+          text = text.replace(
+              '  Future<void> _schedulePaymentDetectionReminder() async {',
+              '  Future<void> _schedulePaymentDetectionReminder({bool force = false}) async {',
+              1,
+          )
+          text = text.replace(
+              "    if (!mounted || !_isPermissionsMissing || _paymentReminderShowing) return;",
+              "    if (!mounted || (!force && !_isPermissionsMissing) || _paymentReminderShowing) return;",
+              1,
+          )
+          text = text.replace(
+              "    if (!mounted || !_isPermissionsMissing || _paymentReminderShowing) return;",
+              "    if (!mounted || (!force && !_isPermissionsMissing) || _paymentReminderShowing) return;",
+              1,
+          )
+          text = text.replace(
+              "                  'Payment Detection is Disabled',",
+              "                  _isPermissionsMissing ? 'Payment Detection is Disabled' : 'Payment Detection Settings',",
+              1,
+          )
+          text = text.replace(
+              "                'This is a core RETAIL MIND feature. Enable it to automatically detect eligible UPI and bank payment confirmations.',",
+              "                _isPermissionsMissing\n                    ? 'This is a core RETAIL MIND feature. Enable it to automatically detect eligible UPI and bank payment confirmations.'\n                    : 'Payment detection is enabled. You can review the required access and restart detection from here.',",
+              1,
+          )
+          text = text.replace(
+              "                  'ENABLE PAYMENT DETECTION',",
+              "                  _isPermissionsMissing ? 'ENABLE PAYMENT DETECTION' : 'PAYMENT DETECTION SETTINGS',",
+              1,
+          )
+
+          # Keep a visible Payment Detection control in the dashboard toolbar,
+          # regardless of the current permission state.
+          anchor = """            _compactIconButton(\n              Icons.record_voice_over_rounded,\n              'Voice Language',\n              _showVoiceLanguageDialog,\n              isPrimary: true,\n            ),"""
+          addition = """            _compactIconButton(\n              Icons.notifications_active_rounded,\n              'Payment Detection',\n              () => _schedulePaymentDetectionReminder(force: true),\n              isPrimary: true,\n            ),\n"""
+          if addition.strip() not in text:
+              if anchor not in text:
+                  raise SystemExit('Dashboard toolbar anchor not found')
+              text = text.replace(anchor, addition + anchor, 1)
+
+          dashboard.write_text(text, encoding='utf-8')
+
+          # Sales screen: show a permanent payment-detection status button in
+          # the payment section, even when detection is already enabled.
+          sales = Path('lib/sales_entry_page.dart')
+          text = sales.read_text(encoding='utf-8')
+          anchor = """          Text(\n            AppLocalizations.of(context).paymentMethod,\n            style: GoogleFonts.poppins(\n              color: const Color(0xFF4B5563),\n              fontSize: 12,\n              letterSpacing: 0.8,\n              fontWeight: FontWeight.w600,\n            ),\n          ),\n          const SizedBox(height: 10),"""
+          addition = """          Text(\n            AppLocalizations.of(context).paymentMethod,\n            style: GoogleFonts.poppins(\n              color: const Color(0xFF4B5563),\n              fontSize: 12,\n              letterSpacing: 0.8,\n              fontWeight: FontWeight.w600,\n            ),\n          ),\n          const SizedBox(height: 8),\n          SizedBox(\n            width: double.infinity,\n            child: OutlinedButton.icon(\n              onPressed: () async {\n                try {\n                  await PaymentDetectionService().ensureChannelsRunning();\n                  if (mounted) {\n                    ScaffoldMessenger.of(context).showSnackBar(\n                      const SnackBar(content: Text('Payment Detection is active and ready.')),\n                    );\n                  }\n                } catch (e) {\n                  if (kDebugMode) debugPrint('Payment detection status action failed: $e');\n                }\n              },\n              icon: const Icon(Icons.notifications_active_rounded, size: 17),\n              label: const Text('PAYMENT DETECTION'),\n              style: OutlinedButton.styleFrom(\n                foregroundColor: const Color(0xFF16A34A),\n                side: const BorderSide(color: Color(0xFF86EFAC)),\n                padding: const EdgeInsets.symmetric(vertical: 9),\n                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),\n              ),\n            ),\n          ),\n          const SizedBox(height: 10),"""
+          if 'const Text(\'PAYMENT DETECTION\')' not in text:
+              if anchor not in text:
+                  raise SystemExit('Sales payment-section anchor not found')
+              text = text.replace(anchor, addition, 1)
+          sales.write_text(text, encoding='utf-8')
+
+      - name: Commit fixes
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add lib/dashboard_page.dart lib/sales_entry_page.dart lib/providers/payment_state.dart
+          git commit -m 'fix: payment detection controls remain visible [payment-detection-ui-fixed]' || true
+          git push origin production-fix-2026-08-18
