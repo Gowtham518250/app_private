@@ -447,7 +447,7 @@ class BillContext {
     final diff = (detected - remaining).abs();
 
     if (diff <= tol)                          return BillMatchResult.exact;
-    if (detected >= remaining * 0.5 &&
+    if (detected > 0 && detected <= remaining &&
         detected  < remaining - tol)          return BillMatchResult.partial;
     if (detected  > expectedAmount! * 2.0)    return BillMatchResult.suspicious;
     return BillMatchResult.mismatch;
