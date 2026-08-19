@@ -2,11 +2,13 @@ import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:flutter/services.dart';
 import '../../commission_dashboard_page.dart';
-import '../../delivery_tracking_page.dart';
 import '../../retail_intelligence_page.dart';
+import '../../bank_recon_page.dart';
 
-/// 🚀 Compact Quick Actions Widget
-/// Premium glassmorphism horizontal quick actions section
+/// Compact Quick Actions Widget.
+///
+/// Only exposes production-backed actions. Features that still contain mock
+/// delivery data are deliberately not surfaced from the production dashboard.
 class CompactQuickActions extends StatefulWidget {
   const CompactQuickActions({super.key});
 
@@ -16,8 +18,8 @@ class CompactQuickActions extends StatefulWidget {
 
 class _CompactQuickActionsState extends State<CompactQuickActions>
     with SingleTickerProviderStateMixin {
-  late AnimationController _controller;
-  late Animation<double> _scaleAnimation;
+  late final AnimationController _controller;
+  late final Animation<double> _scaleAnimation;
 
   @override
   void initState() {
@@ -45,7 +47,6 @@ class _CompactQuickActionsState extends State<CompactQuickActions>
         borderRadius: BorderRadius.circular(16),
         border: Border.all(
           color: Colors.white.withValues(alpha: 0.1),
-          width: 1,
         ),
       ),
       child: Column(
@@ -85,11 +86,24 @@ class _CompactQuickActionsState extends State<CompactQuickActions>
                   color: const Color(0xFF7C3AED),
                   onTap: () {
                     _triggerHapticFeedback();
-                    // ✅ PHASE 7 FIX: Navigate to actual Retail Intelligence page
                     Navigator.push(
                       context,
                       MaterialPageRoute(
                         builder: (_) => const RetailIntelligencePage(),
+                      ),
+                    );
+                  },
+                ),
+                _buildQuickActionChip(
+                  icon: Icons.account_balance_wallet_rounded,
+                  label: 'Reconcile',
+                  color: const Color(0xFF0F766E),
+                  onTap: () {
+                    _triggerHapticFeedback();
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => const BankReconPage(),
                       ),
                     );
                   },
@@ -100,26 +114,10 @@ class _CompactQuickActionsState extends State<CompactQuickActions>
                   color: const Color(0xFF10B981),
                   onTap: () {
                     _triggerHapticFeedback();
-                    // ✅ PHASE 7 FIX: Navigate to actual Commission Dashboard
                     Navigator.push(
                       context,
                       MaterialPageRoute(
                         builder: (_) => const CommissionDashboardPage(),
-                      ),
-                    );
-                  },
-                ),
-                _buildQuickActionChip(
-                  icon: Icons.local_shipping,
-                  label: 'Delivery',
-                  color: const Color(0xFF3B82F6),
-                  onTap: () {
-                    _triggerHapticFeedback();
-                    // ✅ PHASE 7 FIX: Navigate to actual Delivery Tracking page
-                    Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                        builder: (_) => const DeliveryTrackingPage(orderId: 101),
                       ),
                     );
                   },
@@ -140,16 +138,12 @@ class _CompactQuickActionsState extends State<CompactQuickActions>
   }) {
     return Expanded(
       child: GestureDetector(
-        onTapDown: (_) {
-          _controller.forward();
-        },
+        onTapDown: (_) => _controller.forward(),
         onTapUp: (_) {
           _controller.reverse();
           onTap();
         },
-        onTapCancel: () {
-          _controller.reverse();
-        },
+        onTapCancel: () => _controller.reverse(),
         child: ScaleTransition(
           scale: _scaleAnimation,
           child: Container(
@@ -160,7 +154,6 @@ class _CompactQuickActionsState extends State<CompactQuickActions>
               borderRadius: BorderRadius.circular(12),
               border: Border.all(
                 color: color.withValues(alpha: 0.3),
-                width: 1,
               ),
               boxShadow: [
                 BoxShadow(
