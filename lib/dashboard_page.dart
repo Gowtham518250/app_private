@@ -744,13 +744,13 @@ class _DashboardPageState extends State<DashboardPage>
     }
   }
 
-  Future<void> _schedulePaymentDetectionReminder() async {
-    if (!mounted || !_isPermissionsMissing || _paymentReminderShowing) return;
+  Future<void> _schedulePaymentDetectionReminder({bool force = false}) async {
+    if (!mounted || (!force && !_isPermissionsMissing) || _paymentReminderShowing) return;
 
     // Let the Dashboard paint before showing the reminder so the user can
     // continue using sales/billing normally even when permissions are missing.
     await Future<void>.delayed(const Duration(milliseconds: 350));
-    if (!mounted || !_isPermissionsMissing || _paymentReminderShowing) return;
+    if (!mounted || (!force && !_isPermissionsMissing) || _paymentReminderShowing) return;
 
     _paymentReminderShowing = true;
 
@@ -783,7 +783,7 @@ class _DashboardPageState extends State<DashboardPage>
               const SizedBox(width: 12),
               Expanded(
                 child: Text(
-                  'Payment Detection is Disabled',
+                  _isPermissionsMissing ? 'Payment Detection is Disabled' : 'Payment Detection Settings',
                   style: GoogleFonts.poppins(
                     fontSize: 17,
                     fontWeight: FontWeight.w800,
@@ -798,7 +798,9 @@ class _DashboardPageState extends State<DashboardPage>
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text(
-                'This is a core RETAIL MIND feature. Enable it to automatically detect eligible UPI and bank payment confirmations.',
+                _isPermissionsMissing
+                    ? 'This is a core RETAIL MIND feature. Enable it to automatically detect eligible UPI and bank payment confirmations.'
+                    : 'Payment detection is enabled. You can review the required access and restart detection from here.',
                 style: GoogleFonts.poppins(
                   fontSize: 13,
                   color: const Color(0xFF374151),
@@ -4563,6 +4565,12 @@ class _DashboardPageState extends State<DashboardPage>
                 _toggleStaffMode,
                 isPrimary: _isStaffMode,
               ),
+            _compactIconButton(
+              Icons.notifications_active_rounded,
+              'Payment Detection',
+              () => _schedulePaymentDetectionReminder(force: true),
+              isPrimary: true,
+            ),
             _compactIconButton(
               Icons.record_voice_over_rounded,
               'Voice Language',
@@ -9544,7 +9552,7 @@ class _DashboardPageState extends State<DashboardPage>
                       size: 20,
                     ),
                     label: Text(
-                      'ENABLE PAYMENT DETECTION',
+                      _isPermissionsMissing ? 'ENABLE PAYMENT DETECTION' : 'PAYMENT DETECTION SETTINGS',
                       style: GoogleFonts.poppins(
                         fontSize: 13,
                         fontWeight: FontWeight.w800,
