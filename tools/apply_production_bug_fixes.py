@@ -86,6 +86,12 @@ replace_once(
 )
 
 replace_once(
+    "lib/sale_service.dart",
+    '''        if (response.statusCode == 200 || response.statusCode == 201) {\n          return true;\n        }\n''',
+    '''        if ((response.statusCode >= 200 && response.statusCode < 300) || response.statusCode == 409) {\n          return true;\n        }\n''',
+)
+
+replace_once(
     "lib/sync_service.dart",
     '''      final res = await ApiClient.postJson(\n        endpoint,\n        payload,\n        headers: {\n          if (token.isNotEmpty) 'Authorization': 'Bearer $token',\n        },\n      ).timeout(const Duration(seconds: 15));\n\n      // 201 = created; 200 = already exists/idempotent duplicate.\n      return res.statusCode == 200 || res.statusCode == 201;\n''',
     '''      if (!payload.containsKey('tax')) {\n        final rawItems = payload['line_items'];\n        double subtotal = 0.0;\n        if (rawItems is List) {\n          for (final raw in rawItems) {\n            if (raw is! Map) continue;\n            final qty = double.tryParse((raw['quantity'] ?? raw['qty'] ?? 0).toString()) ?? 0.0;\n            final price = double.tryParse((raw['unit_price'] ?? raw['price'] ?? 0).toString()) ?? 0.0;\n            final discount = double.tryParse((raw['discount_amount'] ?? 0).toString()) ?? 0.0;\n            subtotal += (qty * price) - discount;\n          }\n        }\n        final total = double.tryParse((payload['total_amount'] ?? 0).toString()) ?? 0.0;\n        payload['tax'] = (total - subtotal).clamp(0.0, double.infinity).toDouble();\n      }\n\n      final res = await ApiClient.postJson(\n        endpoint,\n        payload,\n        headers: {\n          if (token.isNotEmpty) 'Authorization': 'Bearer $token',\n        },\n      ).timeout(const Duration(seconds: 20));\n\n      if ((res.statusCode >= 200 && res.statusCode < 300) || res.statusCode == 409) return true;\n      if (kDebugMode) debugPrint('❌ Sale sync rejected: ${res.statusCode} ${res.body}');\n      return false;\n''',
