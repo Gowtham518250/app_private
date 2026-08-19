@@ -1307,7 +1307,7 @@ static Future<bool> _createPurchaseOrderItem(Map<String, dynamic> data) async {
       }
       if (normalizedItems.isEmpty) return false;
       final payload = {...data, 'supplier_name': (data['supplier_name'] ?? data['supplier'] ?? '').toString().trim(), 'items': normalizedItems};
-      final res = await ApiClient.postJson('/purchase-orders/', payload, headers: {'Authorization': 'Bearer $token'}).timeout(const Duration(seconds: 20));
+      final res = await ApiClient.postJson('/api/purchase-orders/', payload, headers: {'Authorization': 'Bearer $token'}).timeout(const Duration(seconds: 20));
       final success = res.statusCode == 200 || res.statusCode == 201;
       if (!success && kDebugMode) debugPrint('❌ Purchase order backend rejected sync: ${res.statusCode} ${res.body}');
       return success;
@@ -1327,7 +1327,7 @@ static Future<bool> _updatePurchaseOrderStatusItem(Map<String, dynamic> data) as
       final action = data['po_action']; // 'mark-delivered' or 'cancel'
 
       final res = await ApiClient.postJson(
-        '/purchase-orders/$poId/$action',
+        '/api/purchase-orders/$poId/$action',
         {},
         headers: {'Authorization': 'Bearer $token'},
       ).timeout(const Duration(seconds: 20));

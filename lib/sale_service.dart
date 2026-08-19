@@ -223,6 +223,7 @@ try {
       'unit_price': price,
       'line_total': lineTotal,
       if (item['discount'] != null) 'discount': item['discount'],
+      if (item['discount_amount'] != null) 'discount_amount': item['discount_amount'],
       if (item['original_price'] != null) 'original_price': item['original_price'],
     };
   }).toList();
