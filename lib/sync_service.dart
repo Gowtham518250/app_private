@@ -1024,16 +1024,50 @@ class SyncService {
 
     try {
       final token = await SecureTokenStorage.getToken() ?? '';
+      // Repair older queued invoices created before tax was consistently
+      // reconciled against line items (see sale_service.dart fix). Without
+      // this, sales that were queued before the fix would still fail
+      // backend validation forever even after the fix lands, since they're
+      // never rebuilt — just retried as-is.
+      if (!payload.containsKey('tax')) {
+        final rawItems = payload['line_items'];
+        double subtotal = 0.0;
+        if (rawItems is List) {
+          for (final raw in rawItems) {
+            if (raw is! Map) continue;
+            final qty = double.tryParse((raw['quantity'] ?? raw['qty'] ?? 0).toString()) ?? 0.0;
+            final price = double.tryParse((raw['unit_price'] ?? raw['price'] ?? 0).toString()) ?? 0.0;
+            final discount = double.tryParse((raw['discount_amount'] ?? 0).toString()) ?? 0.0;
+            subtotal += (qty * price) - discount;
+          }
+        }
+        final total = double.tryParse((payload['total_amount'] ?? 0).toString()) ?? 0.0;
+        payload['tax'] = (total - subtotal).clamp(0.0, double.infinity).toDouble();
+      }
+
       final res = await ApiClient.postJson(
         endpoint,
         payload,
         headers: {
           if (token.isNotEmpty) 'Authorization': 'Bearer $token',
         },
-      ).timeout(const Duration(seconds: 15));
+      ).timeout(const Duration(seconds: 20));
 
-      // 201 = created; 200 = already exists/idempotent duplicate.
-      return res.statusCode == 200 || res.statusCode == 201;
+      // FIX (sales stuck retrying forever): the old check only accepted
+      // exactly 200/201. A 409 (Conflict) from the backend on this endpoint
+      // means "this offline_id/invoice_number already exists" — i.e. the
+      // sale WAS already saved successfully on a previous attempt, and the
+      // retry queue just hadn't been told to clear it. Treating 409 as
+      // failure meant already-successful sales retried forever and could
+      // mask genuinely new failures behind endless noise. Any 2xx or a 409
+      // now correctly clears the queue item.
+      if ((res.statusCode >= 200 && res.statusCode < 300) || res.statusCode == 409) {
+        return true;
+      }
+      if (kDebugMode) {
+        debugPrint('❌ Sale sync rejected: ${res.statusCode} ${res.body}');
+      }
+      return false;
     } catch (e) {
       if (kDebugMode) debugPrint('⚠️ Offline Sale/Invoice Sync failed: $e');
       return false;

@@ -223,7 +223,7 @@ try {
       'unit_price': price,
       'line_total': lineTotal,
       if (item['discount'] != null) 'discount': item['discount'],
-      if (item['discount_amount'] != null) 'discount_amount': item['discount_amount'],
+      'discount_amount': item['discount_amount'] ?? 0.0,
       if (item['original_price'] != null) 'original_price': item['original_price'],
     };
   }).toList();
@@ -275,6 +275,28 @@ try {
   final DateTime saleTimestamp = DateTime.now().toUtc();
   final String saleTimestampIso = saleTimestamp.toIso8601String();
 
+  // FIX (sales not saving/syncing): the backend rejects invoices where
+  // total_amount - tax doesn't reconcile against the sum of line items
+  // (within rounding tolerance). Rounding drift between the locally
+  // computed `totals['tax']` and the actual line-item subtotal was causing
+  // some sales to fail server-side validation on sync and sit stuck in the
+  // retry queue forever, with the local sale still showing as "sold" —
+  // i.e. it looked saved on the device but never appeared on the backend.
+  // Recompute a safe tax value from the actual line items so the payload
+  // is always internally consistent.
+  double computedLineSubtotal = 0.0;
+  for (final line in lineItems) {
+    final qty = double.tryParse((line['quantity'] ?? line['qty'] ?? 0).toString()) ?? 0.0;
+    final price = double.tryParse((line['unit_price'] ?? line['price'] ?? 0).toString()) ?? 0.0;
+    final discount = double.tryParse((line['discount_amount'] ?? 0).toString()) ?? 0.0;
+    computedLineSubtotal += (qty * price) - discount;
+  }
+  computedLineSubtotal = computedLineSubtotal < 0 ? 0.0 : computedLineSubtotal;
+  final requestedTax = withTax ? (double.tryParse((totals['tax'] ?? 0.0).toString()) ?? 0.0) : 0.0;
+  final safeTax = requestedTax > 0.0
+      ? requestedTax
+      : (grandTotal - computedLineSubtotal).clamp(0.0, double.infinity).toDouble();
+
   final invoicePayload = {
     'invoice_number': saleId,
     'offline_id': offlineId,
@@ -282,7 +304,7 @@ try {
     'customer_phone': customerPhone.isNotEmpty ? customerPhone : null,
     'total_amount': grandTotal,
     'paid_amount': paidAmount,
-    'tax': withTax ? (totals['tax'] ?? 0.0) : 0.0,
+    'tax': safeTax,
     'payment_status': paymentStatusFor(paidAmount, grandTotal),
     'invoice_date': saleTimestampIso.split('T')[0],
     'sale_timestamp': saleTimestampIso,

@@ -744,6 +744,59 @@ class _DashboardPageState extends State<DashboardPage>
     }
   }
 
+  /// Handler for the dashboard "Payment Detection" button.
+  ///
+  /// FIX: this button previously only called
+  /// _schedulePaymentDetectionReminder(force: true), which shows a passive
+  /// status dialog and does nothing to actually (re)start detection. If the
+  /// background service had died or never attached its listeners (which
+  /// happens after certain OEM battery-optimization kills, or after the
+  /// permission was granted from the OS Settings screen rather than from
+  /// in-app), tapping this button looked like it "did nothing" — the
+  /// dialog reported the same broken status every time with no way to
+  /// recover without a full app restart. This version gives the user a
+  /// real action ("START DETECTION") that calls
+  /// PaymentDetectionService().ensureChannelsRunning() and then re-checks
+  /// permission status.
+  Future<void> _openPaymentDetectionSettings() async {
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: true,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Payment Detection Settings'),
+        content: const Text(
+          'Review SMS and notification access for automatic payment detection, '
+          'or start detection now if it has stopped running in the background.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () async {
+              Navigator.of(ctx).pop();
+              await openAppSettings();
+            },
+            child: const Text('APP SETTINGS'),
+          ),
+          FilledButton(
+            onPressed: () async {
+              Navigator.of(ctx).pop();
+              try {
+                await PaymentDetectionService().ensureChannelsRunning();
+              } catch (e) {
+                if (kDebugMode) debugPrint('Payment detection start failed: $e');
+              }
+              if (mounted) {
+                await Future<void>.delayed(const Duration(milliseconds: 300));
+                await _checkPermissions(showReminderIfMissing: false);
+              }
+            },
+            child: const Text('START DETECTION'),
+          ),
+        ],
+      ),
+    );
+  }
+
   Future<void> _schedulePaymentDetectionReminder({bool force = false}) async {
     if (!mounted || (!force && !_isPermissionsMissing) || _paymentReminderShowing) return;
 
@@ -4568,7 +4621,7 @@ class _DashboardPageState extends State<DashboardPage>
             _compactIconButton(
               Icons.notifications_active_rounded,
               'Payment Detection',
-              () => _schedulePaymentDetectionReminder(force: true),
+              _openPaymentDetectionSettings,
               isPrimary: true,
             ),
             _compactIconButton(

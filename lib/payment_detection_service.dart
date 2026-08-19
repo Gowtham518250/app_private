@@ -1330,6 +1330,15 @@ abstract class _SenderValidator {
     final t = s.trim();
     if (!_valid.hasMatch(t) || _digits.hasMatch(t)) return false;
 
+    // Normalize Indian DLT sender IDs such as VA-APGB-T to APGB before
+    // checking the trusted entity registry. This keeps the hard sender gate
+    // while allowing legitimate bank traffic/category suffixes.
+    var entity = t.toUpperCase();
+    final dltPrefix = RegExp(r'^[A-Z]{2}-(.+)$').firstMatch(entity);
+    if (dltPrefix != null) entity = dltPrefix.group(1)!;
+    entity = entity.replaceFirst(RegExp(r'-[A-Z]$'), '');
+    if (_BankSenderRegistry.isKnown(entity)) return true;
+
     // DLT-format headers (e.g. "VM-HDFCBK") get checked against the known
     // entity whitelist. Non-DLT-format senders (older/irregular formats
     // some legitimate banks still use) fall back to the original
@@ -3710,6 +3719,7 @@ class PaymentDetectionService {
     var s = sender.toUpperCase().trim();
     final dlt = RegExp(r'^[A-Z]{2}-(.+)$').firstMatch(s);
     if (dlt != null) s = dlt.group(1)!;
+    s = s.replaceFirst(RegExp(r'-[A-Z]$'), '');
     return _BankSenderRegistry.isKnown(s);
   }
 
