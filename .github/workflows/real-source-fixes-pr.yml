@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   patch:
-    if: ${{ github.event.pull_request.head.repo.full_name == github.repository && !contains(github.event.pull_request.head.sha, '') }}
+    if: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -22,7 +22,6 @@ jobs:
         run: |
           from pathlib import Path
 
-          # Payment detection: accept legitimate DLT sender IDs such as VA-APGB-T.
           p = Path('lib/payment_detection_service.dart')
           text = p.read_text(encoding='utf-8')
           old = '''  static bool isLegitimate(String s) {
@@ -45,8 +44,7 @@ jobs:
 
     // DLT-format headers (e.g. "VM-HDFCBK") get checked against the known
 '''
-          if old not in text:
-              raise SystemExit('payment sender anchor missing')
+          if old not in text: raise SystemExit('payment sender anchor missing')
           text = text.replace(old, new, 1)
 
           old = '''  static bool _isVerifiedBankSender(String? sender) {
@@ -66,8 +64,7 @@ jobs:
     return _BankSenderRegistry.isKnown(s);
   }
 '''
-          if old not in text:
-              raise SystemExit('verified sender anchor missing')
+          if old not in text: raise SystemExit('verified sender anchor missing')
           text = text.replace(old, new, 1)
 
           old = '''  static final _s = <String>{
@@ -79,7 +76,6 @@ jobs:
               text = text.replace(old, new, 1)
           p.write_text(text, encoding='utf-8')
 
-          # Dashboard: open a real settings dialog directly from the toolbar.
           p = Path('lib/dashboard_page.dart')
           text = p.read_text(encoding='utf-8')
           old = """            _compactIconButton(
@@ -94,8 +90,7 @@ jobs:
               _openPaymentDetectionSettings,
               isPrimary: true,
             ),"""
-          if old in text:
-              text = text.replace(old, new, 1)
+          if old in text: text = text.replace(old, new, 1)
           if 'Future<void> _openPaymentDetectionSettings()' not in text:
               marker = '  Future<void> _schedulePaymentDetectionReminder({bool force = false}) async {'
               helper = r'''  Future<void> _openPaymentDetectionSettings() async {
@@ -135,12 +130,10 @@ jobs:
   }
 
 '''
-              if marker not in text:
-                  raise SystemExit('dashboard marker missing')
+              if marker not in text: raise SystemExit('dashboard marker missing')
               text = text.replace(marker, helper + marker, 1)
           p.write_text(text, encoding='utf-8')
 
-          # Sale sync: always compute a valid tax field and preserve discount_amount.
           p = Path('lib/sale_service.dart')
           text = p.read_text(encoding='utf-8')
           old = """  final invoicePayload = {
@@ -161,9 +154,7 @@ jobs:
   }
   computedLineSubtotal = computedLineSubtotal < 0 ? 0.0 : computedLineSubtotal;
   final requestedTax = withTax ? double.tryParse((totals['tax'] ?? 0.0).toString()) : 0.0;
-  final safeTax = requestedTax > 0.0
-      ? requestedTax
-      : (grandTotal - computedLineSubtotal).clamp(0.0, double.infinity).toDouble();
+  final safeTax = requestedTax > 0.0 ? requestedTax : (grandTotal - computedLineSubtotal).clamp(0.0, double.infinity).toDouble();
 
   final invoicePayload = {
     'invoice_number': saleId,
@@ -174,17 +165,11 @@ jobs:
     'paid_amount': paidAmount,
     'tax': safeTax,
 """
-          if old not in text:
-              raise SystemExit('sale payload anchor missing')
+          if old not in text: raise SystemExit('sale payload anchor missing')
           text = text.replace(old, new, 1)
-          text = text.replace(
-              "        if (item['discount_amount'] != null) 'discount_amount': item['discount_amount'],\n",
-              "        'discount_amount': item['discount_amount'] ?? 0.0,\n",
-              1,
-          )
+          text = text.replace("        if (item['discount_amount'] != null) 'discount_amount': item['discount_amount'],\n", "        'discount_amount': item['discount_amount'] ?? 0.0,\n", 1)
           p.write_text(text, encoding='utf-8')
 
-          # Queue sync: repair older payloads and expose real server rejection details.
           p = Path('lib/sync_service.dart')
           text = p.read_text(encoding='utf-8')
           old = '''      final res = await ApiClient.postJson(
@@ -222,28 +207,21 @@ jobs:
         },
       ).timeout(const Duration(seconds: 20));
 
-      if ((res.statusCode >= 200 && res.statusCode < 300) || res.statusCode == 409) {
-        return true;
-      }
+      if ((res.statusCode >= 200 && res.statusCode < 300) || res.statusCode == 409) return true;
       if (kDebugMode) debugPrint('❌ Sale sync rejected: ${res.statusCode} ${res.body}');
       return false;
 '''
-          if old not in text:
-              raise SystemExit('sync anchor missing')
+          if old not in text: raise SystemExit('sync anchor missing')
           text = text.replace(old, new, 1)
           p.write_text(text, encoding='utf-8')
 
-      - name: Verify
+      - name: Verify and commit
         shell: bash
         run: |
           grep -q "APGB" lib/payment_detection_service.dart
           grep -q "_openPaymentDetectionSettings" lib/dashboard_page.dart
           grep -q "computedLineSubtotal" lib/sale_service.dart
           grep -q "Sale sync rejected" lib/sync_service.dart
-
-      - name: Commit fixes to PR branch
-        shell: bash
-        run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git rm -f .github/workflows/real-source-fixes-pr.yml || true
