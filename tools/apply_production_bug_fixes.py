@@ -4,9 +4,9 @@
 Run from repository root:
     python3 tools/apply_production_bug_fixes.py
 
-The script is intentionally fail-fast: if an expected source anchor is missing,
-it stops instead of making a partial or unsafe edit. Modified files receive a
-.bak backup before being written.
+The script is fail-fast on unknown source layouts, but idempotent when the fix
+has already been applied. Modified files receive a .bak backup before being
+written.
 """
 from pathlib import Path
 
@@ -17,6 +17,8 @@ def replace_once(path: str, old: str, new: str) -> None:
     p = ROOT / path
     text = p.read_text(encoding="utf-8")
     if old not in text:
+        if new in text:
+            return
         raise RuntimeError(f"Anchor not found in {path}: {old[:160]!r}")
     backup = p.with_suffix(p.suffix + ".bak")
     if not backup.exists():
