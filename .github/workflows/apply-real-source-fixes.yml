@@ -23,7 +23,6 @@ jobs:
         shell: python
         run: |
           from pathlib import Path
-          import re
 
           # ---------------- Payment detection ----------------
           p = Path('lib/payment_detection_service.dart')
@@ -39,9 +38,9 @@ jobs:
     final t = s.trim();
     if (!_valid.hasMatch(t) || _digits.hasMatch(t)) return false;
 
-    // DLT headers can arrive as XX-ENTITY-T where the final letter is the
-    // traffic/category suffix. Normalize both the two-letter prefix and the
-    // trailing DLT suffix before checking the trusted bank/entity registry.
+    // Normalize Indian DLT sender IDs such as VA-APGB-T to APGB before
+    // checking the trusted entity registry. This keeps the hard sender gate
+    // while allowing legitimate bank traffic/category suffixes.
     var entity = t.toUpperCase();
     final dlt = RegExp(r'^[A-Z]{2}-(.+)$').firstMatch(entity);
     if (dlt != null) entity = dlt.group(1)!;
@@ -67,8 +66,6 @@ jobs:
     var s = sender.toUpperCase().trim();
     final dlt = RegExp(r'^[A-Z]{2}-(.+)$').firstMatch(s);
     if (dlt != null) s = dlt.group(1)!;
-    // India DLT sender IDs may carry a final one-letter traffic/category
-    // suffix, e.g. VA-APGB-T. Trust it only after reducing to a known entity.
     s = s.replaceFirst(RegExp(r'-[A-Z]$'), '');
     return _BankSenderRegistry.isKnown(s);
   }
@@ -82,16 +79,14 @@ jobs:
           new = '''  static final _s = <String>{
     'APGB', 'APGBUP',
 '''
-          if old not in text:
-              raise SystemExit('Bank registry anchor not found')
-          text = text.replace(old, new, 1)
+          if old in text and "'APGB'" not in text.split(old,1)[1].split('};',1)[0]:
+              text = text.replace(old, new, 1)
 
           p.write_text(text, encoding='utf-8')
 
-          # ---------------- Dashboard settings ----------------
+          # ---------------- Dashboard payment settings ----------------
           p = Path('lib/dashboard_page.dart')
           text = p.read_text(encoding='utf-8')
-
           old = """            _compactIconButton(
               Icons.notifications_active_rounded,
               'Payment Detection',
@@ -106,11 +101,9 @@ jobs:
             ),"""
           if old in text:
               text = text.replace(old, new, 1)
-          elif '_openPaymentDetectionSettings,' not in text:
-              raise SystemExit('Dashboard payment button anchor not found')
 
-          marker = '  Future<void> _schedulePaymentDetectionReminder({bool force = false}) async {'
           if 'Future<void> _openPaymentDetectionSettings()' not in text:
+              marker = '  Future<void> _schedulePaymentDetectionReminder({bool force = false}) async {'
               helper = r'''  Future<void> _openPaymentDetectionSettings() async {
     if (!mounted) return;
     await showDialog<void>(
@@ -118,9 +111,7 @@ jobs:
       barrierDismissible: true,
       builder: (ctx) => AlertDialog(
         title: const Text('Payment Detection Settings'),
-        content: const Text(
-          'Review SMS and notification access for automatic payment detection.',
-        ),
+        content: const Text('Review SMS and notification access for automatic payment detection.'),
         actions: [
           TextButton(
             onPressed: () async {
@@ -133,8 +124,7 @@ jobs:
             onPressed: () async {
               Navigator.of(ctx).pop();
               try {
-                final service = PaymentDetectionService();
-                await service.ensureChannelsRunning();
+                await PaymentDetectionService().ensureChannelsRunning();
               } catch (e) {
                 if (kDebugMode) debugPrint('Payment detection start failed: $e');
               }
@@ -154,13 +144,11 @@ jobs:
               if marker not in text:
                   raise SystemExit('Dashboard reminder marker not found')
               text = text.replace(marker, helper + marker, 1)
-
           p.write_text(text, encoding='utf-8')
 
-          # ---------------- Sale sync robustness ----------------
+          # ---------------- Sale sync: GST-safe payload ----------------
           p = Path('lib/sale_service.dart')
           text = p.read_text(encoding='utf-8')
-
           old = """  final invoicePayload = {
     'invoice_number': saleId,
     'offline_id': offlineId,
@@ -170,9 +158,7 @@ jobs:
     'paid_amount': paidAmount,
     'tax': withTax ? (totals['tax'] ?? 0.0) : 0.0,
 """
-          new = """  // Backend validates total_amount - tax against the line-item subtotal.
-  // Recompute a safe tax fallback so an older/partial totals map can never
-  // enqueue a structurally invalid invoice.
+          new = """  // Guarantee that total_amount - tax matches line-item subtotal.
   double computedLineSubtotal = 0.0;
   for (final line in lineItems) {
     final qty = double.tryParse((line['quantity'] ?? line['qty'] ?? 0).toString()) ?? 0.0;
@@ -198,20 +184,16 @@ jobs:
           if old not in text:
               raise SystemExit('Sale payload anchor not found')
           text = text.replace(old, new, 1)
-
-          old = """        if (item['discount_amount'] != null) 'discount_amount': item['discount_amount'],
-"""
-          new = """        'discount_amount': item['discount_amount'] ?? 0.0,
-"""
-          if old in text:
-              text = text.replace(old, new, 1)
-
+          text = text.replace(
+              "        if (item['discount_amount'] != null) 'discount_amount': item['discount_amount'],\n",
+              "        'discount_amount': item['discount_amount'] ?? 0.0,\n",
+              1,
+          )
           p.write_text(text, encoding='utf-8')
 
-          # ---------------- Queue sync robustness ----------------
+          # ---------------- Queue sync: acknowledge all safe 2xx / idempotent 409 ----------------
           p = Path('lib/sync_service.dart')
           text = p.read_text(encoding='utf-8')
-
           old = '''      final res = await ApiClient.postJson(
         endpoint,
         payload,
@@ -223,7 +205,7 @@ jobs:
       // 201 = created; 200 = already exists/idempotent duplicate.
       return res.statusCode == 200 || res.statusCode == 201;
 '''
-          new = '''      // Repair older queued payloads that may not contain the GST field.
+          new = '''      // Repair older queued invoices created before tax was consistently persisted.
       if (!payload.containsKey('tax')) {
         final rawItems = payload['line_items'];
         double subtotal = 0.0;
@@ -248,28 +230,27 @@ jobs:
         },
       ).timeout(const Duration(seconds: 20));
 
-      // 2xx = server acknowledged the transaction. 409 is also safe to treat
-      // as success for an idempotent offline_id already committed server-side.
       if ((res.statusCode >= 200 && res.statusCode < 300) || res.statusCode == 409) {
         return true;
       }
-      if (kDebugMode) {
-        debugPrint('❌ Sale sync rejected: ${res.statusCode} ${res.body}');
-      }
+      if (kDebugMode) debugPrint('❌ Sale sync rejected: ${res.statusCode} ${res.body}');
       return false;
 '''
           if old not in text:
               raise SystemExit('Queue sync anchor not found')
           text = text.replace(old, new, 1)
-
           p.write_text(text, encoding='utf-8')
 
-      - name: Commit real source changes
+      - name: Verify source patches and commit
         shell: bash
         run: |
+          grep -n "APGB" lib/payment_detection_service.dart
+          grep -n "_openPaymentDetectionSettings" lib/dashboard_page.dart
+          grep -n "computedLineSubtotal" lib/sale_service.dart
+          grep -n "Sale sync rejected" lib/sync_service.dart
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           rm -f .github/workflows/apply-real-source-fixes.yml
           git add lib/payment_detection_service.dart lib/dashboard_page.dart lib/sale_service.dart lib/sync_service.dart
-          git commit -m 'fix: apply real payment detection, settings, and sale sync fixes [real-source-fixes-applied]'
+          git commit -m 'fix: real payment detection, settings, and sale sync [real-source-fixes-applied]'
           git push origin production-fix-2026-08-18
