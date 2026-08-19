@@ -1,0 +1,275 @@
+name: Apply Real Source Fixes
+
+on:
+  push:
+    branches:
+      - production-fix-2026-08-18
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: ${{ !contains(github.event.head_commit.message, '[real-source-fixes-applied]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: production-fix-2026-08-18
+          fetch-depth: 0
+
+      - name: Patch production source
+        shell: python
+        run: |
+          from pathlib import Path
+          import re
+
+          # ---------------- Payment detection ----------------
+          p = Path('lib/payment_detection_service.dart')
+          text = p.read_text(encoding='utf-8')
+
+          old = '''  static bool isLegitimate(String s) {
+    final t = s.trim();
+    if (!_valid.hasMatch(t) || _digits.hasMatch(t)) return false;
+
+    // DLT-format headers (e.g. "VM-HDFCBK") get checked against the known
+'''
+          new = '''  static bool isLegitimate(String s) {
+    final t = s.trim();
+    if (!_valid.hasMatch(t) || _digits.hasMatch(t)) return false;
+
+    // DLT headers can arrive as XX-ENTITY-T where the final letter is the
+    // traffic/category suffix. Normalize both the two-letter prefix and the
+    // trailing DLT suffix before checking the trusted bank/entity registry.
+    var entity = t.toUpperCase();
+    final dlt = RegExp(r'^[A-Z]{2}-(.+)$').firstMatch(entity);
+    if (dlt != null) entity = dlt.group(1)!;
+    entity = entity.replaceFirst(RegExp(r'-[A-Z]$'), '');
+    if (_BankSenderRegistry.isKnown(entity)) return true;
+
+    // DLT-format headers (e.g. "VM-HDFCBK") get checked against the known
+'''
+          if old not in text:
+              raise SystemExit('Sender validator anchor not found')
+          text = text.replace(old, new, 1)
+
+          old = '''  static bool _isVerifiedBankSender(String? sender) {
+    if (sender == null || sender.isEmpty) return false;
+    var s = sender.toUpperCase().trim();
+    final dlt = RegExp(r'^[A-Z]{2}-(.+)$').firstMatch(s);
+    if (dlt != null) s = dlt.group(1)!;
+    return _BankSenderRegistry.isKnown(s);
+  }
+'''
+          new = '''  static bool _isVerifiedBankSender(String? sender) {
+    if (sender == null || sender.isEmpty) return false;
+    var s = sender.toUpperCase().trim();
+    final dlt = RegExp(r'^[A-Z]{2}-(.+)$').firstMatch(s);
+    if (dlt != null) s = dlt.group(1)!;
+    // India DLT sender IDs may carry a final one-letter traffic/category
+    // suffix, e.g. VA-APGB-T. Trust it only after reducing to a known entity.
+    s = s.replaceFirst(RegExp(r'-[A-Z]$'), '');
+    return _BankSenderRegistry.isKnown(s);
+  }
+'''
+          if old not in text:
+              raise SystemExit('Verified sender anchor not found')
+          text = text.replace(old, new, 1)
+
+          old = '''  static final _s = <String>{
+'''
+          new = '''  static final _s = <String>{
+    'APGB', 'APGBUP',
+'''
+          if old not in text:
+              raise SystemExit('Bank registry anchor not found')
+          text = text.replace(old, new, 1)
+
+          p.write_text(text, encoding='utf-8')
+
+          # ---------------- Dashboard settings ----------------
+          p = Path('lib/dashboard_page.dart')
+          text = p.read_text(encoding='utf-8')
+
+          old = """            _compactIconButton(
+              Icons.notifications_active_rounded,
+              'Payment Detection',
+              () => _schedulePaymentDetectionReminder(force: true),
+              isPrimary: true,
+            ),"""
+          new = """            _compactIconButton(
+              Icons.notifications_active_rounded,
+              'Payment Detection',
+              _openPaymentDetectionSettings,
+              isPrimary: true,
+            ),"""
+          if old in text:
+              text = text.replace(old, new, 1)
+          elif '_openPaymentDetectionSettings,' not in text:
+              raise SystemExit('Dashboard payment button anchor not found')
+
+          marker = '  Future<void> _schedulePaymentDetectionReminder({bool force = false}) async {'
+          if 'Future<void> _openPaymentDetectionSettings()' not in text:
+              helper = r'''  Future<void> _openPaymentDetectionSettings() async {
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: true,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Payment Detection Settings'),
+        content: const Text(
+          'Review SMS and notification access for automatic payment detection.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () async {
+              Navigator.of(ctx).pop();
+              await openAppSettings();
+            },
+            child: const Text('APP SETTINGS'),
+          ),
+          FilledButton(
+            onPressed: () async {
+              Navigator.of(ctx).pop();
+              try {
+                final service = PaymentDetectionService();
+                await service.ensureChannelsRunning();
+              } catch (e) {
+                if (kDebugMode) debugPrint('Payment detection start failed: $e');
+              }
+              if (mounted) {
+                await Future<void>.delayed(const Duration(milliseconds: 300));
+                await _checkPermissions(showReminderIfMissing: false);
+              }
+            },
+            child: const Text('START DETECTION'),
+          ),
+        ],
+      ),
+    );
+  }
+
+'''
+              if marker not in text:
+                  raise SystemExit('Dashboard reminder marker not found')
+              text = text.replace(marker, helper + marker, 1)
+
+          p.write_text(text, encoding='utf-8')
+
+          # ---------------- Sale sync robustness ----------------
+          p = Path('lib/sale_service.dart')
+          text = p.read_text(encoding='utf-8')
+
+          old = """  final invoicePayload = {
+    'invoice_number': saleId,
+    'offline_id': offlineId,
+    'customer_name': customerName.isNotEmpty ? customerName : 'Cash Customer',
+    'customer_phone': customerPhone.isNotEmpty ? customerPhone : null,
+    'total_amount': grandTotal,
+    'paid_amount': paidAmount,
+    'tax': withTax ? (totals['tax'] ?? 0.0) : 0.0,
+"""
+          new = """  // Backend validates total_amount - tax against the line-item subtotal.
+  // Recompute a safe tax fallback so an older/partial totals map can never
+  // enqueue a structurally invalid invoice.
+  double computedLineSubtotal = 0.0;
+  for (final line in lineItems) {
+    final qty = double.tryParse((line['quantity'] ?? line['qty'] ?? 0).toString()) ?? 0.0;
+    final price = double.tryParse((line['unit_price'] ?? line['price'] ?? 0).toString()) ?? 0.0;
+    final discount = double.tryParse((line['discount_amount'] ?? 0).toString()) ?? 0.0;
+    computedLineSubtotal += (qty * price) - discount;
+  }
+  computedLineSubtotal = computedLineSubtotal < 0 ? 0.0 : computedLineSubtotal;
+  final requestedTax = withTax ? double.tryParse((totals['tax'] ?? 0.0).toString()) : 0.0;
+  final safeTax = requestedTax > 0.0
+      ? requestedTax
+      : (grandTotal - computedLineSubtotal).clamp(0.0, double.infinity).toDouble();
+
+  final invoicePayload = {
+    'invoice_number': saleId,
+    'offline_id': offlineId,
+    'customer_name': customerName.isNotEmpty ? customerName : 'Cash Customer',
+    'customer_phone': customerPhone.isNotEmpty ? customerPhone : null,
+    'total_amount': grandTotal,
+    'paid_amount': paidAmount,
+    'tax': safeTax,
+"""
+          if old not in text:
+              raise SystemExit('Sale payload anchor not found')
+          text = text.replace(old, new, 1)
+
+          old = """        if (item['discount_amount'] != null) 'discount_amount': item['discount_amount'],
+"""
+          new = """        'discount_amount': item['discount_amount'] ?? 0.0,
+"""
+          if old in text:
+              text = text.replace(old, new, 1)
+
+          p.write_text(text, encoding='utf-8')
+
+          # ---------------- Queue sync robustness ----------------
+          p = Path('lib/sync_service.dart')
+          text = p.read_text(encoding='utf-8')
+
+          old = '''      final res = await ApiClient.postJson(
+        endpoint,
+        payload,
+        headers: {
+          if (token.isNotEmpty) 'Authorization': 'Bearer $token',
+        },
+      ).timeout(const Duration(seconds: 15));
+
+      // 201 = created; 200 = already exists/idempotent duplicate.
+      return res.statusCode == 200 || res.statusCode == 201;
+'''
+          new = '''      // Repair older queued payloads that may not contain the GST field.
+      if (!payload.containsKey('tax')) {
+        final rawItems = payload['line_items'];
+        double subtotal = 0.0;
+        if (rawItems is List) {
+          for (final raw in rawItems) {
+            if (raw is! Map) continue;
+            final qty = double.tryParse((raw['quantity'] ?? raw['qty'] ?? 0).toString()) ?? 0.0;
+            final price = double.tryParse((raw['unit_price'] ?? raw['price'] ?? 0).toString()) ?? 0.0;
+            final discount = double.tryParse((raw['discount_amount'] ?? 0).toString()) ?? 0.0;
+            subtotal += (qty * price) - discount;
+          }
+        }
+        final total = double.tryParse((payload['total_amount'] ?? 0).toString()) ?? 0.0;
+        payload['tax'] = (total - subtotal).clamp(0.0, double.infinity).toDouble();
+      }
+
+      final res = await ApiClient.postJson(
+        endpoint,
+        payload,
+        headers: {
+          if (token.isNotEmpty) 'Authorization': 'Bearer $token',
+        },
+      ).timeout(const Duration(seconds: 20));
+
+      // 2xx = server acknowledged the transaction. 409 is also safe to treat
+      // as success for an idempotent offline_id already committed server-side.
+      if ((res.statusCode >= 200 && res.statusCode < 300) || res.statusCode == 409) {
+        return true;
+      }
+      if (kDebugMode) {
+        debugPrint('❌ Sale sync rejected: ${res.statusCode} ${res.body}');
+      }
+      return false;
+'''
+          if old not in text:
+              raise SystemExit('Queue sync anchor not found')
+          text = text.replace(old, new, 1)
+
+          p.write_text(text, encoding='utf-8')
+
+      - name: Commit real source changes
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          rm -f .github/workflows/apply-real-source-fixes.yml
+          git add lib/payment_detection_service.dart lib/dashboard_page.dart lib/sale_service.dart lib/sync_service.dart
+          git commit -m 'fix: apply real payment detection, settings, and sale sync fixes [real-source-fixes-applied]'
+          git push origin production-fix-2026-08-18
