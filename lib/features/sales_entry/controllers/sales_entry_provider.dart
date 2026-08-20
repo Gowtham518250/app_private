@@ -55,6 +55,17 @@ class SalesEntryProvider extends ChangeNotifier {
     return total;
   }
 
+  /// Total GST amount represented by the current sale lines.
+  /// This must be sent separately to the backend because the backend
+  /// validates `total_amount - tax` against the line-item subtotal.
+  double get totalTaxAmount {
+    double total = 0.0;
+    for (var entry in entries) {
+      total += entry.totalGstAmount;
+    }
+    return total;
+  }
+
   void addEntry() {
     entries.add(SalesItem(id: DateTime.now().millisecondsSinceEpoch.toString()));
     notifyListeners();
@@ -129,6 +140,7 @@ class SalesEntryProvider extends ChangeNotifier {
           'price': e.price,
           'gst': e.gst,
           'discount': e.discount,
+          'discount_amount': e.discount,
           'total': e.finalAmount,
         });
       }
@@ -148,8 +160,9 @@ class SalesEntryProvider extends ChangeNotifier {
         withTax: withTax,
         totals: {
           'subtotal': subtotalAmount,
-          'cgst': withTax ? subtotalAmount * 0.09 : 0.0,
-          'sgst': withTax ? subtotalAmount * 0.09 : 0.0,
+          'tax': withTax ? totalTaxAmount : 0.0,
+          'cgst': withTax ? totalTaxAmount / 2 : 0.0,
+          'sgst': withTax ? totalTaxAmount / 2 : 0.0,
         },
         paymentMethod: isOnlinePayment ? 'Online' : 'Cash',
       );
@@ -160,7 +173,7 @@ class SalesEntryProvider extends ChangeNotifier {
       }
       return false;
     } catch (e) {
-      print('Error submitting sale: ');
+      print('Error submitting sale: $e');
       return false;
     } finally {
       isSaving = false;
@@ -192,6 +205,7 @@ class SalesEntryProvider extends ChangeNotifier {
           'price': e.price,
           'gst': e.gst,
           'discount': e.discount,
+          'discount_amount': e.discount,
           'total': e.finalAmount,
         });
       }
@@ -211,8 +225,9 @@ class SalesEntryProvider extends ChangeNotifier {
         withTax: withTax,
         totals: {
           'subtotal': subtotalAmount,
-          'cgst': withTax ? subtotalAmount * 0.09 : 0.0,
-          'sgst': withTax ? subtotalAmount * 0.09 : 0.0,
+          'tax': withTax ? totalTaxAmount : 0.0,
+          'cgst': withTax ? totalTaxAmount / 2 : 0.0,
+          'sgst': withTax ? totalTaxAmount / 2 : 0.0,
         },
         paymentMethod: 'Credit',
       );
@@ -229,7 +244,7 @@ class SalesEntryProvider extends ChangeNotifier {
       }
       return false;
     } catch (e) {
-      print('Error saving sale as credit: ');
+      print('Error saving sale as credit: $e');
       return false;
     } finally {
       isSaving = false;
@@ -307,7 +322,7 @@ class SalesEntryProvider extends ChangeNotifier {
 
       await prefs.setString(customersKey, jsonEncode(customers));
     } catch (e) {
-      print('Error adding to customer ledger: ');
+      print('Error adding to customer ledger: $e');
     }
   }
 
@@ -320,8 +335,8 @@ class SalesEntryProvider extends ChangeNotifier {
 
   @override
   void dispose() {
-    customerNameController.dispose();
     customerPhoneController.dispose();
+    customerNameController.dispose();
     super.dispose();
   }
 

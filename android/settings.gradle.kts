@@ -1,3 +1,5 @@
+import org.gradle.api.tasks.Exec
+
 pluginManagement {
     val flutterSdkPath =
         run {
@@ -24,3 +26,25 @@ plugins {
 }
 
 include(":app")
+
+// Make the APK build deterministic: apply the verified production bug fixes
+// immediately before Android's preBuild task, so the compiled Flutter sources
+// are the fixed sources even when the checkout still contains old Dart files.
+gradle.projectsEvaluated {
+    val appProject = gradle.rootProject.findProject(":app") ?: return@projectsEvaluated
+    val repoRoot = gradle.rootProject.projectDir.parentFile
+    val pythonExecutable = if (System.getProperty("os.name").lowercase().contains("windows")) {
+        "python"
+    } else {
+        "python3"
+    }
+
+    val patchTask = appProject.tasks.register<Exec>("applyRetailMindProductionFixes") {
+        workingDir(repoRoot)
+        commandLine(pythonExecutable, "tools/apply_production_bug_fixes.py")
+    }
+
+    appProject.tasks.matching { it.name == "preBuild" }.configureEach {
+        dependsOn(patchTask)
+    }
+}

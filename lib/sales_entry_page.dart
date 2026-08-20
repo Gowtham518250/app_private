@@ -4702,6 +4702,32 @@ class _SalesEntryPageState extends State<SalesEntryPage>
               fontWeight: FontWeight.w600,
             ),
           ),
+          const SizedBox(height: 8),
+          SizedBox(
+            width: double.infinity,
+            child: OutlinedButton.icon(
+              onPressed: () async {
+                try {
+                  await PaymentDetectionService().ensureChannelsRunning();
+                  if (mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text('Payment Detection is active and ready.')),
+                    );
+                  }
+                } catch (e) {
+                  if (kDebugMode) debugPrint('Payment detection status action failed: $e');
+                }
+              },
+              icon: const Icon(Icons.notifications_active_rounded, size: 17),
+              label: const Text('PAYMENT DETECTION'),
+              style: OutlinedButton.styleFrom(
+                foregroundColor: const Color(0xFF16A34A),
+                side: const BorderSide(color: Color(0xFF86EFAC)),
+                padding: const EdgeInsets.symmetric(vertical: 9),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+              ),
+            ),
+          ),
           const SizedBox(height: 10),
 
           // â”€â”€ Premium segmented payment control â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
