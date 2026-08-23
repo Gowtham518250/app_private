@@ -2473,21 +2473,49 @@ class PaymentDetectionService {
     if (_statusCtrl.isClosed) _statusCtrl = StreamController<ChannelStatusEvent>.broadcast();
     if (_fraudCtrl.isClosed)  _fraudCtrl  = StreamController<FraudAlertEvent>.broadcast();
 
-    // 3. Only NOW mark as started
-    _isStarted = true;
-
     PdsLogger.i('SVC', '═══ V15 MERCHANT GRADE STARTING ═══');
 
     // FIX-3: wire language callback into voice queue
     _voice.getLanguage = () => _voiceLanguage;
 
-    await PdsStateStore.loadDedup(_dedupStore);
-    await TrustedSenderStore.preload(); // FIX-B
+    // FIX (critical - "both channels silently never start" bug): this used
+    // to set _isStarted = true right here, THEN call loadDedup/preload/
+    // _ensureDetectionPermissions with no try/catch. If any of those threw
+    // (a Hive/SharedPreferences hiccup, a plugin/dependency error, etc.)
+    // the function aborted before ever reaching _startNotificationListener()
+    // / _startSmsListener() below - but _isStarted was already true, so the
+    // early `if (_isStarted) return;` guard at the top made every future
+    // start() call (including any retry/resume logic) a silent no-op for
+    // the rest of the app session. Neither channel would ever attach, with
+    // nothing visibly wrong - exactly "payment detection isn't detecting
+    // anything on either channel". Each step below is now isolated so a
+    // failure in one can't take down the others, and _isStarted is only
+    // set true once we've actually attempted to attach both listeners.
+    try {
+      await PdsStateStore.loadDedup(_dedupStore);
+    } catch (e, st) {
+      PdsLogger.e('SVC', 'Dedup store load failed - continuing without it', e, st);
+    }
+    try {
+      await TrustedSenderStore.preload(); // FIX-B
+    } catch (e, st) {
+      PdsLogger.e('SVC', 'Trusted sender preload failed - continuing without it', e, st);
+    }
+    try {
+      await _ensureDetectionPermissions();
+    } catch (e, st) {
+      PdsLogger.e('SVC', 'Permission check failed - attempting listeners anyway', e, st);
+    }
 
-    await _ensureDetectionPermissions();
     await _startNotificationListener();
     await _startSmsListener();
     _startAccessibilityListener();
+
+    // 3. Only mark as started once we've actually tried to bring the
+    // channels up - a retry (e.g. from the health check or a manual
+    // "restart detection" action) should be possible if this all failed.
+    _isStarted = true;
+
     _startTcmDrainTimer();
     _startDedupTimer();
     _startDedupSaveTimer();
