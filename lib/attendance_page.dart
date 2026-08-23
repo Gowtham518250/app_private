@@ -287,6 +287,70 @@ class _AttendancePageState extends State<AttendancePage>
     if (state == AppLifecycleState.resumed) _refreshAttendanceData();
   }
 
+  /// Fixed session windows — must match backend ATTENDANCE_SESSIONS in
+  /// attendance.py exactly, since the backend rejects a check-in outside
+  /// these hours regardless of what the app shows.
+  static const Map<String, List<int>> _sessionWindows = {
+    // key -> [startHour, endHour]; endHour is exclusive, matching backend logic.
+    'morning': [9, 13],
+    'evening': [14, 19],
+  };
+  static const Map<String, String> _sessionLabels = {
+    'morning': 'Morning',
+    'evening': 'Evening',
+  };
+  static const Map<String, String> _sessionWindowText = {
+    'morning': '9:00 AM–1:00 PM',
+    'evening': '2:00 PM–7:00 PM',
+  };
+
+  bool _isWithinSessionWindow(String key) {
+    final window = _sessionWindows[key];
+    if (window == null) return false;
+    final hour = DateTime.now().hour;
+    return hour >= window[0] && hour < window[1];
+  }
+
+  /// Which session key (morning/evening) the currently open local session
+  /// belongs to, based on its check-in time. The backend decides this by
+  /// the server clock at check-in; this mirrors that using the local
+  /// check-in timestamp so an offline-created session still shows under
+  /// the right card before it syncs.
+  String? _sessionKeyForOpenSession() {
+    if (_mySession == null) return null;
+    final cin = DateTime.tryParse((_mySession!['check_in_time'] ?? '').toString());
+    if (cin == null) return null;
+    final hour = cin.toLocal().hour;
+    for (final entry in _sessionWindows.entries) {
+      if (hour >= entry.value[0] && hour < entry.value[1]) return entry.key;
+    }
+    return null;
+  }
+
+  Future<void> _handleSessionCardTap(String sessionKey) async {
+    final openKey = _sessionKeyForOpenSession();
+    if (openKey == sessionKey) {
+      // This card's session is the one currently open — tapping checks out.
+      await _checkInOut();
+      return;
+    }
+    if (openKey != null) {
+      _showSnack(
+        'Finish your open ${_sessionLabels[openKey]} session before starting another.',
+        _absent,
+      );
+      return;
+    }
+    if (!_isWithinSessionWindow(sessionKey)) {
+      _showSnack(
+        '${_sessionLabels[sessionKey]} check-in is only available ${_sessionWindowText[sessionKey]}.',
+        _absent,
+      );
+      return;
+    }
+    await _checkInOut();
+  }
+
   void _startTimer() {
     _timer = Timer.periodic(const Duration(minutes: 1), (timer) {
       if (mounted) _updateLiveHours();
@@ -354,8 +418,19 @@ class _AttendancePageState extends State<AttendancePage>
       if (attDate == null) continue;
       if (attDate.year != now.year || attDate.month != now.month) continue;
       
-      // Use working_hours from backend if available
-      if (r['working_hours'] != null) {
+      // FIX (payroll bug): 'working_hours' only reflects the most recently
+      // completed/active session for that day — with two sessions (morning/
+      // evening) now supported, a worker who works both sessions has the
+      // morning hours silently overwritten by the evening check-out, so
+      // summing 'working_hours' alone understates monthly payroll hours by
+      // roughly half on any day with two sessions worked. The backend
+      // already computes the correct sum across all sessions for the day
+      // and exposes it as 'total_working_hours' (see attendance.py
+      // get_employee_attendance) — this endpoint is exactly what feeds
+      // _records here, so prefer that field.
+      if (r['total_working_hours'] != null) {
+        totalHours += (r['total_working_hours'] as num).toDouble();
+      } else if (r['working_hours'] != null) {
         totalHours += (r['working_hours'] as num).toDouble();
       } else if (r['check_in_time'] != null && r['check_out_time'] != null) {
         final cin = _parseServerTime(r['check_in_time']);
@@ -423,15 +498,10 @@ class _AttendancePageState extends State<AttendancePage>
     // instead of getting permanently disabled.
     final hasOpenSession = _mySession != null;
 
-    String btnLabel = AppLocalizations.of(context).checkIn;
-    Color btnColor = _present;
-    IconData btnIcon = Icons.login;
-    if (hasOpenSession) {
-      btnLabel = AppLocalizations.of(context).checkOut;
-      btnColor = _primary;
-      btnIcon = Icons.logout;
-    }
-
+    // Per-card buttons in _sessionCard now handle check-in/out for each
+    // session directly, so a single global FAB doing "whichever session is
+    // open" no longer applies cleanly with two independent sessions —
+    // removed to avoid two different controls doing overlapping things.
     return Scaffold(
       backgroundColor: const Color(0xFFF8FAFC),
       appBar: AppBar(
@@ -466,26 +536,129 @@ class _AttendancePageState extends State<AttendancePage>
           _payrollTab(),
         ],
       ),
-      floatingActionButton: ScaleTransition(
-        scale: _pulseAnimation,
-        child: FloatingActionButton.extended(
-          // Always tappable (aside from the in-flight spinner state) so a
-          // worker can check in again after checking out earlier the same
-          // day. This is the actual bug fix: the button used to be
-          // permanently disabled once `checkedOut` became true.
-          onPressed: _marking ? null : _checkInOut,
-          backgroundColor: btnColor,
-          foregroundColor: Colors.white,
-          elevation: 4,
-          icon: _marking
-              ? const SizedBox(width: 20, height: 20,
-                  child: CircularProgressIndicator(
-                      strokeWidth: 2, color: Colors.white))
-              : Icon(btnIcon),
-          label: Text(btnLabel,
-              style: GoogleFonts.poppins(fontWeight: FontWeight.w600)),
-        ),
+    );
+  }
+
+  Widget _sessionCard(String sessionKey, Map<String, dynamic>? rec) {
+    final label = _sessionLabels[sessionKey]!;
+    final windowText = _sessionWindowText[sessionKey]!;
+    final icon = sessionKey == 'morning' ? Icons.wb_sunny_outlined : Icons.nights_stay_outlined;
+
+    final openKey = _sessionKeyForOpenSession();
+    final isOpenNow = openKey == sessionKey;
+
+    final sessionsMap = (rec != null && rec['sessions'] is Map)
+        ? Map<String, dynamic>.from(rec['sessions'] as Map)
+        : <String, dynamic>{};
+    final sessionData = sessionsMap[sessionKey] is Map
+        ? Map<String, dynamic>.from(sessionsMap[sessionKey] as Map)
+        : null;
+
+    // Also fall back to _mySession directly if it's this card's open
+    // session — sessionsMap only reflects the last *fetch*, which can lag
+    // a few seconds behind a just-tapped local check-in.
+    final checkInTime = isOpenNow
+        ? _mySession?['check_in_time']
+        : sessionData?['check_in_time'];
+    final checkOutTime = sessionData?['check_out_time'];
+    final isCompleted = !isOpenNow && checkOutTime != null;
+    final isNotStarted = !isOpenNow && checkInTime == null;
+
+    Color statusColor;
+    String statusText;
+    IconData statusIcon;
+    if (isOpenNow) {
+      statusColor = _present;
+      statusText = 'Checked in';
+      statusIcon = Icons.login;
+    } else if (isCompleted) {
+      statusColor = _primary;
+      statusText = 'Completed';
+      statusIcon = Icons.check_circle_outline;
+    } else if (isNotStarted) {
+      statusColor = Colors.grey.shade500;
+      statusText = 'Not started';
+      statusIcon = Icons.schedule;
+    } else {
+      // Checked in per stored data but not tracked as today's open session
+      // (e.g. reopened after a backend refresh) — treat like open.
+      statusColor = _present;
+      statusText = 'Checked in';
+      statusIcon = Icons.login;
+    }
+
+    final withinWindow = _isWithinSessionWindow(sessionKey);
+    final canTap = isOpenNow || (isNotStarted && withinWindow) || (openKey == null && withinWindow);
+
+    final hoursLabel = isOpenNow
+        ? _liveHours
+        : (sessionData?['working_hours'] != null
+            ? (sessionData!['working_hours'] as num).toStringAsFixed(2)
+            : null);
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: statusColor.withValues(alpha: 0.25)),
+        boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.04), blurRadius: 8, offset: const Offset(0, 2))],
       ),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          Icon(icon, color: statusColor, size: 22),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(label, style: GoogleFonts.poppins(fontWeight: FontWeight.w700, fontSize: 15)),
+              Text(windowText, style: GoogleFonts.poppins(fontSize: 11, color: Colors.grey.shade600)),
+            ]),
+          ),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+            decoration: BoxDecoration(color: statusColor.withValues(alpha: 0.12), borderRadius: BorderRadius.circular(20)),
+            child: Row(mainAxisSize: MainAxisSize.min, children: [
+              Icon(statusIcon, size: 12, color: statusColor),
+              const SizedBox(width: 4),
+              Text(statusText, style: GoogleFonts.poppins(fontSize: 11, color: statusColor, fontWeight: FontWeight.w600)),
+            ]),
+          ),
+        ]),
+        if (checkInTime != null) ...[
+          const SizedBox(height: 12),
+          Row(children: [
+            Expanded(child: _timeCard('Check-In', checkInTime, Icons.login, _present)),
+            const SizedBox(width: 10),
+            Expanded(child: _timeCard('Check-Out', checkOutTime, Icons.logout, _primary)),
+          ]),
+        ],
+        if (hoursLabel != null) ...[
+          const SizedBox(height: 10),
+          Text('$hoursLabel hrs', style: GoogleFonts.poppins(fontWeight: FontWeight.w600, fontSize: 13, color: statusColor)),
+        ],
+        const SizedBox(height: 12),
+        SizedBox(
+          width: double.infinity,
+          child: ElevatedButton.icon(
+            onPressed: (_marking || !canTap) ? null : () => _handleSessionCardTap(sessionKey),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: isOpenNow ? _primary : statusColor,
+              foregroundColor: Colors.white,
+              disabledBackgroundColor: Colors.grey.shade300,
+              padding: const EdgeInsets.symmetric(vertical: 12),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+            ),
+            icon: _marking && canTap
+                ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                : Icon(isOpenNow ? Icons.logout : Icons.login, size: 18),
+            label: Text(
+              isOpenNow ? '$label Check Out' : (isCompleted ? '$label Done' : '$label Check In'),
+              style: GoogleFonts.poppins(fontWeight: FontWeight.w600, fontSize: 13),
+            ),
+          ),
+        ),
+      ]),
     );
   }
 
@@ -539,25 +712,12 @@ class _AttendancePageState extends State<AttendancePage>
         Text('My Daily Status', style: GoogleFonts.poppins(
             fontWeight: FontWeight.w700, fontSize: 16)),
         const SizedBox(height: 12),
-        if (rec == null) ...[
-          _emptyAttendance(),
-        ] else ...[
-          // Status card
-          _statusCard(rec, ci, co),
-          const SizedBox(height: 16),
-          // Time cards
-          Row(children: [
-            Expanded(child: _timeCard('Check-In', rec['check_in_time'],
-                Icons.login, _present)),
-            const SizedBox(width: 12),
-            Expanded(child: _timeCard('Check-Out', rec['check_out_time'],
-                Icons.logout, _primary)),
-          ]),
-          if (ci) ...[
-            const SizedBox(height: 12),
-            _hoursCard(_liveHours, isLive: !co),
-          ],
-        ],
+        // Two separate session cards (Morning 9–1, Evening 2–7), each with
+        // its own Check In/Out button and status — replaces the single
+        // generic status card + FAB, since one button/status couldn't
+        // represent two independent sessions in the same day.
+        _sessionCard('morning', rec),
+        _sessionCard('evening', rec),
 
         const SizedBox(height: 32),
 
