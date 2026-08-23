@@ -142,6 +142,15 @@ class _WorkerAttendanceDetailPageState
   }
 
   double _hoursOf(Map<String, dynamic> r) {
+    // FIX (payroll bug): 'working_hours' only reflects the most recently
+    // completed/active session for that day - with two sessions per day,
+    // that silently drops an earlier completed session's hours from any
+    // total. 'total_working_hours' (backend fix) correctly sums every
+    // session for the day. Fall back to the old field only for any cached
+    ///offline record fetched before this fix shipped.
+    if (r['total_working_hours'] != null) {
+      return (r['total_working_hours'] as num).toDouble();
+    }
     if (r['working_hours'] != null) {
       return (r['working_hours'] as num).toDouble();
     }
@@ -287,8 +296,22 @@ class _WorkerAttendanceDetailPageState
     return (pctDelta: pctDelta, hrsDelta: hrsDelta, hasPrevData: hasPrev);
   }
 
-  double get _hourlyRate =>
-      widget.worker.salary > 0 ? widget.worker.salary / 200.0 : 0.0;
+  /// FIX (payroll bug - arbitrary constant): previously divided salary by
+  /// a flat, hardcoded 200 every month regardless of how many days are
+  /// actually in that month (28 vs 31 is a real ~10% difference) or which
+  /// month is being viewed. There is no per-worker "standard hours/month"
+  /// setting in the data model to derive this precisely, so this uses the
+  /// actual number of calendar days in the currently-viewed month × an
+  /// assumed 8-hour standard workday as the divisor. This is still an
+  /// approximation (no explicit weekly-off exclusion), but it is tied to
+  /// the real month being viewed instead of one arbitrary flat number
+  /// used for every month of the year.
+  double get _hourlyRate {
+    if (widget.worker.salary <= 0) return 0.0;
+    final daysInMonth = DateTime(_month.year, _month.month + 1, 0).day;
+    final standardMonthlyHours = daysInMonth * 8.0;
+    return widget.worker.salary / standardMonthlyHours;
+  }
 
   double _paidThisMonth() {
     final now = DateTime.now();
