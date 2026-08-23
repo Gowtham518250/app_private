@@ -1023,11 +1023,26 @@ class ApiClient {
     // 🔒 INPUT SANITIZATION: Sanitize form fields before sending
     final sanitizedFields = _sanitizeFormInput(fields);
     if (kDebugMode) debugPrint('🔵 Multipart Fields: ${_redactSensitiveData(sanitizedFields)}');
-    
+
+    // FIX (P0 - 401 bug): file/multipart uploads previously had NO
+    // 401-retry at all - an expired access token meant a genuine document
+    // upload (e.g. an invoice PDF attachment) failed permanently rather
+    // than transparently refreshing and retrying like other verbs.
+    // StreamedResponse bodies can only be read once, so we materialize a
+    // fresh http.Response (bytes read into memory) before returning, which
+    // also lets _withTokenRefresh inspect .statusCode safely.
+    Future<http.Response> Function() buildReq(String base) {
+      return () async {
+        final streamed = await _makeMultipartRequest(base, path, sanitizedFields, headers, files);
+        return http.Response.fromStream(streamed);
+      };
+    }
+
     // Try last successful base first
     if (_lastSuccessfulBase != null && hasRecentConnection()) {
       try {
-        final resp = await _makeMultipartRequest(_lastSuccessfulBase!, path, sanitizedFields, headers, files).timeout(
+        final req = buildReq(_lastSuccessfulBase!);
+        final resp = await (_shouldSkipRefresh(path) ? req() : _withTokenRefresh(req)).timeout(
           const Duration(seconds: 30),
         );
         
@@ -1038,14 +1053,15 @@ class ApiClient {
         }
         
         _updateConnectionStatus(_lastSuccessfulBase!);
-        return resp;
+        return http.StreamedResponse(Stream.value(resp.bodyBytes), resp.statusCode, headers: resp.headers);
       } catch (_) {}
     }
 
     // Try all bases
     for (final base in _bases) {
       try {
-        final resp = await _makeMultipartRequest(base, path, sanitizedFields, headers, files).timeout(
+        final req = buildReq(base);
+        final resp = await (_shouldSkipRefresh(path) ? req() : _withTokenRefresh(req)).timeout(
           const Duration(seconds: 30),
         );
         
@@ -1056,7 +1072,7 @@ class ApiClient {
         }
         
         _updateConnectionStatus(base);
-        return resp;
+        return http.StreamedResponse(Stream.value(resp.bodyBytes), resp.statusCode, headers: resp.headers);
       } on SocketException {
         continue;
       } on TimeoutException {
@@ -1176,19 +1192,32 @@ class ApiClient {
     
     if (!_rateLimiter.allowRequest(path)) await _rateLimiter.waitIfRateLimited(path);
 
-    final token = await SecureTokenStorage.getToken();
     final deviceId = await SessionManagementService.getDeviceId();
-    final authHeaders = {
-      ...?headers,
-      if (token != null && token.isNotEmpty) 'Authorization': 'Bearer $token',
-      'X-Device-ID': deviceId,
-    };
+
+    // FIX (P0 - 401 bug): DELETE requests previously never went through
+    // _withTokenRefresh at all - an expired access token meant every
+    // authenticated DELETE (e.g. deleting a sale/customer/product) failed
+    // permanently with 401, with no retry attempt whatsoever. Also reads
+    // the token fresh on every attempt rather than capturing it once, so
+    // a retry after refresh actually uses the new token.
+    Future<http.Response> Function() buildReq(String base) {
+      return () async {
+        final currentToken = await SecureTokenStorage.getToken();
+        final authHeaders = {
+          ...?headers,
+          if (currentToken != null && currentToken.isNotEmpty) 'Authorization': 'Bearer $currentToken',
+          'X-Device-ID': deviceId,
+        };
+        return http.delete(Uri.parse('$base$path'), headers: authHeaders).timeout(
+          const Duration(seconds: 15),
+        );
+      };
+    }
 
     if (_lastSuccessfulBase != null && hasRecentConnection()) {
       try {
-        final resp = await http.delete(Uri.parse('$_lastSuccessfulBase$path'), headers: authHeaders).timeout(
-          const Duration(seconds: 15),
-        );
+        final req = buildReq(_lastSuccessfulBase!);
+        final resp = await (_shouldSkipRefresh(path) ? req() : _withTokenRefresh(req));
         
         // 🔒 RESPONSE VALIDATION: Validate response before returning
         if (!_validateResponse(resp)) {
@@ -1205,9 +1234,8 @@ class ApiClient {
 
     for (final base in _bases) {
       try {
-        final resp = await http.delete(Uri.parse('$base$path'), headers: authHeaders).timeout(
-          const Duration(seconds: 15),
-        );
+        final req = buildReq(base);
+        final resp = await (_shouldSkipRefresh(path) ? req() : _withTokenRefresh(req));
         
         // 🔒 RESPONSE VALIDATION: Validate response before returning
         if (!_validateResponse(resp)) {
@@ -1242,7 +1270,19 @@ class ApiClient {
       throw Exception('No network connectivity available');
     }
     
-    final token = await SecureTokenStorage.getToken();
+    // FIX (P0 - 401 refresh bug): DO NOT read the token here and capture it
+    // in the closures below. `_withTokenRefresh` retries by calling the
+    // SAME closure again after a successful refresh - if that closure
+    // closes over a `token` variable read once at the top of this
+    // function, the retry sends the exact same (still-expired) token,
+    // guaranteeing a second 401 even though refresh succeeded. This is
+    // the confirmed root cause of the repeated
+    //   GET /api/shop/profile -> 401
+    //   GET /api/attendance/workers -> 401
+    //   GET /api/invoices/ -> 401
+    // seen in production logs. Each closure invocation below now reads
+    // SecureTokenStorage.getToken() fresh, so the retry picks up the
+    // newly-refreshed token.
     
     final deviceId = await SessionManagementService.getDeviceId();
     
@@ -1250,14 +1290,17 @@ class ApiClient {
     if (_lastSuccessfulBase != null && hasRecentConnection()) {
       try {
         if (kDebugMode) debugPrint('🟢 Trying last successful base: $_lastSuccessfulBase$path');
-        final Future<http.Response> Function() req = () => http.get(
-          Uri.parse('$_lastSuccessfulBase$path'),
-          headers: {
-            'X-Device-ID': deviceId,
-            if (headers != null) ...headers,
-            if (token != null) 'Authorization': 'Bearer $token',
-          },
-        );
+        final Future<http.Response> Function() req = () async {
+          final currentToken = await SecureTokenStorage.getToken();
+          return http.get(
+            Uri.parse('$_lastSuccessfulBase$path'),
+            headers: {
+              'X-Device-ID': deviceId,
+              if (headers != null) ...headers,
+              if (currentToken != null) 'Authorization': 'Bearer $currentToken',
+            },
+          );
+        };
         final resp = await (_shouldSkipRefresh(path) ? req() : _withTokenRefresh(req)).timeout(const Duration(seconds: 15));
         
         // 🔒 RESPONSE VALIDATION: Validate response before returning
@@ -1292,14 +1335,17 @@ class ApiClient {
     for (final base in _bases) {
       try {
         if (kDebugMode) debugPrint('🟢 Trying base: $base$path');
-        final Future<http.Response> Function() req = () => http.get(
-          Uri.parse('$base$path'),
-          headers: {
-            'X-Device-ID': deviceId,
-            if (headers != null) ...headers,
-            if (token != null) 'Authorization': 'Bearer $token',
-          },
-        );
+        final Future<http.Response> Function() req = () async {
+          final currentToken = await SecureTokenStorage.getToken();
+          return http.get(
+            Uri.parse('$base$path'),
+            headers: {
+              'X-Device-ID': deviceId,
+              if (headers != null) ...headers,
+              if (currentToken != null) 'Authorization': 'Bearer $currentToken',
+            },
+          );
+        };
         final resp = await (_shouldSkipRefresh(path) ? req() : _withTokenRefresh(req)).timeout(const Duration(seconds: 15));
         
         // 🔒 RESPONSE VALIDATION: Validate response before returning
