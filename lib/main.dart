@@ -510,28 +510,55 @@ void main() async {
     }
     try {
       await setupEmailCredentialsOnce();
-      
-      // Initialize AI Merchant Services
-      await NotificationService().init();
 
-      // Online orders: owner notifications + UPI payment matching
-      await OnlineOrdersListener.instance.start();
-      
-      // Initialize announcement service first (ensures voice is ready before any payment events)
-      await PaymentAnnouncementService().init();
-      
+      // FIX (critical - "payment detection never starts" bug): these three
+      // calls used to run in the same unguarded sequence as pds.start()
+      // below, sharing one catch at the bottom of this whole block. If ANY
+      // of NotificationService.init() / OnlineOrdersListener.start() /
+      // PaymentAnnouncementService.init() threw (a completely unrelated
+      // dependency or plugin issue), the exception aborted this entire
+      // try block immediately - so `await pds.start()` was never even
+      // reached. Both the SMS and notification channels would silently
+      // never start, with nothing visibly wrong (only a debug-mode log).
+      // Each is now isolated so a failure in one can't take down PDS.
+      try {
+        // Initialize AI Merchant Services
+        await NotificationService().init();
+      } catch (e, st) {
+        if (kDebugMode) debugPrint('⚠️ NotificationService init error: $e\n$st');
+      }
+
+      try {
+        // Online orders: owner notifications + UPI payment matching
+        await OnlineOrdersListener.instance.start();
+      } catch (e, st) {
+        if (kDebugMode) debugPrint('⚠️ OnlineOrdersListener start error: $e\n$st');
+      }
+
+      try {
+        // Initialize announcement service first (ensures voice is ready before any payment events)
+        await PaymentAnnouncementService().init();
+      } catch (e, st) {
+        if (kDebugMode) debugPrint('⚠️ PaymentAnnouncementService init error: $e\n$st');
+      }
+
       // Set language for detection engine
       final pds = PaymentDetectionService();
       pds.setLanguage(PaymentDetectionService.mapLanguage(langCode));
-      
+
       // Connect PDS brain to Voice engine
       pds.onSpeak = (text) async {
         final lang = appPrefs.getString('payment_sound_lang') ?? 'en-US';
         PaymentAnnouncementService().speakSimple(text, lang);
       };
-      
-      await pds.start();
-      
+
+      try {
+        await pds.start();
+        if (kDebugMode) debugPrint('✅ PaymentDetectionService started');
+      } catch (e, st) {
+        if (kDebugMode) debugPrint('⚠️ PaymentDetectionService start error: $e\n$st');
+      }
+
       // Initialize Email Service from secure storage
       await EmailSenderService.initialize();
       
@@ -697,10 +724,10 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
     // Initialize WhatsApp Sharing Intent listener
     SharingIntentService.init();
     
-    // � Start session expiry monitoring
+    //   Start session expiry monitoring
     SessionManagementService.startSessionExpiryMonitoring();
     
-    // �🔊 Initialize background service after the app has drawn its first frame
+    //  🔊 Initialize background service after the app has drawn its first frame
     // (guarantees activity is in the foreground, avoiding ForegroundServiceStartNotAllowedException on Android 12+)
     if (!kIsWeb) {
       WidgetsBinding.instance.addPostFrameCallback((_) async {
