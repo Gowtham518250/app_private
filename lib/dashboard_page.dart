@@ -22,6 +22,7 @@ import 'dart:ui' as ui;
 import 'package:file_picker/file_picker.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'api_client.dart';
+import 'payment_background_service.dart' show initializeBackgroundService;
 import 'app_localizations.dart';
 import 'local_storage_service.dart';
 import 'google_drive_service.dart';
@@ -780,6 +781,49 @@ class _DashboardPageState extends State<DashboardPage>
           FilledButton(
             onPressed: () async {
               Navigator.of(ctx).pop();
+              // 🔧 FIX: this previously only called
+              // PaymentDetectionService().ensureChannelsRunning(), which
+              // operates on the UI isolate's own PaymentDetectionService
+              // instance. That instance's .start() is never called on this
+              // isolate, so ensureChannelsRunning() returns immediately via
+              // its `if (!_isStarted) return;` guard — a complete no-op.
+              // The real, long-lived listener runs in a separate
+              // flutter_background_service isolate with its own instance
+              // that this call never touches. _checkPermissions() (a few
+              // lines above) already gets this right by additionally
+              // sending FlutterBackgroundService().invoke(
+              // 'restart_payment_detection') — this button just never did.
+              //
+              // Now also self-healing: if the background service was never
+              // started at all (e.g. it died at boot — that failure is only
+              // ever logged via debugPrint, nothing surfaces it to the
+              // user), invoking an event on it does nothing because nothing
+              // is listening. Check isRunning() first and start it fresh in
+              // that case, instead of just signaling an already-running
+              // service that may not exist.
+              try {
+                final service = FlutterBackgroundService();
+                final running = await service.isRunning();
+                if (!running) {
+                  if (kDebugMode) {
+                    debugPrint('🚑 Background service not running — starting it fresh');
+                  }
+                  await initializeBackgroundService();
+                } else {
+                  service.invoke('restart_payment_detection');
+                  service.invoke('setAsForeground');
+                  if (kDebugMode) {
+                    debugPrint('🔁 Signaled running background isolate to restart detection');
+                  }
+                }
+              } catch (e) {
+                if (kDebugMode) debugPrint('⚠️ Background service (re)start failed: $e');
+              }
+              // Also start channels on the UI isolate's own instance, in
+              // case anything on this isolate does read _isStarted (kept
+              // for parity with the previous behavior — harmless either way
+              // since it's a no-op unless something on this isolate has
+              // called .start()).
               try {
                 await PaymentDetectionService().ensureChannelsRunning();
               } catch (e) {
