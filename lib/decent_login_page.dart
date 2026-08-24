@@ -194,15 +194,30 @@ class _DecentLoginPageState extends State<DecentLoginPage>
         }
 
         final deviceId = await SessionManagementService.getDeviceId();
-        await SessionManagementService.initializeSession(
-          userId: userId,
-          accessToken: accessToken,
-          refreshToken: refreshToken.isNotEmpty ? refreshToken : null,
-          userName: data['user_name']?.toString() ?? '',
-          userEmail: data['email']?.toString() ?? emailController.text.trim(),
-          role: role,
-          deviceId: deviceId,
-        );
+        try {
+          await SessionManagementService.initializeSession(
+            userId: userId,
+            accessToken: accessToken,
+            refreshToken: refreshToken.isNotEmpty ? refreshToken : null,
+            userName: data['user_name']?.toString() ?? '',
+            userEmail: data['email']?.toString() ?? emailController.text.trim(),
+            role: role,
+            deviceId: deviceId,
+          ).timeout(const Duration(seconds: 10));
+        } on TimeoutException {
+          // FIX (unlimited login spinner): initializeSession() writes to
+          // flutter_secure_storage, which - same as the boot-splash check
+          // above - can hang indefinitely on some devices due to Android
+          // Keystore issues. Without this timeout, the login button's
+          // spinner (isLoading) would never reach the `finally` block
+          // below and would spin forever with no feedback to the user.
+          if (mounted) {
+            setState(() {
+              errorMessage = 'Login is taking longer than expected. Please try again.';
+            });
+          }
+          return;
+        }
 
         final prefs = await SharedPreferences.getInstance();
         if (data['shop_name'] != null) {
