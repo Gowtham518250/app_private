@@ -92,7 +92,7 @@ class DataIntegrityService {
       
       // Fetch backend sales
       try {
-        final response = await ApiClient.getJson('/api/invoices');
+        final response = await ApiClient.getJson('/api/invoices/');
         if (response.statusCode == 200) {
           final backendSales = json.decode(response.body);
           
