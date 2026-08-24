@@ -995,7 +995,7 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
         return;
       }
       
-      final response = await ApiClient.getJson('/api/invoices');
+      final response = await ApiClient.getJson('/api/invoices/');
       if (response.statusCode == 200) {
         try {
           final data = json.decode(response.body);
@@ -1090,8 +1090,27 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
     final loginPrefs = await SharedPreferences.getInstance();
     _hasSeenOnboarding = loginPrefs.getBool('has_seen_onboarding') ?? false;
 
-    // 7-day auto-login logic implementation
-    final isValid = await SecureTokenStorage.isSessionValid();
+    // FIX (unlimited login spinner): SecureTokenStorage.isSessionValid()
+    // reads from flutter_secure_storage, which goes through a platform
+    // channel to the Android Keystore. On some devices/OEMs (Keystore in
+    // a bad state after an OS update, certain Samsung/MIUI builds, or
+    // right after a fresh install before the Keystore is fully
+    // initialized) that native call can hang indefinitely instead of
+    // erroring. Since this Future directly drives the boot splash's
+    // `booting` FutureBuilder state, an indefinite hang here means the
+    // app is stuck on the loading spinner forever with no way to reach
+    // even the login page. Fail safe: if the check doesn't resolve
+    // within a few seconds, treat it as "not logged in" so the user
+    // reaches the login screen and can proceed manually instead of being
+    // stuck looking at a spinner.
+    bool isValid;
+    try {
+      isValid = await SecureTokenStorage.isSessionValid()
+          .timeout(const Duration(seconds: 6));
+    } catch (e) {
+      if (kDebugMode) debugPrint('⚠️ isSessionValid() timed out/failed, failing safe to login: $e');
+      isValid = false;
+    }
     
     // Restore shop profile from SharedPreferences if available
     if (isValid) {
