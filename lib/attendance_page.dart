@@ -758,13 +758,42 @@ class _AttendancePageState extends State<AttendancePage>
       orElse: () => null,
     );
     final workerRecord = openWorkerRecord ?? (workerRecords.isNotEmpty ? workerRecords.last : null);
-    bool isIn = openWorkerRecord != null;
     
     // Calculate monthly hours from backend records
     final workerId = int.tryParse(worker.id) ?? 0;
     final monthlyHours = _calculateWorkerMonthlyHours(workerId);
-    final predictedSalary = worker.salary > 0 ? (monthlyHours / 200.0) * worker.salary : 0.0;
+    // FIX (duplicate payroll bug): this was a second, independent copy of
+    // the exact "salary / 200" arbitrary-constant bug already fixed in
+    // worker_attendance_detail_page.dart - divide by actual days in the
+    // currently-displayed month x an assumed 8hr day, instead of one
+    // flat number used for every month regardless of length.
+    final daysInMonth = DateTime(_month.year, _month.month + 1, 0).day;
+    final standardMonthlyHours = daysInMonth * 8.0;
+    final predictedSalary = worker.salary > 0 ? (monthlyHours / standardMonthlyHours) * worker.salary : 0.0;
     final isLateToday = workerRecord != null && _isLateCheckIn(workerRecord);
+
+    // FIX (attendance UI still showing one session): compute independent
+    // state for each of the two sessions from the per-session breakdown
+    // (backend fix - see get_employee_attendance's `sessions` field)
+    // instead of collapsing both sessions into a single `isIn` boolean,
+    // which could only ever reflect one session and silently hid
+    // whichever session it wasn't currently tracking.
+    final sessionsMap = (workerRecord != null && workerRecord['sessions'] is Map)
+        ? Map<String, dynamic>.from(workerRecord['sessions'] as Map)
+        : <String, dynamic>{};
+
+    Map<String, dynamic>? _dataFor(String key) =>
+        sessionsMap[key] is Map ? Map<String, dynamic>.from(sessionsMap[key] as Map) : null;
+
+    bool _isOpenFor(String key) {
+      final d = _dataFor(key);
+      return d != null && d['check_in_time'] != null && d['check_out_time'] == null;
+    }
+
+    bool _isDoneFor(String key) {
+      final d = _dataFor(key);
+      return d != null && d['check_out_time'] != null;
+    }
 
     return Container(
       margin: const EdgeInsets.only(bottom: 10),
@@ -800,26 +829,14 @@ class _AttendancePageState extends State<AttendancePage>
               ],
             ]),
             trailing: SizedBox(
-              width: 100,
-              child: ElevatedButton(
-                onPressed: () async {
-                  final verified = await _showVerifyPinDialog(worker);
-                  if (verified) {
-                    await _markWorkerAttendance(worker, isIn);
-                  }
-                },
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: isIn ? _absent : _present,
-                  foregroundColor: Colors.white,
-                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                  minimumSize: const Size(80, 32),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-                  elevation: 0,
-                ),
-                child: Text(
-                  isIn ? 'CHECK OUT' : 'CHECK IN',
-                  style: const TextStyle(fontSize: 10, fontWeight: FontWeight.bold),
-                ),
+              width: 108,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  _sessionQuickButton(worker, 'morning', 'AM', _isOpenFor('morning'), _isDoneFor('morning')),
+                  const SizedBox(height: 4),
+                  _sessionQuickButton(worker, 'evening', 'PM', _isOpenFor('evening'), _isDoneFor('evening')),
+                ],
               ),
             ),
           ),
@@ -1112,6 +1129,40 @@ class _AttendancePageState extends State<AttendancePage>
           child: Text('${l['nativeName']} (${l['name']})'),
         );
       }).toList(),
+    );
+  }
+
+  /// Compact per-session quick-action button for the worker list row.
+  /// FIX (attendance UI still showing one session): each of the two
+  /// sessions gets its own independent button/state here, instead of one
+  /// button trying (incorrectly) to represent both.
+  Widget _sessionQuickButton(Worker worker, String sessionKey, String shortLabel, bool isOpen, bool isDone) {
+    final withinWindow = _isWithinSessionWindow(sessionKey);
+    final canTap = isOpen || (!isDone && withinWindow);
+    final label = isOpen ? '$shortLabel OUT' : (isDone ? '$shortLabel ✓' : '$shortLabel IN');
+    final color = isOpen ? _absent : (isDone ? Colors.grey.shade400 : _present);
+
+    return SizedBox(
+      width: double.infinity,
+      height: 26,
+      child: ElevatedButton(
+        onPressed: (!canTap) ? null : () async {
+          final verified = await _showVerifyPinDialog(worker);
+          if (verified) {
+            await _markWorkerAttendance(worker, isOpen);
+          }
+        },
+        style: ElevatedButton.styleFrom(
+          backgroundColor: color,
+          foregroundColor: Colors.white,
+          disabledBackgroundColor: Colors.grey.shade300,
+          padding: EdgeInsets.zero,
+          minimumSize: const Size(0, 26),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
+          elevation: 0,
+        ),
+        child: Text(label, style: const TextStyle(fontSize: 9, fontWeight: FontWeight.bold)),
+      ),
     );
   }
 
