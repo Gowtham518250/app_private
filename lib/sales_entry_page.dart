@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+import 'active_worker_selector.dart';
+import 'active_worker_service.dart';
 import 'sharing_intent_service.dart';
 import 'package:intl/intl.dart';
 import 'package:http/http.dart' as http;
@@ -3802,6 +3804,18 @@ class _SalesEntryPageState extends State<SalesEntryPage>
         ),
         const SizedBox(width: 8),
       ],
+      bottom: PreferredSize(
+        // FEATURE (staff sales leaderboard): lets the current staff
+        // member confirm/switch who's attributed for sales made from
+        // this device, right where sales are actually created.
+        preferredSize: const Size.fromHeight(36),
+        child: Container(
+          color: const Color(0xFF4F46E5),
+          padding: const EdgeInsets.only(left: 12, right: 12, bottom: 6),
+          alignment: Alignment.centerLeft,
+          child: const ActiveWorkerSelector(),
+        ),
+      ),
     );
   }
 
