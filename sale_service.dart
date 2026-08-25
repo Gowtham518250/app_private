@@ -1,4 +1,5 @@
 import 'package:flutter/foundation.dart';
+import 'active_worker_service.dart';
 import 'dart:async';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
@@ -297,6 +298,14 @@ try {
       ? requestedTax
       : (grandTotal - computedLineSubtotal).clamp(0.0, double.infinity).toDouble();
 
+  // FEATURE (staff sales leaderboard): attribute this sale to whichever
+  // worker is currently active on this device, if any (see
+  // active_worker_service.dart). Owner-made sales / devices with no
+  // active worker selected simply omit this field, matching every
+  // pre-existing sale.
+  final activeWorkerIdStr = await ActiveWorkerService.getActiveWorkerId();
+  final activeWorkerId = activeWorkerIdStr != null ? int.tryParse(activeWorkerIdStr) : null;
+
   final invoicePayload = {
     'invoice_number': saleId,
     'offline_id': offlineId,
@@ -311,6 +320,7 @@ try {
     'created_at': saleTimestampIso,
     'notes': isBorrow ? 'Payment via $paymentMethod - Borrow Invoice' : 'Payment via $paymentMethod - Regular Sale',
     'line_items': lineItems,
+    if (activeWorkerId != null) 'sold_by_worker_id': activeWorkerId,
   };
 
   final prefs = await SharedPreferences.getInstance();

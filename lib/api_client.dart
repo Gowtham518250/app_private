@@ -152,7 +152,12 @@ class ApiClient {
   static const String invoicesOverdue = '/api/invoices/overdue';
   static const String invoicesPayments = '/api/invoices/payments';
   static const String invoicesAnalyticsSummary = '/api/invoices/analytics/summary';
-  static const String invoicesList = '/api/invoices';
+  // FIX: backend route is @router.get("/") under prefix /api/invoices, so
+  // the real path is '/api/invoices/' (trailing slash). Without it,
+  // FastAPI's default redirect_slashes sends back a 307 on every single
+  // list fetch before the real 200 — wasted round trip, and some HTTP
+  // clients silently drop the Authorization header across a redirect.
+  static const String invoicesList = '/api/invoices/';
   static String invoiceById(String invoiceId) => '/api/invoices/$invoiceId';
   static String invoiceDelete(String invoiceId) => '/api/invoices/$invoiceId';
 
@@ -757,13 +762,25 @@ class ApiClient {
     
     final deviceId = await SessionManagementService.getDeviceId();
     
+    // FIX (P0 - 401 bug, header clobber): several callers (sale_service.dart,
+    // sync_service.dart) capture a token ONCE and pass it in as an explicit
+    // `headers: {'Authorization': 'Bearer $token'}` for retry loops of their
+    // own. Because the caller map was previously spread AFTER the
+    // freshly-fetched token below, it silently overwrote the fresh token
+    // with the caller's stale one on every retry — including retries issued
+    // after _withTokenRefresh() had already refreshed the token. Strip any
+    // caller-supplied Authorization so the fresh one always wins.
+    final callerHeaders = headers != null
+        ? (Map<String, String>.from(headers)..remove('Authorization'))
+        : null;
+    
     return http.post(
       uri,
       headers: {
         'Content-Type': 'application/json',
         'X-Device-ID': deviceId,
         if (token != null) 'Authorization': 'Bearer $token',
-        if (headers != null) ...headers,
+        if (callerHeaders != null) ...callerHeaders,
       },
       body: json.encode(body),
     );
@@ -996,13 +1013,19 @@ class ApiClient {
     
     final deviceId = await SessionManagementService.getDeviceId();
     
+    // FIX (P0 - 401 bug, header clobber): same root cause as
+    // _makePostJsonRequest above.
+    final callerHeaders = headers != null
+        ? (Map<String, String>.from(headers)..remove('Authorization'))
+        : null;
+    
     return http.post(
       uri,
       headers: {
         'Content-Type': 'application/x-www-form-urlencoded',
         'X-Device-ID': deviceId,
         if (token != null) 'Authorization': 'Bearer $token',
-        if (headers != null) ...headers,
+        if (callerHeaders != null) ...callerHeaders,
       },
       body: bodyString,
     );
@@ -1170,12 +1193,17 @@ class ApiClient {
   static Future<http.Response> _makePutJsonRequest(String base, String path, Map body, Map<String, String>? headers) async {
     final token = await SecureTokenStorage.getToken();
     final deviceId = await SessionManagementService.getDeviceId();
+    // FIX (P0 - 401 bug, header clobber): same root cause as
+    // _makePostJsonRequest above.
+    final callerHeaders = headers != null
+        ? (Map<String, String>.from(headers)..remove('Authorization'))
+        : null;
     return http.put(Uri.parse('$base$path'),
       headers: {
         'Content-Type': 'application/json',
         'X-Device-ID': deviceId,
         if (token != null) 'Authorization': 'Bearer $token',
-        if (headers != null) ...headers
+        if (callerHeaders != null) ...callerHeaders
       },
       body: json.encode(body),
     );

@@ -2,6 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:provider/provider.dart';
 import 'package:qr_flutter/qr_flutter.dart';
+import 'package:notification_listener_service/notification_listener_service.dart';
+import 'package:permission_handler/permission_handler.dart';
+import '../../../payment_detection_service.dart';
 import '../controllers/sales_entry_provider.dart';
 
 class SmartPaymentSection extends StatefulWidget {
@@ -30,6 +33,84 @@ class _SmartPaymentSectionState extends State<SmartPaymentSection>
     super.dispose();
   }
 
+  Future<void> _showDetectionControl() async {
+    bool notificationAccess = false;
+    bool smsAccess = false;
+    try {
+      notificationAccess = await NotificationListenerService.isPermissionGranted();
+    } catch (_) {}
+    try {
+      smsAccess = (await Permission.sms.status).isGranted;
+    } catch (_) {}
+    if (!mounted) return;
+
+    await showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      builder: (sheetContext) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(20, 8, 20, 24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  const Icon(Icons.notifications_active_rounded, color: Color(0xFF059669)),
+                  const SizedBox(width: 10),
+                  Text('Payment Detection', style: GoogleFonts.poppins(fontSize: 18, fontWeight: FontWeight.w800)),
+                ],
+              ),
+              const SizedBox(height: 8),
+              Text(
+                notificationAccess && smsAccess
+                    ? 'Payment detection is enabled. Keep this control visible so you can verify or restart it at any time.'
+                    : 'Payment detection needs the missing Android permissions.',
+                style: GoogleFonts.poppins(fontSize: 12, color: Colors.grey.shade600),
+              ),
+              const SizedBox(height: 14),
+              _statusRow('Notification access', notificationAccess),
+              const SizedBox(height: 8),
+              _statusRow('SMS permission', smsAccess),
+              const SizedBox(height: 16),
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton.icon(
+                  icon: const Icon(Icons.settings_rounded),
+                  label: Text(notificationAccess && smsAccess ? 'Verify / Restart Detection' : 'Open Android App Settings'),
+                  onPressed: () async {
+                    Navigator.of(sheetContext).pop();
+                    try {
+                      if (notificationAccess && smsAccess) {
+                        await PaymentDetectionService().ensureChannelsRunning();
+                      } else {
+                        await openAppSettings();
+                      }
+                    } catch (_) {}
+                  },
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _statusRow(String label, bool enabled) {
+    return Row(
+      children: [
+        Icon(enabled ? Icons.check_circle_rounded : Icons.error_outline_rounded,
+            size: 20, color: enabled ? const Color(0xFF10B981) : const Color(0xFFF59E0B)),
+        const SizedBox(width: 10),
+        Expanded(child: Text(label, style: GoogleFonts.poppins(fontSize: 13, fontWeight: FontWeight.w600))),
+        Text(enabled ? 'Enabled' : 'Needs setup',
+            style: GoogleFonts.poppins(fontSize: 12, fontWeight: FontWeight.w600,
+                color: enabled ? const Color(0xFF059669) : const Color(0xFFD97706))),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Consumer<SalesEntryProvider>(
@@ -44,46 +125,34 @@ class _SmartPaymentSectionState extends State<SmartPaymentSection>
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(
-                'PAYMENT METHOD',
-                style: GoogleFonts.poppins(
-                  color: const Color(0xFF4B5563),
-                  fontSize: 10,
-                  letterSpacing: 1.0,
-                  fontWeight: FontWeight.w700,
-                ),
+              Row(
+                children: [
+                  Expanded(
+                    child: Text('PAYMENT METHOD', style: GoogleFonts.poppins(color: const Color(0xFF4B5563), fontSize: 10, letterSpacing: 1.0, fontWeight: FontWeight.w700)),
+                  ),
+                  OutlinedButton.icon(
+                    onPressed: _showDetectionControl,
+                    icon: const Icon(Icons.notifications_active_rounded, size: 16),
+                    label: const Text('Payment Detection'),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: const Color(0xFF059669),
+                      side: const BorderSide(color: Color(0xFF10B981)),
+                      visualDensity: VisualDensity.compact,
+                    ),
+                  ),
+                ],
               ),
               const SizedBox(height: 10),
-
-              // Segmented payment control
               Container(
-                decoration: BoxDecoration(
-                  color: const Color(0xFFF3F4F6),
-                  borderRadius: BorderRadius.circular(12),
-                ),
+                decoration: BoxDecoration(color: const Color(0xFFF3F4F6), borderRadius: BorderRadius.circular(12)),
                 padding: const EdgeInsets.all(4),
                 child: Row(
                   children: [
-                    Expanded(
-                      child: _PayModeSegment(
-                        label: 'Cash',
-                        icon: Icons.money_rounded,
-                        isSelected: !provider.isOnlinePayment,
-                        onTap: () => provider.setOnlinePayment(false),
-                      ),
-                    ),
-                    Expanded(
-                      child: _PayModeSegment(
-                        label: 'UPI / QR',
-                        icon: Icons.qr_code_2_rounded,
-                        isSelected: provider.isOnlinePayment,
-                        onTap: () => provider.setOnlinePayment(true),
-                      ),
-                    ),
+                    Expanded(child: _PayModeSegment(label: 'Cash', icon: Icons.money_rounded, isSelected: !provider.isOnlinePayment, onTap: () => provider.setOnlinePayment(false))),
+                    Expanded(child: _PayModeSegment(label: 'UPI / QR', icon: Icons.qr_code_2_rounded, isSelected: provider.isOnlinePayment, onTap: () => provider.setOnlinePayment(true))),
                   ],
                 ),
               ),
-
               if (provider.isOnlinePayment) ...[
                 const SizedBox(height: 20),
                 Center(
@@ -92,49 +161,14 @@ class _SmartPaymentSectionState extends State<SmartPaymentSection>
                       Container(
                         width: 200,
                         height: 200,
-                        decoration: BoxDecoration(
-                          color: Colors.white,
-                          borderRadius: BorderRadius.circular(20),
-                          boxShadow: [
-                            BoxShadow(
-                              color: const Color(
-                                0xFF4F46E5,
-                              ).withValues(alpha: 0.15),
-                              blurRadius: 20,
-                              spreadRadius: 2,
-                            ),
-                          ],
-                          border: Border.all(
-                            color: const Color(
-                              0xFF4F46E5,
-                            ).withValues(alpha: 0.1),
-                            width: 2,
-                          ),
-                        ),
+                        decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(20), boxShadow: [BoxShadow(color: const Color(0xFF4F46E5).withValues(alpha: 0.15), blurRadius: 20, spreadRadius: 2)], border: Border.all(color: const Color(0xFF4F46E5).withValues(alpha: 0.1), width: 2)),
                         padding: const EdgeInsets.all(16),
-                        child: QrImageView(
-                          data:
-                              'upi://pay?pa=test@upi&pn=${Uri.encodeComponent(provider.shopName)}&am=${provider.totalAmount.toStringAsFixed(2)}&cu=INR',
-                          version: QrVersions.auto,
-                          size: 160.0,
-                          backgroundColor: Colors.white,
-                        ),
+                        child: QrImageView(data: 'upi://pay?pa=test@upi&pn=${Uri.encodeComponent(provider.shopName)}&am=${provider.totalAmount.toStringAsFixed(2)}&cu=INR', version: QrVersions.auto, size: 160.0, backgroundColor: Colors.white),
                       ),
                       const SizedBox(height: 12),
                       AnimatedBuilder(
                         animation: _pulseController,
-                        builder: (context, child) => Text(
-                          'Scan to Pay Exactly ₹${provider.totalAmount.toStringAsFixed(2)}',
-                          style: GoogleFonts.poppins(
-                            fontSize: 13,
-                            fontWeight: FontWeight.bold,
-                            color: Color.lerp(
-                              const Color(0xFF4F46E5),
-                              const Color(0xFF6366F1),
-                              _pulseController.value,
-                            ),
-                          ),
-                        ),
+                        builder: (context, child) => Text('Scan to Pay Exactly ₹${provider.totalAmount.toStringAsFixed(2)}', style: GoogleFonts.poppins(fontSize: 13, fontWeight: FontWeight.bold, color: Color.lerp(const Color(0xFF4F46E5), const Color(0xFF6366F1), _pulseController.value))),
                       ),
                     ],
                   ),
@@ -149,13 +183,7 @@ class _SmartPaymentSectionState extends State<SmartPaymentSection>
 }
 
 class _PayModeSegment extends StatelessWidget {
-  const _PayModeSegment({
-    required this.label,
-    required this.icon,
-    required this.isSelected,
-    required this.onTap,
-  });
-
+  const _PayModeSegment({required this.label, required this.icon, required this.isSelected, required this.onTap});
   final String label;
   final IconData icon;
   final bool isSelected;
@@ -168,42 +196,12 @@ class _PayModeSegment extends StatelessWidget {
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 200),
         padding: const EdgeInsets.symmetric(vertical: 10),
-        decoration: BoxDecoration(
-          color: isSelected ? Colors.white : Colors.transparent,
-          borderRadius: BorderRadius.circular(10),
-          boxShadow: isSelected
-              ? [
-                  BoxShadow(
-                    color: Colors.black.withValues(alpha: 0.05),
-                    blurRadius: 4,
-                    offset: const Offset(0, 2),
-                  ),
-                ]
-              : [],
-        ),
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(
-              icon,
-              size: 16,
-              color: isSelected
-                  ? const Color(0xFF111827)
-                  : const Color(0xFF9CA3AF),
-            ),
-            const SizedBox(width: 6),
-            Text(
-              label,
-              style: GoogleFonts.poppins(
-                fontSize: 12,
-                fontWeight: isSelected ? FontWeight.w700 : FontWeight.w500,
-                color: isSelected
-                    ? const Color(0xFF111827)
-                    : const Color(0xFF9CA3AF),
-              ),
-            ),
-          ],
-        ),
+        decoration: BoxDecoration(color: isSelected ? Colors.white : Colors.transparent, borderRadius: BorderRadius.circular(10), boxShadow: isSelected ? [BoxShadow(color: Colors.black.withValues(alpha: 0.05), blurRadius: 4, offset: const Offset(0, 2))] : []),
+        child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+          Icon(icon, size: 16, color: isSelected ? const Color(0xFF111827) : const Color(0xFF9CA3AF)),
+          const SizedBox(width: 6),
+          Text(label, style: GoogleFonts.poppins(fontSize: 12, fontWeight: isSelected ? FontWeight.w700 : FontWeight.w500, color: isSelected ? const Color(0xFF111827) : const Color(0xFF9CA3AF))),
+        ]),
       ),
     );
   }

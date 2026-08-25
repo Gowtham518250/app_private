@@ -142,6 +142,15 @@ class _WorkerAttendanceDetailPageState
   }
 
   double _hoursOf(Map<String, dynamic> r) {
+    // FIX (payroll bug): 'working_hours' only reflects the most recently
+    // completed/active session for that day - with two sessions per day,
+    // that silently drops an earlier completed session's hours from any
+    // total. 'total_working_hours' (backend fix) correctly sums every
+    // session for the day. Fall back to the old field only for any cached
+    ///offline record fetched before this fix shipped.
+    if (r['total_working_hours'] != null) {
+      return (r['total_working_hours'] as num).toDouble();
+    }
     if (r['working_hours'] != null) {
       return (r['working_hours'] as num).toDouble();
     }
@@ -169,16 +178,38 @@ class _WorkerAttendanceDetailPageState
     return t.toLocal();
   }
 
+  /// FIX (two-session bug): the row's top-level check_in_time/check_out_time
+  /// only ever reflects whichever session (morning or evening) was most
+  /// recently checked in/out - see the backend comment in
+  /// get_employee_attendance. Using it here meant a worker who checked in
+  /// on time for Morning but started Evening late got flagged "Late" for
+  /// the whole day (or vice versa - an on-time Evening check-in silently
+  /// hid a genuinely late Morning check-in). Read the Morning session's
+  /// check-in specifically for the "late" flag, falling back to the
+  /// top-level field only for old cached records with no `sessions` map.
   bool _isLate(Map<String, dynamic> r) {
-    final local = _parseServerTime(r['check_in_time']);
+    final sessions = r['sessions'] is Map ? Map<String, dynamic>.from(r['sessions'] as Map) : null;
+    final morning = sessions != null && sessions['morning'] is Map
+        ? Map<String, dynamic>.from(sessions['morning'] as Map)
+        : null;
+    final raw = morning?['check_in_time'] ?? r['check_in_time'];
+    final local = _parseServerTime(raw);
     if (local == null) return false;
     final threshold = DateTime(local.year, local.month, local.day,
         _shiftStart.hour, _shiftStart.minute + _graceMinutes);
     return local.isAfter(threshold);
   }
 
+  /// Mirrors _isLate: "early check-out" should reflect the Evening
+  /// session's check-out specifically, not whichever session happened to
+  /// write check_out_time last.
   bool _isEarly(Map<String, dynamic> r) {
-    final local = _parseServerTime(r['check_out_time']);
+    final sessions = r['sessions'] is Map ? Map<String, dynamic>.from(r['sessions'] as Map) : null;
+    final evening = sessions != null && sessions['evening'] is Map
+        ? Map<String, dynamic>.from(sessions['evening'] as Map)
+        : null;
+    final raw = evening?['check_out_time'] ?? r['check_out_time'];
+    final local = _parseServerTime(raw);
     if (local == null) return false;
     final threshold = DateTime(local.year, local.month, local.day,
         _shiftEnd.hour, _shiftEnd.minute - _graceMinutes);
@@ -287,8 +318,22 @@ class _WorkerAttendanceDetailPageState
     return (pctDelta: pctDelta, hrsDelta: hrsDelta, hasPrevData: hasPrev);
   }
 
-  double get _hourlyRate =>
-      widget.worker.salary > 0 ? widget.worker.salary / 200.0 : 0.0;
+  /// FIX (payroll bug - arbitrary constant): previously divided salary by
+  /// a flat, hardcoded 200 every month regardless of how many days are
+  /// actually in that month (28 vs 31 is a real ~10% difference) or which
+  /// month is being viewed. There is no per-worker "standard hours/month"
+  /// setting in the data model to derive this precisely, so this uses the
+  /// actual number of calendar days in the currently-viewed month × an
+  /// assumed 8-hour standard workday as the divisor. This is still an
+  /// approximation (no explicit weekly-off exclusion), but it is tied to
+  /// the real month being viewed instead of one arbitrary flat number
+  /// used for every month of the year.
+  double get _hourlyRate {
+    if (widget.worker.salary <= 0) return 0.0;
+    final daysInMonth = DateTime(_month.year, _month.month + 1, 0).day;
+    final standardMonthlyHours = daysInMonth * 8.0;
+    return widget.worker.salary / standardMonthlyHours;
+  }
 
   double _paidThisMonth() {
     final now = DateTime.now();
@@ -698,26 +743,74 @@ class _WorkerAttendanceDetailPageState
   }
 
   void _showDayDetail(DateTime day, Map<String, dynamic> rec) {
+    // FIX (two-session bug): this used to read rec['check_in_time'] /
+    // rec['check_out_time'] directly. Those top-level fields only ever
+    // hold whichever session (Morning or Evening) was most recently
+    // checked in/out - the backend overwrites them on every check-in/out
+    // and stores the real per-session breakdown separately under
+    // rec['sessions']. That's why a worker who completed both sessions
+    // could see only ONE check-in with no check-out here (if Evening was
+    // still open, its check-in silently replaced Morning's completed
+    // in/out pair), or see one session's times mislabeled as the whole
+    // day's. Read `sessions` directly and list each one that has data.
+    final sessions = rec['sessions'] is Map
+        ? Map<String, dynamic>.from(rec['sessions'] as Map)
+        : <String, dynamic>{};
+
+    final sessionWidgets = <Widget>[];
+    for (final key in const ['morning', 'evening']) {
+      final s = sessions[key] is Map ? Map<String, dynamic>.from(sessions[key] as Map) : null;
+      if (s == null || s['check_in_time'] == null) continue;
+      final label = (s['label'] ?? (key == 'morning' ? 'Morning' : 'Evening')).toString();
+      final cin = s['check_in_time'];
+      final cout = s['check_out_time'];
+      final hours = (s['working_hours'] as num?)?.toDouble() ?? 0.0;
+      sessionWidgets.add(Padding(
+        padding: const EdgeInsets.only(top: 8),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text(label, style: GoogleFonts.poppins(fontWeight: FontWeight.w700, fontSize: 12, color: _primary)),
+          Text('Check-in: ${_fmtTime(cin)}${key == 'morning' && _isLate(rec) ? ' (Late)' : ''}'),
+          Text(cout != null
+              ? 'Check-out: ${_fmtTime(cout)}${key == 'evening' && _isEarly(rec) ? ' (Early)' : ''}'
+              : 'Check-out: still checked in'),
+          Text('Hours: ${hours.toStringAsFixed(2)}'),
+        ]),
+      ));
+    }
+
+    // Fall back to the flat fields only for old cached records fetched
+    // before the backend started returning a `sessions` breakdown.
+    if (sessionWidgets.isEmpty && rec['check_in_time'] != null) {
+      sessionWidgets.add(Padding(
+        padding: const EdgeInsets.only(top: 8),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text('Check-in: ${_fmtTime(rec['check_in_time'])}${_isLate(rec) ? ' (Late)' : ''}'),
+          if (rec['check_out_time'] != null)
+            Text('Check-out: ${_fmtTime(rec['check_out_time'])}${_isEarly(rec) ? ' (Early)' : ''}'),
+        ]),
+      ));
+    }
+
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
         title: Text(DateFormat('dd MMM yyyy').format(day), style: GoogleFonts.poppins(fontWeight: FontWeight.bold)),
         content: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
           Text('Status: ${rec['status'] ?? 'N/A'}'),
-          if (rec['check_in_time'] != null)
-            Text('Check-in: ${_fmtTime(rec['check_in_time'])}${_isLate(rec) ? ' (Late)' : ''}'),
-          if (rec['check_out_time'] != null)
-            Text('Check-out: ${_fmtTime(rec['check_out_time'])}${_isEarly(rec) ? ' (Early)' : ''}'),
-          Text('Hours: ${_hoursOf(rec).toStringAsFixed(2)}'),
+          ...sessionWidgets,
+          const Divider(height: 20),
+          Text('Total hours: ${_hoursOf(rec).toStringAsFixed(2)}',
+              style: GoogleFonts.poppins(fontWeight: FontWeight.w700)),
         ]),
         actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Close'))],
       ),
     );
   }
 
-  String _fmtTime(String iso) {
+  String _fmtTime(dynamic iso) {
+    if (iso == null) return '';
     final t = _parseServerTime(iso);
-    return t != null ? DateFormat.jm().format(t) : iso;
+    return t != null ? DateFormat.jm().format(t) : iso.toString();
   }
 
   void _showAddPaymentDialog() {

@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+import 'active_worker_selector.dart';
+import 'active_worker_service.dart';
 import 'sharing_intent_service.dart';
 import 'package:intl/intl.dart';
 import 'package:http/http.dart' as http;
@@ -3802,6 +3804,18 @@ class _SalesEntryPageState extends State<SalesEntryPage>
         ),
         const SizedBox(width: 8),
       ],
+      bottom: PreferredSize(
+        // FEATURE (staff sales leaderboard): lets the current staff
+        // member confirm/switch who's attributed for sales made from
+        // this device, right where sales are actually created.
+        preferredSize: const Size.fromHeight(36),
+        child: Container(
+          color: const Color(0xFF4F46E5),
+          padding: const EdgeInsets.only(left: 12, right: 12, bottom: 6),
+          alignment: Alignment.centerLeft,
+          child: const ActiveWorkerSelector(),
+        ),
+      ),
     );
   }
 
@@ -4700,6 +4714,32 @@ class _SalesEntryPageState extends State<SalesEntryPage>
               fontSize: 12,
               letterSpacing: 0.8,
               fontWeight: FontWeight.w600,
+            ),
+          ),
+          const SizedBox(height: 8),
+          SizedBox(
+            width: double.infinity,
+            child: OutlinedButton.icon(
+              onPressed: () async {
+                try {
+                  await PaymentDetectionService().ensureChannelsRunning();
+                  if (mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text('Payment Detection is active and ready.')),
+                    );
+                  }
+                } catch (e) {
+                  if (kDebugMode) debugPrint('Payment detection status action failed: $e');
+                }
+              },
+              icon: const Icon(Icons.notifications_active_rounded, size: 17),
+              label: const Text('PAYMENT DETECTION'),
+              style: OutlinedButton.styleFrom(
+                foregroundColor: const Color(0xFF16A34A),
+                side: const BorderSide(color: Color(0xFF86EFAC)),
+                padding: const EdgeInsets.symmetric(vertical: 9),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+              ),
             ),
           ),
           const SizedBox(height: 10),

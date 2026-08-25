@@ -67,4 +67,3 @@ class PaymentDecisionStateNotifier extends ChangeNotifier {
   int get rejectedCount => _decisions.values.where((d) => d == PaymentDecision.rejected).length;
 }
 
-enum PaymentDecision { confirmed, likely, tentative, suspicious, rejected }

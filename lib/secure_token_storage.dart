@@ -264,9 +264,28 @@ class SecureTokenStorage {
     }
   }
 
+  /// FIX (zombie-session bug): this used to only check that an access
+  /// token exists and that a stored timestamp is within the 7-day window -
+  /// it never checked whether a refresh token is actually present. But
+  /// SessionManagementService.autoLogin() bails out immediately (no
+  /// network call at all) when there's no refresh token stored. So a
+  /// device that has an access token but no refresh token - e.g. a
+  /// session created before refresh tokens existed in the login response,
+  /// or one where the refresh token was lost independently of the access
+  /// token - passed this check as "valid" for up to 7 days even though it
+  /// could NEVER actually refresh once the access token expired. Every
+  /// caller of isSessionValid() (api_client's 401 handler, auth_helper,
+  /// main.dart's resume check, etc.) treated that as "still logged in,
+  /// don't force logout", producing a silent, unrecoverable 401 loop on
+  /// every request until the 7-day window finally ran out. A session
+  /// without a refresh token isn't actually valid/recoverable - it just
+  /// hasn't failed yet.
   static Future<bool> isSessionValid() async {
     final token = await getToken();
     if (token == null || token.isEmpty) return false;
+
+    final refreshToken = await getRefreshToken();
+    if (refreshToken == null || refreshToken.isEmpty) return false;
 
     final scopedTimeKey = await _getScopedKey(_kTime);
     final combined = await _storage.read(key: scopedTimeKey);

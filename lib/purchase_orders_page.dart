@@ -45,7 +45,7 @@ class _PurchaseOrdersPageState extends State<PurchaseOrdersPage> {
       
       // Then sync with backend for latest data
       try {
-        final res = await ApiClient.getJson('/purchase-orders/');
+        final res = await ApiClient.getJson('/api/purchase-orders/');
         if (res.statusCode == 200) {
           final d = jsonDecode(res.body);
           setState(() => _orders = d is List ? d : (d['orders'] ?? []));
@@ -74,7 +74,7 @@ class _PurchaseOrdersPageState extends State<PurchaseOrdersPage> {
 
   Future<void> _markDelivered(dynamic poId) async {
     try {
-      final res = await ApiClient.postJson('/purchase-orders/$poId/mark-delivered', {}).timeout(const Duration(seconds: 15));
+      final res = await ApiClient.postJson('/api/purchase-orders/$poId/mark-delivered', {}).timeout(const Duration(seconds: 15));
       if (res.statusCode != 200 && res.statusCode != 201) throw Exception('status ${res.statusCode}');
     } catch (e) {
       debugPrint('⚠️ Failed to mark PO as delivered live, queuing for retry: $e');
@@ -91,7 +91,7 @@ class _PurchaseOrdersPageState extends State<PurchaseOrdersPage> {
 
   Future<void> _cancelPO(dynamic poId) async {
     try {
-      final res = await ApiClient.postJson('/purchase-orders/$poId/cancel', {}).timeout(const Duration(seconds: 15));
+      final res = await ApiClient.postJson('/api/purchase-orders/$poId/cancel', {}).timeout(const Duration(seconds: 15));
       if (res.statusCode != 200 && res.statusCode != 201) throw Exception('status ${res.statusCode}');
     } catch (e) {
       debugPrint('⚠️ Failed to cancel PO live, queuing for retry: $e');
