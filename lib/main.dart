@@ -65,6 +65,7 @@ import 'inventory_upload_page.dart';
 import 'attendance_page.dart';
 import 'customers_page.dart';  // 🔧 FIXED: Added missing import
 import 'khata_page.dart';
+import 'staff_leaderboard_page.dart';
 import 'invoices_page.dart' hide Expanded;
 import 'chatbot_page.dart';
 import 'worker_management_page.dart';
@@ -1371,6 +1372,7 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
               '/attendance': (context) => const AttendancePage(),
               '/customers': (context) => const CustomersPage(),
               '/invoices': (context) => const KhataPage(),
+              '/staff-leaderboard': (context) => const StaffLeaderboardPage(),
               // NOTE: '/purchase-orders' was previously registered TWICE in
               // this route map -- this second entry (pointing to the
               // local-only PurchaseOrderPage, no backend sync at all) was
