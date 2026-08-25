@@ -22,6 +22,7 @@ import 'dart:ui' as ui;
 import 'package:file_picker/file_picker.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'api_client.dart';
+import 'whatsapp_message_service.dart';
 import 'payment_background_service.dart' show initializeBackgroundService;
 import 'app_localizations.dart';
 import 'local_storage_service.dart';
@@ -73,6 +74,7 @@ import 'session_logout_service.dart';
 import 'validation_helper.dart';
 import 'sync_queue_manager.dart';
 import 'sync_service.dart';
+import 'sync_status_indicator.dart';
 import 'package:path_provider/path_provider.dart';
 import 'dart:io';
 import 'csv_import_service.dart';
@@ -759,6 +761,73 @@ class _DashboardPageState extends State<DashboardPage>
   /// real action ("START DETECTION") that calls
   /// PaymentDetectionService().ensureChannelsRunning() and then re-checks
   /// permission status.
+  /// FEATURE (daily owner summary): fetches the ready-to-share message
+  /// from the backend (which already computed revenue/profit/top-product
+  /// - see report_service.py) and hands it to the same WhatsApp launcher
+  /// already used for Khata reminders. If the shop has no registered
+  /// phone number on file, prompts for one instead of failing silently.
+  Future<void> _sendDailySummary() async {
+    if (!mounted) return;
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const Center(child: CircularProgressIndicator()),
+    );
+
+    Map<String, dynamic> data;
+    try {
+      final res = await ApiClient.getJson('/api/reports/daily/whatsapp-message')
+          .timeout(const Duration(seconds: 15));
+      if (mounted) Navigator.of(context, rootNavigator: true).pop(); // close spinner
+      if (res.statusCode != 200) {
+        throw Exception('Server returned ${res.statusCode}');
+      }
+      data = json.decode(res.body) as Map<String, dynamic>;
+    } catch (e) {
+      if (mounted) Navigator.of(context, rootNavigator: true).pop();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Could not build daily summary: $e')),
+        );
+      }
+      return;
+    }
+    if (!mounted) return;
+
+    final message = data['message']?.toString() ?? '';
+    String? phone = data['phone']?.toString();
+
+    if (phone == null || phone.trim().isEmpty) {
+      final phoneController = TextEditingController();
+      phone = await showDialog<String>(
+        context: context,
+        builder: (dCtx) => AlertDialog(
+          title: const Text('Send Summary To'),
+          content: TextField(
+            controller: phoneController,
+            keyboardType: TextInputType.phone,
+            decoration: const InputDecoration(hintText: 'WhatsApp number'),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(dCtx), child: const Text('Cancel')),
+            TextButton(
+              onPressed: () => Navigator.pop(dCtx, phoneController.text.trim()),
+              child: const Text('Continue'),
+            ),
+          ],
+        ),
+      );
+      if (phone == null || phone.isEmpty) return;
+    }
+
+    final sent = await WhatsAppMessageService.sendCustomMessage(phone: phone, message: message);
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(sent ? 'Daily summary opened in WhatsApp' : 'Could not open WhatsApp')),
+      );
+    }
+  }
+
   Future<void> _openPaymentDetectionSettings() async {
     if (!mounted) return;
     await showDialog<void>(
@@ -4709,6 +4778,18 @@ class _DashboardPageState extends State<DashboardPage>
                 '/transactions',
               ).then((_) => _loadSales()),
             ),
+            if (!_isStaffMode)
+              _compactIconButton(
+                Icons.leaderboard_rounded,
+                'Leaderboard',
+                () => Navigator.pushNamed(context, '/staff-leaderboard'),
+              ),
+            if (!_isStaffMode)
+              _compactIconButton(
+                Icons.summarize_rounded,
+                'Daily Summary',
+                _sendDailySummary,
+              ),
             if (!_isStaffMode)
               _compactIconButton(
                 Icons.settings_rounded,
@@ -13769,6 +13850,11 @@ class _DashboardPageState extends State<DashboardPage>
             children: [
               // 0. GREETING HEADER
               _buildGreetingHeader(),
+
+              // FEATURE: sync/online status indicator. Reuses the existing
+              // SyncVisibilityWidget, which was fully built but never
+              // placed anywhere in the app until now.
+              const SyncStatusIndicator(),
 
               // 0.001 PAYMENT DETECTION SETUP — keep this visible and highlighted
               // until the OS reports that every required permission is enabled.
