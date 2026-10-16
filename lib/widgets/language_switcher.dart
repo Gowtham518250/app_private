@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../app_localizations.dart';
 import '../language_provider.dart';
@@ -28,42 +29,19 @@ class _LanguageSwitcherState extends State<LanguageSwitcher> {
   bool _isChanging = false;
 
   final Map<String, LanguageInfo> _languages = {
-    'en': LanguageInfo(
-      code: 'en',
-      name: 'English',
-      flag: '🇺🇸',
-      nativeName: 'English',
-    ),
-    'te': LanguageInfo(
-      code: 'te',
-      name: 'Telugu',
-      flag: '🇮🇳',
-      nativeName: 'తెలుగు',
-    ),
-    'hi': LanguageInfo(
-      code: 'hi',
-      name: 'Hindi',
-      flag: '🇮🇳',
-      nativeName: 'हिंदी',
-    ),
-    'ta': LanguageInfo(
-      code: 'ta',
-      name: 'Tamil',
-      flag: '🇮🇳',
-      nativeName: 'தமிழ்',
-    ),
-    'kn': LanguageInfo(
-      code: 'kn',
-      name: 'Kannada',
-      flag: '🇮🇳',
-      nativeName: 'ಕನ್ನಡ',
-    ),
-    'ml': LanguageInfo(
-      code: 'ml',
-      name: 'Malayalam',
-      flag: '🇮🇳',
-      nativeName: 'മലയാളം',
-    ),
+    'en': LanguageInfo(code: 'en', name: 'English', flag: '🇮🇳', nativeName: 'English'),
+    'te': LanguageInfo(code: 'te', name: 'Telugu', flag: '🇮🇳', nativeName: 'తెలుగు'),
+    'hi': LanguageInfo(code: 'hi', name: 'Hindi', flag: '🇮🇳', nativeName: 'हिन्दी'),
+    'ta': LanguageInfo(code: 'ta', name: 'Tamil', flag: '🇮🇳', nativeName: 'தமிழ்'),
+    'kn': LanguageInfo(code: 'kn', name: 'Kannada', flag: '🇮🇳', nativeName: 'ಕನ್ನಡ'),
+    'ml': LanguageInfo(code: 'ml', name: 'Malayalam', flag: '🇮🇳', nativeName: 'മലയാളം'),
+    'mr': LanguageInfo(code: 'mr', name: 'Marathi', flag: '🇮🇳', nativeName: 'मराठी'),
+    'bn': LanguageInfo(code: 'bn', name: 'Bengali', flag: '🇮🇳', nativeName: 'বাংলা'),
+    'gu': LanguageInfo(code: 'gu', name: 'Gujarati', flag: '🇮🇳', nativeName: 'ગુજરાતી'),
+    'pa': LanguageInfo(code: 'pa', name: 'Punjabi', flag: '🇮🇳', nativeName: 'ਪੰਜਾਬੀ'),
+    'or': LanguageInfo(code: 'or', name: 'Odia', flag: '🇮🇳', nativeName: 'ଓଡ଼ିଆ'),
+    'as': LanguageInfo(code: 'as', name: 'Assamese', flag: '🇮🇳', nativeName: 'অসমীয়া'),
+    'ur': LanguageInfo(code: 'ur', name: 'Urdu', flag: '🇮🇳', nativeName: 'اردو'),
   };
 
   @override
@@ -73,24 +51,21 @@ class _LanguageSwitcherState extends State<LanguageSwitcher> {
   }
 
   Future<void> _loadSavedLanguage() async {
-    final prefs = await SharedPreferences.getInstance();
-    _currentLanguage = prefs.getString('app_language') ?? 'en';
+    final languageProvider = Provider.of<LanguageProvider>(context, listen: false);
+    _currentLanguage = languageProvider.locale.languageCode;
     if (mounted) setState(() {});
   }
 
   Future<void> _changeLanguage(String languageCode) async {
-    if (_isChanging || languageCode == _currentLanguage) return;
+    final languageProvider = Provider.of<LanguageProvider>(context, listen: false);
+    if (_isChanging || languageCode == languageProvider.locale.languageCode) return;
 
     setState(() => _isChanging = true);
     HapticFeedback.lightImpact();
 
-    // Save language preference
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString('app_language', languageCode);
-
-    // Simulate language change delay for smooth transition
-    await Future.delayed(const Duration(milliseconds: 300));
-
+    // Use the single app-wide provider so all screens, not only this control,
+    // receive the locale update and account-scoped persistence.
+    await languageProvider.setLanguage(languageCode);
     _currentLanguage = languageCode;
     setState(() => _isChanging = false);
 
@@ -109,8 +84,9 @@ class _LanguageSwitcherState extends State<LanguageSwitcher> {
 
   @override
   Widget build(BuildContext context) {
+    final selectedLanguageCode = context.watch<LanguageProvider>().locale.languageCode;
     return GestureDetector(
-      onTap: () => _showLanguageDialog(context),
+      onTap: () => _showLanguageDialog(context, selectedLanguageCode),
       child: Container(
         padding: const EdgeInsets.symmetric(
           horizontal: AppSpacing.sm,
@@ -128,13 +104,13 @@ class _LanguageSwitcherState extends State<LanguageSwitcher> {
           mainAxisSize: MainAxisSize.min,
           children: [
             Text(
-              _languages[_currentLanguage]?.flag ?? '🌐',
+              _languages[selectedLanguageCode]?.flag ?? '🌐',
               style: const TextStyle(fontSize: 20),
             ),
             if (widget.showLabel) ...[
               const SizedBox(width: AppSpacing.sm),
               Text(
-                _languages[_currentLanguage]?.name ?? 'English',
+                _languages[selectedLanguageCode]?.name ?? 'English',
                 style: GoogleFonts.poppins(
                   fontSize: 14,
                   fontWeight: FontWeight.w500,
@@ -154,11 +130,11 @@ class _LanguageSwitcherState extends State<LanguageSwitcher> {
     );
   }
 
-  void _showLanguageDialog(BuildContext context) {
+  void _showLanguageDialog(BuildContext context, String selectedLanguageCode) {
     showDialog(
       context: context,
       builder: (context) => _LanguageDialog(
-        currentLanguage: _currentLanguage,
+        currentLanguage: selectedLanguageCode,
         languages: _languages,
         onLanguageSelected: _changeLanguage,
       ),
@@ -268,6 +244,13 @@ class LanguageService {
       'ta': 'Tamil',
       'kn': 'Kannada',
       'ml': 'Malayalam',
+      'mr': 'Marathi',
+      'bn': 'Bengali',
+      'gu': 'Gujarati',
+      'pa': 'Punjabi',
+      'or': 'Odia',
+      'as': 'Assamese',
+      'ur': 'Urdu',
     };
   }
 }
