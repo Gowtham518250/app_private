@@ -1,7 +1,8 @@
 import 'dart:convert';
 import 'dart:async';
 import 'dart:io';
-import 'package:flutter/material.dart';
+import 'package:flutter/material.dart' hide Text;
+import 'package:retail_mind/live_localized_text.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/foundation.dart' show kDebugMode, debugPrint;
 import 'package:provider/provider.dart';
