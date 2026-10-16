@@ -768,10 +768,14 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    
+
+    // The expiry monitor owns a periodic Timer. Stop it with the root app
+    // lifecycle so tests, hot-restarts and app teardown cannot leave it alive.
+    SessionManagementService.stopSessionExpiryMonitoring();
+
     // Stop all services through adaptive manager
     AdaptiveServiceManager.instance.stopAllServices();
-    
+
     super.dispose();
   }
 
