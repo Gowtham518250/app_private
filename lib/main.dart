@@ -708,6 +708,7 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
   bool _hasSeenOnboarding = false;
   DateTime? _lastBackgroundTime;
   CancelToken? _syncCancelToken; // Add cancellation token for sync operations
+  StreamSubscription<bool>? _sessionExpiredSubscription;
 
   @override
   void initState() {
@@ -750,7 +751,7 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
     // FIX-1: Listen for session expiry - OFFLINE-FIRST MODE
     // Only logout if user explicitly logs out or if there's a critical auth error
     // Don't auto-logout on network issues or temporary server problems
-    ApiClient.onSessionExpired.listen((_) async {
+    _sessionExpiredSubscription = ApiClient.onSessionExpired.listen((_) async {
       if (!mounted) return;
       // Check if user still has a valid local session before forcing logout
       final hasLocalSession = await SecureTokenStorage.isSessionValid();
@@ -767,6 +768,8 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
 
   @override
   void dispose() {
+    _sessionExpiredSubscription?.cancel();
+    _sessionExpiredSubscription = null;
     WidgetsBinding.instance.removeObserver(this);
 
     // The expiry monitor owns a periodic Timer. Stop it with the root app
