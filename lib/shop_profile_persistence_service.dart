@@ -81,17 +81,32 @@ class ShopProfilePersistenceService {
       // initial save path is often offline or returns a nested {profile: ...}
       // response; waiting for the next profile restore made the UPI ID appear
       // blank on the first visit to payment settings.
-      final rawProfile = profile['profile'];
+      final nestedCandidates = [
+        profile['profile'],
+        profile['shop_profile'],
+        profile['shop'],
+        profile['data'],
+      ];
+      final rawProfile = nestedCandidates.firstWhere(
+        (value) => value is Map,
+        orElse: () => profile,
+      );
       final shopData = rawProfile is Map
           ? Map<String, dynamic>.from(rawProfile)
           : profile;
-      final rawSettings = profile['settings'];
+      final rawSettings = profile['settings'] ?? shopData['settings'];
       final settings = rawSettings is Map
           ? Map<String, dynamic>.from(rawSettings)
           : <String, dynamic>{};
+      // Be tolerant of flat, wrapped, and {data: {profile, settings}} payloads.
+      // The freshly-entered UPI value should not be lost just because the API
+      // response uses a different envelope shape.
       final rawUpiId = shopData['primary_upi_id'] ??
           shopData['upi_id'] ??
           shopData['upi'] ??
+          profile['primary_upi_id'] ??
+          profile['upi_id'] ??
+          profile['upi'] ??
           settings['primary_upi_id'] ??
           settings['upi_id'] ??
           settings['upi'];
