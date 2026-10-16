@@ -1,4 +1,5 @@
-import 'package:flutter/material.dart';
+import 'package:flutter/material.dart' hide Text;
+import 'package:retail_mind/live_localized_text.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'dart:ui';
 import 'dart:async';
