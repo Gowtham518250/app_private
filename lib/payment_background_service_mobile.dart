@@ -12,6 +12,21 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'payment_announcement_service.dart';
 import 'payment_detection_service.dart';
 
+// True when foreground-isolate fallback is handling payment detection.
+// In that mode, the UI isolate is the only available speech owner.
+bool _paymentDetectionFallbackMode = false;
+
+/// Whether the background isolate currently owns payment announcements.
+/// Check this at speak-time because service startup/fallback is asynchronous.
+Future<bool> isPaymentBackgroundDetectionActive() async {
+  if (_paymentDetectionFallbackMode) return false;
+  try {
+    return await FlutterBackgroundService().isRunning();
+  } catch (_) {
+    return false;
+  }
+}
+
 Future<void> _ensurePaymentNotificationChannel() async {
   if (!Platform.isAndroid) return;
   final plugin = FlutterLocalNotificationsPlugin();
@@ -136,6 +151,7 @@ Future<bool> onStart(ServiceInstance service) async {
 }
 
 Future<void> initializeBackgroundService() async {
+  _paymentDetectionFallbackMode = false;
   try {
     final service = FlutterBackgroundService();
 
@@ -194,6 +210,7 @@ Future<void> initializeBackgroundService() async {
     await service.startService();
     debugPrint('✅ Background service started successfully (foreground=$isForeground)');
   } catch (e) {
+    _paymentDetectionFallbackMode = true;
     debugPrint('⚠️ Failed to start background service: $e');
     await _initializeFallback();
   }
