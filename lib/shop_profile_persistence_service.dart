@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'api_client.dart';
 import 'secure_token_storage.dart';
+import 'secure_preferences_service.dart';
 import 'notification_service.dart';
 
 /// 
@@ -410,9 +411,15 @@ class ShopProfilePersistenceService {
         if (shopData['shop_tagline'] != null || shopData['tagline'] != null) {
           await prefs.setString('shop_tagline', (shopData['shop_tagline'] ?? shopData['tagline']).toString());
         }
-        if (shopData['primary_upi_id'] != null || shopData['upi_id'] != null) {
-          await prefs.setString('primary_upi_id', (shopData['primary_upi_id'] ?? shopData['upi_id']).toString());
-          await prefs.setString('upi_id', (shopData['primary_upi_id'] ?? shopData['upi_id']).toString());
+        if (shopData['primary_upi_id'] != null || shopData['upi_id'] != null || shopData['upi'] != null) {
+          final upiId = (shopData['primary_upi_id'] ?? shopData['upi_id'] ?? shopData['upi'])
+              .toString()
+              .trim();
+          await prefs.setString('primary_upi_id', upiId);
+          await prefs.setString('upi_id', upiId);
+          // Keep the encrypted value in sync with backend restores as well as
+          // direct edits, so the first payment-detection setup sees the UPI ID.
+          await SecurePreferencesService.setUpiId(upiId);
         }
         if (shopData['gst_number'] != null || shopData['shop_gst'] != null || shopData['gstin'] != null) {
           await prefs.setString('gst_number', (shopData['gst_number'] ?? shopData['shop_gst'] ?? shopData['gstin']).toString());
