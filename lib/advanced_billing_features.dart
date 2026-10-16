@@ -1,7 +1,8 @@
 /// Voice-First Billing Engine (Feature 1)
 /// Hindi+English mixed voice parsing into bill rows
 
-import 'package:flutter/material.dart';
+import 'package:flutter/material.dart' hide Text;
+import 'package:retail_mind/live_localized_text.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'dart:convert';
 import 'package:url_launcher/url_launcher_string.dart';
