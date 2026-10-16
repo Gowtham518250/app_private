@@ -4027,7 +4027,7 @@ abstract class _Classifier {
   // An unverified notification can be shown as LIKELY only when it says an
   // incoming credit actually happened, rather than simply mentioning payment.
   static bool hasIncomingCreditContext(String t) => RegExp(
-        r'(?:\\b(?:credited|received|deposited|payment\\s+received|amount\\s+credited|money\\s+received|funds\\s+received|credit\\s+of|you\\s+got)\\b|\\bcr\\b|खाते\\s+में\\s+जमा|जमा\\s+हो|प्राप्त\\s+हुआ|வரவு|பெறப்பட்டது|கணக்கில்\\s+வரவு|జమ\\s+అయింది|చెల్లింపు\\s+వచ్చింది|ಜಮಾ\\s+ಆಗಿದೆ|ಪಾವತಿ\\s+ಬಂತು|জমা\\s+হয়েছে|ലഭിച്ചു)',
+        r'(?:\b(?:credited|received|deposited|credit(?:ed)?\s+(?:in|of|to)|payment\s+received|amount\s+credited|money\s+received|funds\s+received|you\s+got)\b|\bcr\b|खाते\s+में\s+जमा|जमा\s+हो|प्राप्त\s+हुआ|வரவு|பெறப்பட்டது|கணக்கில்\s+வரவு|జమ\s+అయింది|చెల్లింపు\s+వచ్చింది|ಜಮಾ\s+ಆಗಿದೆ|ಪಾವತಿ\s+ಬಂತು|জমা\s+হয়েছে|ലഭിച്ചു)',
         caseSensitive: false,
       ).hasMatch(t);
 
