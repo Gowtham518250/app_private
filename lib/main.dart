@@ -548,6 +548,10 @@ void main() async {
 
       // Connect PDS brain to Voice engine
       pds.onSpeak = (text) async {
+        // On Android/iOS, the background service owns speech announcements.
+        // The UI isolate still processes events for screens, but must not
+        // announce the same notification a second time.
+        if (!kIsWeb && await isPaymentBackgroundDetectionActive()) return;
         final lang = appPrefs.getString('payment_sound_lang') ?? 'en-US';
         PaymentAnnouncementService().speakSimple(text, lang);
       };
@@ -700,9 +704,11 @@ class MyApp extends StatefulWidget {
 
 class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
   late Future<bool> _loggedInFuture;
+  late Future<String> _initialRouteFuture;
   bool _hasSeenOnboarding = false;
   DateTime? _lastBackgroundTime;
   CancelToken? _syncCancelToken; // Add cancellation token for sync operations
+  StreamSubscription<bool>? _sessionExpiredSubscription;
 
   @override
   void initState() {
@@ -720,6 +726,7 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
     });
     
     _loggedInFuture = _checkLogin();
+    _initialRouteFuture = _resolveInitialRoute();
     
     // Initialize WhatsApp Sharing Intent listener
     SharingIntentService.init();
@@ -744,7 +751,7 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
     // FIX-1: Listen for session expiry - OFFLINE-FIRST MODE
     // Only logout if user explicitly logs out or if there's a critical auth error
     // Don't auto-logout on network issues or temporary server problems
-    ApiClient.onSessionExpired.listen((_) async {
+    _sessionExpiredSubscription = ApiClient.onSessionExpired.listen((_) async {
       if (!mounted) return;
       // Check if user still has a valid local session before forcing logout
       final hasLocalSession = await SecureTokenStorage.isSessionValid();
@@ -761,11 +768,17 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
 
   @override
   void dispose() {
+    _sessionExpiredSubscription?.cancel();
+    _sessionExpiredSubscription = null;
     WidgetsBinding.instance.removeObserver(this);
-    
+
+    // The expiry monitor owns a periodic Timer. Stop it with the root app
+    // lifecycle so tests, hot-restarts and app teardown cannot leave it alive.
+    SessionManagementService.stopSessionExpiryMonitoring();
+
     // Stop all services through adaptive manager
     AdaptiveServiceManager.instance.stopAllServices();
-    
+
     super.dispose();
   }
 
@@ -1134,7 +1147,45 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
       unawaited(OnlineOrdersListener.instance.restartForCurrentUser());
     }
 
+    // If the local seven-day session window has elapsed, try the saved refresh
+    // token before presenting Login. This keeps new accounts signed in when the
+    // backend refresh token is still valid.
+    if (!isValid) {
+      try {
+        final refreshToken = await SecureTokenStorage.getRefreshToken()
+            .timeout(const Duration(seconds: 4));
+        if (refreshToken != null && refreshToken.isNotEmpty) {
+          final refreshed = await SessionManagementService.autoLogin().timeout(
+            const Duration(seconds: 12),
+            onTimeout: () => null,
+          );
+          if (refreshed?['success'] == true) {
+            isValid = await SecureTokenStorage.isSessionValid()
+                .timeout(const Duration(seconds: 6));
+          }
+        }
+      } catch (e) {
+        if (kDebugMode) debugPrint('Session restore failed; preserving stored credentials for the next attempt: $e');
+      }
+    }
+
     return isValid;
+  }
+
+  Future<String> _resolveInitialRoute() async {
+    final authenticated = await _loggedInFuture;
+    if (!authenticated) return '/login';
+
+    final prefs = await SharedPreferences.getInstance();
+    final role = (prefs.getString('user_role') ?? 'OWNER').trim().toUpperCase();
+    final userId = prefs.getInt('user_id') ?? prefs.getInt('userId') ?? 0;
+
+    if (role == 'CUSTOMER') return '/nearby-shops';
+    if (prefs.getBool('shop_details_required_$userId') ?? false) {
+      return '/shop-details';
+    }
+    if (role == 'WORKER') return '/attendance';
+    return '/dashboard';
   }
 
   @override
@@ -1148,49 +1199,20 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
             builder: (context, snapshot) {
               final booting = snapshot.connectionState == ConnectionState.waiting;
               final authed = snapshot.hasData && snapshot.data == true;
-              String initialRoute = '/login';
-              if (!booting && authed) {
-                // A valid login session is not enough to open a protected shop
-                // area. The resolver below checks identity verification first.
-                initialRoute = '/identity-verification';
-              } else if (booting) {
-                initialRoute = '/_boot';
-              }
+              final initialRoute = booting ? '/_boot' : '/login';
               return FutureBuilder<String>(
-                future: (() async {
-                  if (booting) return '/_boot';
-                  if (!authed) return '/login';
-
-                  final routePrefs = await SharedPreferences.getInstance();
-                  final rawRole = routePrefs.getString('user_role') ?? 'OWNER';
-                  final role = rawRole.trim().toUpperCase();
-                  final userId = routePrefs.getInt('user_id') ??
-                      routePrefs.getInt('userId') ??
-                      0;
-
-                  if (role == 'CUSTOMER') return '/nearby-shops';
-
-                  // Shop Details is a registration-only onboarding step.
-                  // Existing authenticated users must never be forced back into
-                  // the form just because a legacy completion flag is missing.
-                  // Registration sets this explicit per-user requirement and
-                  // ShopDetailsPage clears it after a successful save.
-                  final shopDetailsRequired =
-                      routePrefs.getBool('shop_details_required_$userId') ?? false;
-                  if (shopDetailsRequired) return '/shop-details';
-
-                  // Identity verification is intentionally handled by the
-                  // explicit login/registration flow (RoleSelectionPage).
-                  // Auto-login after reopening the app should go straight to
-                  // the dashboard; it must not show verification again.
-                  if (role == 'WORKER') return '/attendance';
-                  return '/dashboard';
-                })(),
+                future: _initialRouteFuture,
                 builder: (context, routeSnapshot) {
-                  final resolvedRoute = routeSnapshot.data ?? initialRoute;
+                  final routeIsLoading = routeSnapshot.connectionState != ConnectionState.done;
+                  final resolvedRoute = (booting || routeIsLoading)
+                      ? '/_boot'
+                      : (authed ? routeSnapshot.data ?? initialRoute : '/login');
                   return MaterialApp(
                     navigatorKey: globalNavigatorKey,
-                    key: ValueKey<String>(booting ? 'boot' : '${authed}_${resolvedRoute}'),
+                    // Keep the Navigator stable after the first route is resolved.
+                    // Keying by route recreated MaterialApp on rebuild and reset every
+                    // screen to its initial route (usually /dashboard).
+                    key: ValueKey<String>(booting ? 'boot' : routeIsLoading ? 'routing' : 'ready'),
                     debugShowCheckedModeBanner: false,
                     title: 'RETAIL MIND',
                     locale: languageProvider.locale,

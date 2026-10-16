@@ -12,6 +12,59 @@ class PaymentDetectionSystem {
   static const String _tag = '📱 PAYMENT_DETECTOR';
   static const Duration _debounce = Duration(seconds: 2);
 
+  // The legacy matcher is still used by the Smart Payment Matcher screen.
+  // Keep its parsing helpers testable so malformed notification formats cannot
+  // silently select an account/reference number instead of the money amount.
+  @visibleForTesting
+  static double? debugExtractNotificationAmount(String message) =>
+      _extractAmount(message);
+
+  @visibleForTesting
+  static String debugNotificationPaymentType(String message) =>
+      _paymentType(message);
+
+  static double? _extractAmount(String message) {
+    // Prefer an explicit currency marker anywhere in the message, so account
+    // numbers and UTRs appearing earlier never win over the actual amount.
+    final patterns = <RegExp>[
+      RegExp(
+        r'(?:₹|\bINR\b|\bRs\.?)[\s:]*([0-9]+(?:,[0-9]{2,3})*(?:\.[0-9]{1,2})?)',
+        caseSensitive: false,
+      ),
+      RegExp(
+        r'\bamount\s*(?:(?:credited|received|deposited)\s*)?(?:of|is|:|-)?\s*([0-9]+(?:,[0-9]{2,3})*(?:\.[0-9]{1,2})?)',
+        caseSensitive: false,
+      ),
+      RegExp(
+        r'\b(?:credited|received|deposited)\D{0,14}([0-9]+(?:,[0-9]{2,3})*(?:\.[0-9]{1,2})?)',
+        caseSensitive: false,
+      ),
+    ];
+
+    for (final pattern in patterns) {
+      final match = pattern.firstMatch(message);
+      if (match == null) continue;
+      final value = double.tryParse(match.group(1)!.replaceAll(',', ''));
+      if (value != null && value > 0) return value;
+    }
+    return null;
+  }
+
+  static String _paymentType(String message) {
+    final outgoing = RegExp(
+      r'\b(?:debited|debit|withdrawn?|withdrawal|spent|you\s+sent|you\s+paid|payment\s+made\s+to|purchase\s+at|sent\s+to\s+(?!(?:you|your)\b)|paid\s+to\s+(?!(?:you|your)\b))\b',
+      caseSensitive: false,
+    );
+    if (outgoing.hasMatch(message)) return 'PAID';
+
+    final incoming = RegExp(
+      r'\b(?:credited|credit|received|deposited|paid\s+(?:you|to\s+you)|sent\s+(?:you|to\s+you)|transferred\s+to\s+your|you\s+got\s+paid)\b',
+      caseSensitive: false,
+    );
+    if (incoming.hasMatch(message)) return 'RECEIVED';
+    return 'PENDING';
+  }
+
   static Timer? _debounceTimer;
   static final List<Transaction> _pendingPayments = [];
   static Function(Transaction, PaymentConfidence)? _onPaymentDetected;
@@ -72,7 +125,8 @@ class PaymentDetectionSystem {
     if (kDebugMode) print('$_tag Notification from $packageName');
 
     try {
-      final transaction = await _parseAndCreateTransaction(body, packageName, title);
+      final combinedMessage = [title, body].where((part) => part.trim().isNotEmpty).join(' ').trim();
+      final transaction = await _parseAndCreateTransaction(combinedMessage, packageName, title);
 
       if (transaction != null) {
         _pendingPayments.add(transaction);
@@ -163,17 +217,10 @@ class PaymentDetectionSystem {
     if (kDebugMode) print('$_tag Parsing as Bank SMS');
 
     try {
-      // Amount extraction: ₹5000 or Rs.5000 or INR 5000
-      final amountMatch = RegExp(r'[₹Rs\.]*\s*(\d+(?:,\d+)*(?:\.\d{2})?)').firstMatch(message);
-      if (amountMatch == null) return null;
+      final amount = _extractAmount(message);
+      if (amount == null) return null;
 
-      double amount = double.parse(amountMatch.group(1)!.replaceAll(',', '')) ?? 0;
-
-      // Type detection: Debit/Credit/Withdrawal
-      bool isPaid = message.contains(RegExp(r'debit|withdrawn?|debited|paid', caseSensitive: false));
-      bool isReceived = message.contains(RegExp(r'credit|received?|credited', caseSensitive: false));
-
-      String type = isPaid ? 'PAID' : (isReceived ? 'RECEIVED' : 'PENDING');
+      final type = _paymentType(message);
 
       // Name extraction: "to Rahul" or "from Rahul" or "To/From account holder"
       String name = 'Bank Payment';
@@ -249,17 +296,12 @@ class PaymentDetectionSystem {
     if (kDebugMode) print('$_tag Parsing as UPI Notification');
 
     try {
-      // Amount: "₹500" or "Rs 500"
-      final amountMatch = RegExp(r'[₹Rs\.]*\s*(\d+(?:,\d+)*(?:\.\d{2})?)').firstMatch(message);
-      if (amountMatch == null) return null;
+      final amount = _extractAmount(message);
+      if (amount == null) return null;
 
-      double amount = double.parse(amountMatch.group(1)!.replaceAll(',', '')) ?? 0;
-
-      // Type: sent/received/transferred
-      bool isSent = message.contains(RegExp(r'sent|transfer', caseSensitive: false));
-      bool isReceived = message.contains(RegExp(r'received', caseSensitive: false));
-
-      String type = isSent ? 'PAID' : (isReceived ? 'RECEIVED' : 'PENDING');
+      // Prefer specific direction phrases: "sent to you" is incoming, while
+      // "you sent" or "sent to a shop" is outgoing.
+      final type = _paymentType(message);
 
       // Name: Phone number or "You" or account name
       String name = 'UPI Payment';

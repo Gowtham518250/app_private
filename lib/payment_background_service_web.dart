@@ -4,6 +4,9 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'payment_announcement_service.dart';
 import 'payment_detection_service.dart';
 
+/// Web has no native background isolate, so foreground code owns speech.
+Future<bool> isPaymentBackgroundDetectionActive() async => false;
+
 Future<void> initializeBackgroundService() async {
   debugPrint('⚠️ Background service not supported on web');
   try {

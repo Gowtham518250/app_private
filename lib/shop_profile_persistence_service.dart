@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'api_client.dart';
 import 'secure_token_storage.dart';
+import 'secure_preferences_service.dart';
 import 'notification_service.dart';
 
 /// 
@@ -75,6 +76,62 @@ class ShopProfilePersistenceService {
       await prefs.setString(scopedCacheKey, json.encode(profile));
       await prefs.setString(scopedLastSyncKey, DateTime.now().toIso8601String());
       await prefs.setInt(scopedVersionKey, DateTime.now().millisecondsSinceEpoch);
+
+      // Apply the UPI field immediately as well as caching the profile. The
+      // initial save path is often offline or returns a nested {profile: ...}
+      // response; waiting for the next profile restore made the UPI ID appear
+      // blank on the first visit to payment settings.
+      final nestedCandidates = [
+        profile['profile'],
+        profile['shop_profile'],
+        profile['shop'],
+        profile['data'],
+      ];
+      final rawProfile = nestedCandidates.firstWhere(
+        (value) => value is Map,
+        orElse: () => profile,
+      );
+      final envelopeData = rawProfile is Map
+          ? Map<String, dynamic>.from(rawProfile)
+          : profile;
+      final rawNestedShop = envelopeData['profile'] ??
+          envelopeData['shop_profile'] ??
+          envelopeData['shop'];
+      final shopData = rawNestedShop is Map
+          ? Map<String, dynamic>.from(rawNestedShop)
+          : envelopeData;
+      final rawSettings = profile['settings'] ??
+          envelopeData['settings'] ??
+          shopData['settings'];
+      final settings = rawSettings is Map
+          ? Map<String, dynamic>.from(rawSettings)
+          : <String, dynamic>{};
+      // Be tolerant of flat, wrapped, and {data: {profile, settings}} payloads.
+      // The freshly-entered UPI value should not be lost just because the API
+      // response uses a different envelope shape.
+      String? upiId;
+      for (final candidate in <dynamic>[
+        shopData['primary_upi_id'],
+        shopData['upi_id'],
+        shopData['upi'],
+        profile['primary_upi_id'],
+        profile['upi_id'],
+        profile['upi'],
+        settings['primary_upi_id'],
+        settings['upi_id'],
+        settings['upi'],
+      ]) {
+        final value = candidate?.toString().trim() ?? '';
+        if (value.isNotEmpty) {
+          upiId = value;
+          break;
+        }
+      }
+      if (upiId != null) {
+        await prefs.setString('primary_upi_id', upiId);
+        await prefs.setString('upi_id', upiId);
+        await SecurePreferencesService.setUpiId(upiId);
+      }
       
       if (kDebugMode) debugPrint('💾 Shop profile saved locally (user-isolated)');
     } catch (e) {
@@ -385,12 +442,26 @@ class ShopProfilePersistenceService {
       // applying nothing, so a just-edited shop name/phone/etc. would
       // vanish back to its old value on the next load even though it was
       // genuinely saved to local storage. Now this accepts either shape.
-      final dynamic nestedRaw = profile['profile'] ?? profile['shop_profile'];
-      final Map<String, dynamic>? shopData = nestedRaw is Map
-          ? Map<String, dynamic>.from(nestedRaw)
-          : profile; // already flat — use as-is
+      final dynamic dataRaw = profile['profile'] ??
+          profile['shop_profile'] ??
+          profile['shop'] ??
+          profile['data'];
+      final Map<String, dynamic> envelopeData = dataRaw is Map
+          ? Map<String, dynamic>.from(dataRaw)
+          : profile;
+      final dynamic nestedShopRaw = envelopeData['profile'] ??
+          envelopeData['shop_profile'] ??
+          envelopeData['shop'];
+      final Map<String, dynamic> shopData = nestedShopRaw is Map
+          ? Map<String, dynamic>.from(nestedShopRaw)
+          : envelopeData;
+      final dynamic rawSettings =
+          profile['settings'] ?? envelopeData['settings'] ?? shopData['settings'];
+      final Map<String, dynamic> settings = rawSettings is Map
+          ? Map<String, dynamic>.from(rawSettings)
+          : <String, dynamic>{};
 
-      if (shopData != null) {
+      if (shopData.isNotEmpty) {
         // Apply individual fields to prefs for backward compatibility
         if (shopData['shop_name'] != null) {
           await prefs.setString('shop_name', shopData['shop_name'].toString());
@@ -410,9 +481,30 @@ class ShopProfilePersistenceService {
         if (shopData['shop_tagline'] != null || shopData['tagline'] != null) {
           await prefs.setString('shop_tagline', (shopData['shop_tagline'] ?? shopData['tagline']).toString());
         }
-        if (shopData['primary_upi_id'] != null || shopData['upi_id'] != null) {
-          await prefs.setString('primary_upi_id', (shopData['primary_upi_id'] ?? shopData['upi_id']).toString());
-          await prefs.setString('upi_id', (shopData['primary_upi_id'] ?? shopData['upi_id']).toString());
+        String? upiId;
+        for (final candidate in <dynamic>[
+          shopData['primary_upi_id'],
+          shopData['upi_id'],
+          shopData['upi'],
+          profile['primary_upi_id'],
+          profile['upi_id'],
+          profile['upi'],
+          settings['primary_upi_id'],
+          settings['upi_id'],
+          settings['upi'],
+        ]) {
+          final value = candidate?.toString().trim() ?? '';
+          if (value.isNotEmpty) {
+            upiId = value;
+            break;
+          }
+        }
+        if (upiId != null) {
+          await prefs.setString('primary_upi_id', upiId);
+          await prefs.setString('upi_id', upiId);
+          // Keep the encrypted value in sync with backend restores as well as
+          // direct edits, so the first payment-detection setup sees the UPI ID.
+          await SecurePreferencesService.setUpiId(upiId);
         }
         if (shopData['gst_number'] != null || shopData['shop_gst'] != null || shopData['gstin'] != null) {
           await prefs.setString('gst_number', (shopData['gst_number'] ?? shopData['shop_gst'] ?? shopData['gstin']).toString());

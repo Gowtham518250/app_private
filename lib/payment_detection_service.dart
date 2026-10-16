@@ -575,8 +575,6 @@ class PdsConfig {
   static const Duration tcmLargeDrain     = Duration(seconds: 20);
   static const Duration tcmDrainInterval  = Duration(seconds: 2);
 
-  // FIX-K: LIKELY re-announce timeout
-  static const Duration likelyReannounceAfter = Duration(seconds: 12);
 
   // Dedup
   static const Duration dedupUtrTtl          = Duration(hours: 24);
@@ -1978,6 +1976,10 @@ class PaymentDetectionService {
     return _Classifier.classify(text).name;
   }
 
+  @visibleForTesting
+  static bool debugHasIncomingCreditContext(String rawText) =>
+      _Classifier.hasIncomingCreditContext(_Normaliser.clean(rawText));
+
   /// Extracts the amount the same way the live pipeline does. Returns null
   /// if no confident amount was found (e.g. balance-only messages, or
   /// messages below PdsConfig.minAmount).
@@ -2260,8 +2262,6 @@ class PaymentDetectionService {
   Timer? _midnightTimer;
   Timer? _healthTimer;
 
-  // FIX-K: LIKELY re-announcement timers
-  final _likelyTimers = <String, Timer>{};
 
   // FIX-D: track last confirmed event for repeat
   PaymentEvent? _lastConfirmed;
@@ -2295,14 +2295,12 @@ class PaymentDetectionService {
   PaymentEvent? confirmPayment(String id) {
     final confirmed = _confirmMgr.confirm(id);
     if (confirmed != null) {
-      _likelyTimers.remove(id)?.cancel();
       _emitFinal(confirmed);
     }
     return confirmed;
   }
 
   void rejectPayment(String id) {
-    _likelyTimers.remove(id)?.cancel();
     _confirmMgr.reject(id);
     final state = history.findById(id);
     if (state != null) {
@@ -2533,8 +2531,6 @@ class PaymentDetectionService {
     _tcmDrainTimer?.cancel(); _dedupTimer?.cancel();
     _dedupSaveTimer?.cancel(); _guardTimer?.cancel();
     _midnightTimer?.cancel();  _healthTimer?.cancel();
-    for (final t in _likelyTimers.values) t.cancel();
-    _likelyTimers.clear();
     await _notifSub?.cancel();
     _notifSub = null;
     if (_dedupDirty) await PdsStateStore.saveDedup(_dedupStore);
@@ -2590,14 +2586,6 @@ class PaymentDetectionService {
     _guardTimer = Timer.periodic(const Duration(minutes: 10), (_) {
       try {
         _floodGuard.cleanup(); _accRateLimit.cleanup(); _confirmMgr.cleanup();
-        // FIX: Clean up likely timers that are no longer in history or expired
-        _likelyTimers.removeWhere((id, timer) {
-          if (history.findById(id) == null) {
-            timer.cancel();
-            return true;
-          }
-          return false;
-        });
       } catch (e, st) { PdsLogger.e('GUARD', 'Guard timer error', e, st); }
     });
   }
@@ -2875,21 +2863,16 @@ class PaymentDetectionService {
         // dropped outright, silently, forever — closed via a content-based
         // fallback below.
         //
-        // FIX (security, critical): the fallback originally only checked
-        // for payment-context wording + a parseable amount. That means ANY
-        // installed app — including one a scammer talks a merchant into
-        // sideloading — could post a local notification saying "Payment
-        // received ₹5,000" and it would pass. Unlike the SMS path (which
-        // now has a sender-identity whitelist), a notification has no
-        // equivalent trusted-identity signal for an app outside our
-        // registry, so require a real transaction reference number too
-        // (UTR/txn id pattern) in addition to payment-context + amount.
-        // This raises the bar substantially — a scammer's fake app would
-        // now need to fabricate a plausible-looking reference id, not just
-        // a rupee amount and the word "credited".
-        final looksLikePayment = _Classifier.hasPaymentContext(fields) &&
-            _Extractor.amount(fields) != null &&
-            _Extractor.referenceId(fields) != null;
+        // Unregistered apps have no verified package identity. Still surface a
+        // clearly incoming-credit notification when it contains a parseable
+        // amount, but keep it unverified so it can never be auto-confirmed.
+        // This avoids missing legitimate payer notifications that omit a UTR;
+        // outgoing/debit, OTP, promotional and pending notifications are still
+        // filtered by the classifier before they enter the payment pipeline.
+        final looksLikePayment =
+            _Classifier.classify(fields) == _ClassifyResult.passed &&
+            _Classifier.hasIncomingCreditContext(fields) &&
+            _Extractor.amount(fields) != null;
         if (!looksLikePayment) return;
         app = PaymentApp.bankApp;
         isUnverifiedApp = true;
@@ -3135,9 +3118,21 @@ class PaymentDetectionService {
       }.contains(app);
 
       if (score < minThreshold) {
-        // FIX-V16-3 retained + strengthened: require structured context
-        if (source == 'notification' && isTrustedApp && amount > 0
-            && _Classifier.hasStructuredPaymentContext(text)) {
+        // Surface a clear incoming-credit notification from an unregistered
+        // package as LIKELY instead of silently losing it. This rescue is
+        // deliberately unavailable to generic payment mentions, debits,
+        // pending notices and promotions; the final decision is also capped
+        // at LIKELY for every unverified package.
+        if (source == 'notification' &&
+            isUnverifiedApp &&
+            amount > 0 &&
+            _Classifier.hasIncomingCreditContext(text)) {
+          score = PdsConfig.likelyThreshold;
+          PdsLogger.w('L7', 'UNVERIFIED_CREDIT_RESCUE → LIKELY ₹$amount');
+        } else if (source == 'notification' &&
+            isTrustedApp &&
+            amount > 0 &&
+            _Classifier.hasStructuredPaymentContext(text)) {
           score = PdsConfig.likelyThreshold;
           PdsLogger.w('L7', 'TRUSTED_APP_RESCUE → LIKELY ₹$amount');
         } else {
@@ -3342,10 +3337,19 @@ class PaymentDetectionService {
       }
 
       final isPartial = billResult == BillMatchResult.partial && !isBillSettled;
-      // Partial payments always stay LIKELY
-      final finalDecision = (isPartial && decision == PaymentDecision.confirmed)
-          ? PaymentDecision.likely
-          : decision;
+      // Never automatically confirm a payment inferred from an unregistered
+      // app, even if a notification happens to contain a reference-looking ID.
+      // The merchant can review/confirm it manually after matching the bank
+      // account or the real transaction reference.
+      if (isUnverifiedApp && decision == PaymentDecision.confirmed) {
+        decision = PaymentDecision.likely;
+        PdsLogger.w('L9', 'Unverified app payment capped at LIKELY ₹$amount');
+      }
+      // Partial payments and unverified sources always remain LIKELY.
+      final finalDecision =
+          ((isPartial || isUnverifiedApp) && decision == PaymentDecision.confirmed)
+              ? PaymentDecision.likely
+              : decision;
 
       final event = tempEvent.copyWith(
         id:               matched?.event.id,
@@ -3495,10 +3499,6 @@ class PaymentDetectionService {
     // ANTI-03: queue LIKELY for merchant confirmation (FIX-D: fully wired)
     if (finalEvent.decision == PaymentDecision.likely) {
       _confirmMgr.add(finalEvent, finalUi);
-      // Re-announce if not confirmed in 12s — but only for non-partial payments
-      if (!finalEvent.isPartialPayment) {
-        _scheduleLikelyReannounce(finalEvent.id, finalEvent.amount, finalEvent.fingerprint);
-      }
     }
 
     // ANTI-07: async bank verification for CONFIRMED
@@ -3509,8 +3509,6 @@ class PaymentDetectionService {
     }
   }
 
-  // Re-announce LIKELY payment after 12s only if not yet confirmed/rejected.
-  // Partial payments excluded — shopkeeper already knows money is pending.
   Future<bool> _tryAutoSettleInvoice(PaymentEvent event) async {
     try {
       if ((event.decision != PaymentDecision.confirmed && event.decision != PaymentDecision.likely) || event.amount <= 0) return false;
@@ -3625,18 +3623,6 @@ class PaymentDetectionService {
     return 'UNPAID';
   }
 
-  void _scheduleLikelyReannounce(String id, double amount, String fingerprint) {
-    _likelyTimers[id]?.cancel();
-    _likelyTimers[id] = Timer(PdsConfig.likelyReannounceAfter, () {
-      _likelyTimers.remove(id);
-      final state = history.findById(id);
-      if (state == null || state.isUserConfirmed || state.isUserRejected) return;
-      final text = VoiceBuilder.stillWaiting(amount, _voiceLanguage);
-      // Pass fingerprint — spoken-set blocks this if SMS already confirmed it
-      _voice.enqueueRaw(text, _VP.soft, fingerprint: '$fingerprint');
-      PdsLogger.i('SVC', 'LIKELY_REANNOUNCE ₹$amount');
-    });
-  }
 
   void _emitFinal(PaymentEvent event) {
     // FIX-D: reuse same id so UI can correlate the update
@@ -3886,7 +3872,10 @@ abstract class _Normaliser {
   static final _ms = RegExp(r' {2,}');
   static String clean(String raw) => raw
       .replaceAll(_ws, ' ')
-      .replaceAll(_dc, r'\1\2')
+      // Dart RegExp replacement strings use $1/$2, not \1/\2.
+      // Use replaceAllMapped to preserve digits and remove Indian/Western
+      // thousands separators without corrupting amounts such as 1,25,000.
+      .replaceAllMapped(_dc, (match) => '${match[1]}${match[2]}')
       .replaceAll(_ms, ' ')
       .trim();
 }
@@ -3929,6 +3918,7 @@ abstract class _Classifier {
     // been announced as a payment RECEIVED. Now tolerant of an amount /
     // currency token appearing in between, bounded to avoid runaway
     // matching across sentence boundaries.
+    r'|(?:\u20b9|rs\.?|inr\.?)\s*[\d,]+(?:\.\d{1,2})?\s+(?:spent|debited|used)\s+(?:at|on)'
     r'|spent\s+(?:(?:\u20b9|rs\.?|inr\.?)\s*[\d,]+(?:\.\d{1,2})?\s+)?at'
     r'|purchase(?:d)?\s+(?:of\s+)?(?:(?:\u20b9|rs\.?|inr\.?)\s*[\d,]+(?:\.\d{1,2})?\s+)?at'
     r'|withdrawn\s+from|withdrawal\s+of|deducted\s+from|charged\s+to'
@@ -3981,7 +3971,7 @@ abstract class _Classifier {
   );
 
   static final _context = RegExp(
-    r'(?:\b(?:received|credited|credit|payment\s+received|payment\s+successful|payment\s+success|successfully\s+received|you\s+got|money\s+received|amount\s+credited|amount\s+received|transferred\s+(?:via\s+[A-Za-z0-9]+\s+)?to|paid\s+to\s+your|deposited|added\s+to\s+(?:your\s+)?(?:\w+\s+)?wallet|success|successful|recd|has\s+sent|sent\s+to\s+your|sent\s+to\s+you|prapt|mila|jama)\b'
+    r'(?:\b(?:received|credited|credit|payment\s+received|payment\s+successful|payment\s+success|successfully\s+received|you\s+got|you\s+received|money\s+received|amount\s+credited|amount\s+received|transferred\s+(?:via\s+[A-Za-z0-9]+\s+)?to|paid\s+(?:you|to\s+you|to\s+your|into\s+your)|sent\s+(?:you|to\s+you|to\s+your|into\s+your)|deposited|added\s+to\s+(?:your\s+)?(?:\w+\s+)?wallet|success|successful|recd|has\s+sent|sent\s+to\s+your|sent\s+to\s+you|prapt|mila|jama)\b'
     // FIX-39: Hindi
     r'|प्राप्त|जमा\s+हो|मिला|प्राप्त\s+हुआ|खाते\s+में\s+जमा'
     // FIX-39: Tamil
@@ -4026,11 +4016,18 @@ abstract class _Classifier {
 
   static bool hasPaymentContext(String t) => _context.hasMatch(t);
 
+  // An unverified notification can be shown as LIKELY only when it says an
+  // incoming credit actually happened, rather than simply mentioning payment.
+  static bool hasIncomingCreditContext(String t) => RegExp(
+        r'(?:\b(?:credited|received|deposited|credit(?:ed)?\s+(?:in|of|to)|payment\s+received|amount\s+credited|money\s+received|funds\s+received|you\s+got|you\s+received|paid\s+(?:you|to\s+you|into\s+your|to\s+your)|sent\s+(?:you|to\s+you|into\s+your|to\s+your)|transferred\s+to\s+your)\b|\bcr\b|खाते\s+में\s+जमा|जमा\s+हो|प्राप्त\s+हुआ|வரவு|பெறப்பட்டது|கணக்கில்\s+வரவு|జమ\s+అయింది|చెల్లింపు\s+వచ్చింది|ಜಮಾ\s+ಆಗಿದೆ|ಪಾವತಿ\s+ಬಂತು|জমা\s+হয়েছে|ലഭിച്ചു)',
+        caseSensitive: false,
+      ).hasMatch(t);
+
   // FIX-57: Multilanguage credit verbs (10 languages, not 5)
   // NOW includes Bengali, Malayalam, Punjabi for regional shops
   static final _creditVerb = RegExp(
     r'(?:\b(?:credited|received|deposited|credit|recd|prapt|mila|jama'
-    r'|has\s+sent|sent\s+to\s+your|paid\s+to\s+your|transferred\s+(?:via\s+[A-Za-z0-9]+\s+)?to'
+    r'|has\s+sent|sent\s+(?:you|to\s+you|to\s+your|into\s+your)|paid\s+(?:you|to\s+you|to\s+your|into\s+your)|transferred\s+(?:via\s+[A-Za-z0-9]+\s+)?to'
     r'|added\s+to\s+(?:your\s+)?(?:\w+\s+)?wallet|successful)\b'
     // Hindi
     r'|प्राप्त|जमा\s+हो|जमा\s+हुआ|खाते\s+में\s+जमा'
