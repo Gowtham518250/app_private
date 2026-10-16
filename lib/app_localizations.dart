@@ -879,8 +879,33 @@ class AppLocalizations {
   };
 
   String translate(String key) {
-    return translations[locale.languageCode]?[key] ?? key;
+    return translations[locale.languageCode]?[key] ??
+        translations['en']?[key] ??
+        key;
   }
+
+  /// Resolves raw English widget text through the bundled catalogue. This lets
+  /// existing Text('Dashboard') calls use curated translations before using the
+  /// online fallback for labels that are not in the catalogue.
+  static String? translateRawText(String rawText, String languageCode) {
+    if (languageCode == 'en') return rawText;
+    final normalized = _normalizeRawText(rawText);
+    if (normalized.isEmpty) return null;
+
+    final english = translations['en'] ?? const <String, String>{};
+    for (final entry in english.entries) {
+      if (_normalizeRawText(entry.value) == normalized) {
+        final localized = translations[languageCode]?[entry.key];
+        if (localized != null && localized.trim().isNotEmpty) {
+          return localized;
+        }
+      }
+    }
+    return null;
+  }
+
+  static String _normalizeRawText(String value) =>
+      value.trim().replaceAll(RegExp(r'\\s+'), ' ').toLowerCase();
 
   String get appTitle => translations[locale.languageCode]?['appTitle'] ?? 'RETAIL MIND';
   String get tagline => translations[locale.languageCode]?['tagline'] ?? 'Smart Analytics & Billing Platform';
@@ -1088,6 +1113,15 @@ class AppLocalizations {
     Locale('te'),
     Locale('hi'),
     Locale('ta'),
+    Locale('kn'),
+    Locale('ml'),
+    Locale('mr'),
+    Locale('bn'),
+    Locale('gu'),
+    Locale('pa'),
+    Locale('or'),
+    Locale('as'),
+    Locale('ur'),
   ];
 
   static const LocalizationsDelegate<AppLocalizations> delegate =
@@ -1100,7 +1134,7 @@ class _AppLocalizationsDelegate
 
   @override
   bool isSupported(Locale locale) {
-    return ['en', 'te', 'hi', 'ta'].contains(locale.languageCode);
+    return ['en', 'te', 'hi', 'ta', 'kn', 'ml', 'mr', 'bn', 'gu', 'pa', 'or', 'as', 'ur'].contains(locale.languageCode);
   }
 
   @override
