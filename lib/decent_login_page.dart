@@ -4,7 +4,8 @@ import 'package:http/http.dart' as http;
 import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart' show kIsWeb, kDebugMode, debugPrint;
-import 'package:flutter/material.dart';
+import 'package:flutter/material.dart' hide Text;
+import 'package:retail_mind/live_localized_text.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
