@@ -3509,8 +3509,6 @@ class PaymentDetectionService {
     }
   }
 
-  // Re-announce LIKELY payment after 12s only if not yet confirmed/rejected.
-  // Partial payments excluded — shopkeeper already knows money is pending.
   Future<bool> _tryAutoSettleInvoice(PaymentEvent event) async {
     try {
       if ((event.decision != PaymentDecision.confirmed && event.decision != PaymentDecision.likely) || event.amount <= 0) return false;
