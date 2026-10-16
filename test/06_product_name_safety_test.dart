@@ -5,25 +5,21 @@ import 'package:retail_mind/sales_dedup_helper.dart';
 void main() {
   group('P1 Product naming regression', () {
     test('real product names are not placeholder values', () {
-      final engine = AnalyticsEngine();
-
       for (final name in [
         'Aashirvaad Atta',
         'Parle-G Biscuits',
         'Tata Salt',
         'Coca Cola 750ml',
       ]) {
-        expect(engine.isPlaceholderProductName(name), isFalse);
+        expect(AnalyticsEngine.isPlaceholderProductName(name), isFalse);
       }
     });
 
     test('sale and invoice IDs are not used as product names by placeholder detector', () {
-      final engine = AnalyticsEngine();
-
-      expect(engine.isPlaceholderProductName('sale-17'), isTrue);
-      expect(engine.isPlaceholderProductName('sale_17'), isTrue);
-      expect(engine.isPlaceholderProductName('invoice_17'), isTrue);
-      expect(engine.isPlaceholderProductName('transaction_17'), isTrue);
+      expect(AnalyticsEngine.isPlaceholderProductName('sale-17'), isTrue);
+      expect(AnalyticsEngine.isPlaceholderProductName('sale_17'), isTrue);
+      expect(AnalyticsEngine.isPlaceholderProductName('invoice_17'), isTrue);
+      expect(AnalyticsEngine.isPlaceholderProductName('transaction_17'), isTrue);
     });
 
     test('identical content fingerprints are deterministic', () {
