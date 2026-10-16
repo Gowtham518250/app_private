@@ -3134,9 +3134,21 @@ class PaymentDetectionService {
       }.contains(app);
 
       if (score < minThreshold) {
-        // FIX-V16-3 retained + strengthened: require structured context
-        if (source == 'notification' && isTrustedApp && amount > 0
-            && _Classifier.hasStructuredPaymentContext(text)) {
+        // Surface a clear incoming-credit notification from an unregistered
+        // package as LIKELY instead of silently losing it. This rescue is
+        // deliberately unavailable to generic payment mentions, debits,
+        // pending notices and promotions; the final decision is also capped
+        // at LIKELY for every unverified package.
+        if (source == 'notification' &&
+            isUnverifiedApp &&
+            amount > 0 &&
+            _Classifier.hasIncomingCreditContext(text)) {
+          score = PdsConfig.likelyThreshold;
+          PdsLogger.w('L7', 'UNVERIFIED_CREDIT_RESCUE → LIKELY ₹$amount');
+        } else if (source == 'notification' &&
+            isTrustedApp &&
+            amount > 0 &&
+            _Classifier.hasStructuredPaymentContext(text)) {
           score = PdsConfig.likelyThreshold;
           PdsLogger.w('L7', 'TRUSTED_APP_RESCUE → LIKELY ₹$amount');
         } else {
