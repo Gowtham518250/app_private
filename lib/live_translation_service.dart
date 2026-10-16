@@ -119,7 +119,6 @@ class LiveTranslationService {
     }
   }
 
-  @visibleForTesting
   static void clearMemoryCacheForTests() {
     _memoryCache.clear();
     _inFlight.clear();
