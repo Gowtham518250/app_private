@@ -2,6 +2,9 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:provider/provider.dart';
+import '../../language_provider.dart';
+import '../../widgets/language_switcher.dart';
 import '../../api_client.dart';
 import 'nearby_shops_page.dart';
 
@@ -58,6 +61,10 @@ class _CustomerLoginPageState extends State<CustomerLoginPage> {
           await prefs.setString('user_type', 'CUSTOMER');
           await prefs.setString('user_name', data['name'] ?? data['user_name'] ?? '');
           await prefs.setString('user_email', _emailController.text.trim());
+          await context.read<LanguageProvider>().bindToAccount(
+            accountType: 'customer',
+            accountId: data['customer_id'] ?? data['user_id'] ?? '',
+          );
           
           if (mounted) {
             Navigator.pushReplacement(
@@ -99,6 +106,11 @@ class _CustomerLoginPageState extends State<CustomerLoginPage> {
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
+                Align(
+                  alignment: Alignment.topRight,
+                  child: LanguageSwitcher(),
+                ),
+                const SizedBox(height: 8),
                 Icon(Icons.shopping_bag_rounded, size: 80, color: Colors.teal.shade600),
                 const SizedBox(height: 16),
                 Text('Retail Mind Market', style: GoogleFonts.poppins(fontSize: 28, fontWeight: FontWeight.bold, color: Colors.teal.shade900)),
