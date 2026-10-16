@@ -1,4 +1,5 @@
-import 'package:flutter/material.dart';
+import 'package:flutter/material.dart' hide Text;
+import 'package:retail_mind/live_localized_text.dart';
 import 'package:flutter/foundation.dart' show kDebugMode, kReleaseMode, debugPrint;
 import 'email_sender_service.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
