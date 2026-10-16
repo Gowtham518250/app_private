@@ -55,6 +55,7 @@ class _DecentLoginPageState extends State<DecentLoginPage>
   @override
   void initState() {
     super.initState();
+    unawaited(context.read<LanguageProvider>().unbindAccount());
     _cardController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 500),
