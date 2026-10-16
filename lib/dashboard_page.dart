@@ -1,4 +1,5 @@
-import 'package:flutter/material.dart';
+import 'package:flutter/material.dart' hide Text;
+import 'package:retail_mind/live_localized_text.dart';
 import 'whatsapp_orders_page.dart';
 import 'marketing_page.dart';
 import 'package:retail_mind/premium_ui.dart';
