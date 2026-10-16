@@ -551,7 +551,7 @@ void main() async {
         // On Android/iOS, the background service owns speech announcements.
         // The UI isolate still processes events for screens, but must not
         // announce the same notification a second time.
-        if (!kIsWeb) return;
+        if (!kIsWeb && await isPaymentBackgroundDetectionActive()) return;
         final lang = appPrefs.getString('payment_sound_lang') ?? 'en-US';
         PaymentAnnouncementService().speakSimple(text, lang);
       };
