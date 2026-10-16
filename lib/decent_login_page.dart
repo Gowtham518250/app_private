@@ -204,6 +204,11 @@ class _DecentLoginPageState extends State<DecentLoginPage>
           deviceId: deviceId,
         );
 
+        await context.read<LanguageProvider>().bindToAccount(
+          accountType: role.toLowerCase() == 'worker' ? 'worker' : 'owner',
+          accountId: userId,
+        );
+
         final prefs = await SharedPreferences.getInstance();
         if (data['shop_name'] != null) {
           await prefs.setString('shop_name', data['shop_name'].toString());
