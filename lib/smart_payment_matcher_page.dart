@@ -1,4 +1,5 @@
-import 'package:flutter/material.dart';
+import 'package:flutter/material.dart' hide Text;
+import 'package:retail_mind/live_localized_text.dart';
 import 'payment_detection_system.dart';
 import 'payment_confirmation_dialog.dart';
 import 'smart_payment_matcher_service.dart';
