@@ -17,5 +17,9 @@ void main() {
 
     // Verify that the app builds without crashing.
     expect(find.byType(MaterialApp), findsOneWidget);
+
+    // Explicitly unmount the app so its lifecycle-owned session timer and
+    // services are disposed before flutter_test checks for pending timers.
+    await tester.pumpWidget(const SizedBox.shrink());
   });
 }
