@@ -1,4 +1,5 @@
-import 'package:flutter/material.dart';
+import 'package:flutter/material.dart' hide Text;
+import 'package:retail_mind/live_localized_text.dart';
 import 'package:geolocator/geolocator.dart';
 import '../../api_client.dart';
 import 'dart:convert';
