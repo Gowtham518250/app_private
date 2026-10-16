@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -5,6 +7,25 @@ plugins {
     id("dev.flutter.flutter-gradle-plugin")
     id("com.google.gms.google-services")  // Google Services plugin for Firebase
 }
+
+// Release credentials must come from android/key.properties (gitignored) or
+// environment variables. Never store passwords or a developer-specific keystore
+// path in the repository.
+val releaseKeyPropertiesFile = rootProject.file("key.properties")
+val releaseKeyProperties = Properties().apply {
+    if (releaseKeyPropertiesFile.exists()) {
+        releaseKeyPropertiesFile.inputStream().use { load(it) }
+    }
+}
+
+fun releaseSetting(environmentName: String, propertyName: String): String? =
+    System.getenv(environmentName)?.takeIf { it.isNotBlank() }
+        ?: releaseKeyProperties.getProperty(propertyName)?.takeIf { it.isNotBlank() }
+
+val releaseStoreFilePath = releaseSetting("ANDROID_KEYSTORE_PATH", "storeFile")
+val releaseStorePassword = releaseSetting("ANDROID_KEYSTORE_PASSWORD", "storePassword")
+val releaseKeyAlias = releaseSetting("ANDROID_KEY_ALIAS", "keyAlias")
+val releaseKeyPassword = releaseSetting("ANDROID_KEY_PASSWORD", "keyPassword")
 
 android {
     namespace = "com.retailmind.app"
@@ -30,10 +51,14 @@ android {
 
     signingConfigs {
         create("release") {
-            storeFile = file(System.getProperty("user.home") + "/retail_mind_release.jks")
-            storePassword = "retail_mind_2026"
-            keyAlias = "retail_mind_key"
-            keyPassword = "retail_mind_2026"
+            // Missing secrets deliberately leave the release build unconfigured;
+            // provide them locally via android/key.properties or in CI secrets.
+            if (!releaseStoreFilePath.isNullOrBlank()) {
+                storeFile = file(releaseStoreFilePath)
+            }
+            storePassword = releaseStorePassword ?: ""
+            keyAlias = releaseKeyAlias ?: ""
+            keyPassword = releaseKeyPassword ?: ""
         }
     }
 
