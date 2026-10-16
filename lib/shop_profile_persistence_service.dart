@@ -76,6 +76,31 @@ class ShopProfilePersistenceService {
       await prefs.setString(scopedCacheKey, json.encode(profile));
       await prefs.setString(scopedLastSyncKey, DateTime.now().toIso8601String());
       await prefs.setInt(scopedVersionKey, DateTime.now().millisecondsSinceEpoch);
+
+      // Apply the UPI field immediately as well as caching the profile. The
+      // initial save path is often offline or returns a nested {profile: ...}
+      // response; waiting for the next profile restore made the UPI ID appear
+      // blank on the first visit to payment settings.
+      final rawProfile = profile['profile'];
+      final shopData = rawProfile is Map
+          ? Map<String, dynamic>.from(rawProfile)
+          : profile;
+      final rawSettings = profile['settings'];
+      final settings = rawSettings is Map
+          ? Map<String, dynamic>.from(rawSettings)
+          : <String, dynamic>{};
+      final rawUpiId = shopData['primary_upi_id'] ??
+          shopData['upi_id'] ??
+          shopData['upi'] ??
+          settings['primary_upi_id'] ??
+          settings['upi_id'] ??
+          settings['upi'];
+      if (rawUpiId != null) {
+        final upiId = rawUpiId.toString().trim();
+        await prefs.setString('primary_upi_id', upiId);
+        await prefs.setString('upi_id', upiId);
+        await SecurePreferencesService.setUpiId(upiId);
+      }
       
       if (kDebugMode) debugPrint('💾 Shop profile saved locally (user-isolated)');
     } catch (e) {
