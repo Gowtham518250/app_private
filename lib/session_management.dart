@@ -42,9 +42,15 @@ class SessionManagementService {
   static Timer? _sessionExpiryTimer;
   static const Duration _sessionCheckInterval = Duration(hours: 1);
   static const Duration _maxSessionDuration = Duration(days: 7);
+  // Refresh the rotating seven-day refresh token before it expires. Waiting
+  // until _maxSessionDuration is crossed is too late for the backend's TTL.
+  static const Duration _refreshBeforeExpiry = Duration(hours: 12);
 
   static void startSessionExpiryMonitoring() {
     _sessionExpiryTimer?.cancel();
+    // Run once immediately: otherwise a user opening the app shortly before
+    // the refresh token expires could wait an hour for the first timer tick.
+    unawaited(_checkAndHandleSessionExpiry());
     _sessionExpiryTimer = Timer.periodic(_sessionCheckInterval, (_) async {
       await _checkAndHandleSessionExpiry();
     });
@@ -71,28 +77,42 @@ class SessionManagementService {
       final now = DateTime.now();
       final sessionAge = now.difference(sessionDateTime);
 
-      if (sessionAge > _maxSessionDuration) {
-        // Refresh first rather than logging the user out solely because the
-        // local access-token age crossed seven days. A revoked/expired refresh
-        // token is cleared by autoLogin and will still trigger secure logout.
+      final refreshDueAt = _maxSessionDuration - _refreshBeforeExpiry;
+      if (sessionAge >= refreshDueAt) {
         final refreshToken = await SecureTokenStorage.getRefreshToken();
+        var refreshTokenRejected = false;
+
         if (refreshToken != null && refreshToken.isNotEmpty) {
           final refreshed = await autoLogin().timeout(
             const Duration(seconds: 12),
             onTimeout: () => null,
           );
           if (refreshed?['success'] == true) {
-            if (kDebugMode) debugPrint('🔔 Expired local session renewed with refresh token');
+            if (kDebugMode) debugPrint('🔔 Session proactively renewed before refresh-token expiry');
             return;
           }
 
-          // Do not destroy credentials on a timeout/5xx. Retry on the next
-          // health interval; an invalid refresh token has already been cleared.
+          // A transient network/5xx/timeout failure leaves the refresh token
+          // intact. Retry at the next health tick; never sign out due only to
+          // a temporary backend outage.
           final remainingRefreshToken = await SecureTokenStorage.getRefreshToken();
           if (remainingRefreshToken != null && remainingRefreshToken.isNotEmpty) {
             if (kDebugMode) debugPrint('🔔 Session refresh unavailable; retaining tokens for a later retry');
             return;
           }
+
+          // autoLogin clears secure credentials for a rejected/revoked token.
+          refreshTokenRejected = true;
+        } else if (sessionAge <= _maxSessionDuration) {
+          // Older installs may not have a refresh token. Keep an otherwise
+          // valid local session until its existing seven-day limit, but do not
+          // pretend it has been extended.
+          if (kDebugMode) debugPrint('🔔 No refresh token available yet; retaining session until local expiry');
+          return;
+        }
+
+        if (sessionAge <= _maxSessionDuration && !refreshTokenRejected) {
+          return;
         }
 
         final connectivityResult = await Connectivity().checkConnectivity();
