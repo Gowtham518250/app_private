@@ -1,4 +1,5 @@
-import 'package:flutter/material.dart';
+import 'package:flutter/material.dart' hide Text;
+import 'package:retail_mind/live_localized_text.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:provider/provider.dart';
@@ -157,7 +158,7 @@ class _LanguageDialog extends StatelessWidget {
   Widget build(BuildContext context) {
     return AlertDialog(
       title: Text(
-        'Select Language / భాష ఎంచుకోండి',
+        'Select Language',
         style: GoogleFonts.poppins(fontWeight: FontWeight.bold),
       ),
       content: SizedBox(
