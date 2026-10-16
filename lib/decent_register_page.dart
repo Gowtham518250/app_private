@@ -195,6 +195,13 @@ class _DecentRegisterPageState extends State<DecentRegisterPage>
           return;
         }
 
+        await context.read<LanguageProvider>().bindToAccount(
+          accountType: (authData['role']?.toString() ?? 'OWNER').toLowerCase() == 'worker'
+              ? 'worker'
+              : 'owner',
+          accountId: userId,
+        );
+
         final prefs = await SharedPreferences.getInstance();
         if (shopName.isNotEmpty) {
           await prefs.setString('shop_name', shopName);
