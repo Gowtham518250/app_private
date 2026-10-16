@@ -1,4 +1,5 @@
-import 'package:flutter/material.dart';
+import 'package:flutter/material.dart' hide Text;
+import 'package:retail_mind/live_localized_text.dart';
 import 'hybrid_payment_pipeline.dart';
 import 'payment_event.dart';
 import 'smart_payment_matcher_service.dart';
