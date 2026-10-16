@@ -1,4 +1,5 @@
-﻿import 'package:flutter/material.dart';
+﻿import 'package:flutter/material.dart' hide Text;
+import 'package:retail_mind/live_localized_text.dart';
 
 class QrScannerPage extends StatelessWidget {
   const QrScannerPage({super.key});
