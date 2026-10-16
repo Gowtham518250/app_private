@@ -1,7 +1,8 @@
 /// 🎨 UI ENHANCEMENTS - Safe widgets for 90+/100 rating
 /// No logic changes - pure UI improvements
 
-import 'package:flutter/material.dart';
+import 'package:flutter/material.dart' hide Text;
+import 'package:retail_mind/live_localized_text.dart';
 
 /// ### 5️⃣ PROFIT MARGIN DISPLAY WIDGET
 class ProfitMarginDisplay extends StatelessWidget {
