@@ -905,7 +905,7 @@ class AppLocalizations {
   }
 
   static String _normalizeRawText(String value) =>
-      value.trim().replaceAll(RegExp(r'\\s+'), ' ').toLowerCase();
+      value.trim().replaceAll(RegExp(r'\s+'), ' ').toLowerCase();
 
   String get appTitle => translations[locale.languageCode]?['appTitle'] ?? 'RETAIL MIND';
   String get tagline => translations[locale.languageCode]?['tagline'] ?? 'Smart Analytics & Billing Platform';
