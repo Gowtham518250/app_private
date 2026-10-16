@@ -18,21 +18,41 @@ class AdaptiveServiceManager {
   static final AdaptiveServiceManager instance = AdaptiveServiceManager._();
 
   bool _initialized = false;
+  bool _initializing = false;
+  bool _stopRequested = false;
 
   Future<void> initialize() async {
-    if (_initialized) return;
+    if (_initialized || _initializing) return;
+    _initializing = true;
+    _stopRequested = false;
     try {
       await SyncService.init();
+
+      // The service starts its pulse timer before its initial network sync
+      // completes. The root widget can be disposed during that await (tests,
+      // hot restart, or teardown), so honour a stop request before declaring
+      // the manager fully initialized.
+      if (_stopRequested) {
+        await SyncService.dispose();
+        return;
+      }
+
       _initialized = true;
       if (kDebugMode) debugPrint('✅ AdaptiveServiceManager: services started');
     } catch (e) {
       if (kDebugMode) debugPrint('⚠️ AdaptiveServiceManager.initialize failed: $e');
+    } finally {
+      _initializing = false;
     }
   }
 
   void stopAllServices() {
-    if (!_initialized) return;
+    _stopRequested = true;
+    if (!_initialized && !_initializing) return;
     try {
+      // Do not gate this on _initialized: SyncService.init() starts its timer
+      // before awaiting network work, while this flag is set only afterwards.
+      // Always cancel in-progress startup as early as possible.
       SyncService.dispose();
     } catch (e) {
       if (kDebugMode) debugPrint('⚠️ AdaptiveServiceManager.stopAllServices failed: $e');
