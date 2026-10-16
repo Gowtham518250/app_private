@@ -60,8 +60,7 @@ import 'payment_announcement_service.dart';
 import 'online_store_service.dart';
 import 'online_order_service.dart';
 import 'low_stock_alerts_service.dart';
-import 'payment_detection_service.dart' hide PaymentDecision;
-import 'payment_detection_service.dart' as payment_detection;
+import 'payment_detection_service.dart';
 import 'package:record/record.dart' as record;
 import 'package:path/path.dart' as p;
 import 'package:audioplayers/audioplayers.dart';
@@ -80,7 +79,8 @@ import 'tally_export_service.dart';
 import 'package:local_auth/local_auth.dart';
 import 'format_helper.dart';
 import 'user_data_clear_service.dart';
-import 'payment_event.dart';
+import 'payment_event.dart' hide PaymentDecision;
+import 'payment_event.dart' as payment_event;
 import 'notification_service.dart';
 import 'inventory_management_service.dart';
 import 'retail_intelligence_page.dart';
@@ -539,7 +539,7 @@ class _DashboardPageState extends State<DashboardPage>
       // Never mutate invoice money for a LIKELY notification. The detection
       // engine requires an independent confirmation anchor; only CONFIRMED
       // events may automatically settle or partially settle an invoice.
-      if (event.decision != payment_detection.PaymentDecision.confirmed) return;
+      if (event.decision != payment_event.PaymentDecision.confirmed) return;
       final amount = (event.amount as num?)?.toDouble() ?? 0.0;
       if (amount <= 0) return;
       final rawInvoices = await LocalStorageService.loadLocalInvoices();
