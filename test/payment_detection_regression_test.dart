@@ -56,6 +56,14 @@ void main() {
         ),
         isFalse,
       );
+      expect(
+        PaymentDetectionService.debugClassify('Rahul sent you ₹500'),
+        'passed',
+      );
+      expect(
+        PaymentDetectionService.debugHasIncomingCreditContext('Rahul sent you ₹500'),
+        isTrue,
+      );
     });
   });
 }
