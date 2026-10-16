@@ -159,8 +159,10 @@ class LanguageProvider extends ChangeNotifier {
             '')
         .trim()
         .toLowerCase();
+    final userType = (prefs.getString('user_type') ?? '').trim().toLowerCase();
 
-    if (role == 'customer' || prefs.containsKey('customer_id')) {
+    if (role == 'customer' || userType == 'customer' ||
+        prefs.containsKey('customer_id')) {
       final customerId = prefs.getString('customer_id') ??
           prefs.getInt('customer_id')?.toString();
       if (customerId != null && customerId.trim().isNotEmpty &&
