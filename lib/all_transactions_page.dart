@@ -1,4 +1,5 @@
-import 'package:flutter/material.dart';
+import 'package:flutter/material.dart' hide Text;
+import 'package:retail_mind/live_localized_text.dart';
 import 'dart:convert';
 import 'whatsapp_message_service.dart';
 import 'package:shared_preferences/shared_preferences.dart';
