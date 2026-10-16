@@ -14,6 +14,7 @@ class LanguageProvider extends ChangeNotifier {
   Locale _locale = const Locale('en');
   String? _activeAccountKey;
   bool _disposed = false;
+  bool _explicitSelectionPendingAccountBinding = false;
   int _loadGeneration = 0;
 
   Locale get locale => _locale;
@@ -71,6 +72,12 @@ class LanguageProvider extends ChangeNotifier {
   Future<void> setLanguage(String languageCode) async {
     if (!supports(languageCode)) return;
     ++_loadGeneration; // Prevent a late initial load overwriting the selection.
+    if (_activeAccountKey == null) {
+      // A choice made on the login screen must take precedence when the next
+      // authenticated account is bound, even if that account has an older
+      // language preference saved from a previous session.
+      _explicitSelectionPendingAccountBinding = true;
+    }
     _locale = Locale(languageCode);
     notifyListeners();
 
@@ -82,6 +89,7 @@ class LanguageProvider extends ChangeNotifier {
         '$_accountLanguagePrefix$_activeAccountKey',
         languageCode,
       );
+      _explicitSelectionPendingAccountBinding = false;
     }
   }
 
@@ -100,22 +108,29 @@ class LanguageProvider extends ChangeNotifier {
     }
 
     final accountKey = '${normalizedType}_${normalizedId}';
-    if (_activeAccountKey == accountKey) return;
+    if (_activeAccountKey == accountKey &&
+        !_explicitSelectionPendingAccountBinding) {
+      return;
+    }
     ++_loadGeneration;
 
     final prefs = await SharedPreferences.getInstance();
     final saved = prefs.getString('$_accountLanguagePrefix$accountKey');
+    final explicitlySelected = _explicitSelectionPendingAccountBinding
+        ? _locale.languageCode
+        : null;
     final languageCode = _supportedOrEnglish(
-      saved ?? prefs.getString(_deviceLanguageKey) ??
+      explicitlySelected ?? saved ?? prefs.getString(_deviceLanguageKey) ??
           prefs.getString(_legacyLanguageKey) ?? _locale.languageCode,
     );
 
     _activeAccountKey = accountKey;
     _locale = Locale(languageCode);
     // A first-time account inherits the currently selected language.
-    if (saved == null) {
+    if (saved == null || explicitlySelected != null) {
       await prefs.setString('$_accountLanguagePrefix$accountKey', languageCode);
     }
+    _explicitSelectionPendingAccountBinding = false;
     await prefs.setString(_deviceLanguageKey, languageCode);
     await prefs.setString(_legacyLanguageKey, languageCode);
     notifyListeners();
