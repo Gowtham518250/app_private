@@ -6,11 +6,11 @@ void main() {
     test('placeholder product names are detected', () {
       final engine = AnalyticsEngine();
 
-      expect(engine.isPlaceholderProductName('Product'), isTrue);
-      expect(engine.isPlaceholderProductName('Unknown'), isTrue);
-      expect(engine.isPlaceholderProductName('sale_123'), isTrue);
-      expect(engine.isPlaceholderProductName('invoice_77'), isTrue);
-      expect(engine.isPlaceholderProductName('Aashirvaad Atta'), isFalse);
+      expect(AnalyticsEngine.isPlaceholderProductName('Product'), isTrue);
+      expect(AnalyticsEngine.isPlaceholderProductName('Unknown'), isTrue);
+      expect(AnalyticsEngine.isPlaceholderProductName('sale_123'), isTrue);
+      expect(AnalyticsEngine.isPlaceholderProductName('invoice_77'), isTrue);
+      expect(AnalyticsEngine.isPlaceholderProductName('Aashirvaad Atta'), isFalse);
     });
 
     test('same sale data produces expected lifetime totals', () {
