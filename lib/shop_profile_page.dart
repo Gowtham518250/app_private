@@ -19,6 +19,7 @@ import 'qr_scanner_page.dart';
 import 'retail_growth_kit.dart';
 import 'api_client.dart';
 import 'secure_token_storage.dart';
+import 'secure_preferences_service.dart';
 import 'validation_helper.dart';
 import 'shop_profile_persistence_service.dart';
 
@@ -61,7 +62,18 @@ class _ShopProfilePageState extends State<ShopProfilePage> {
     final prefs = await SharedPreferences.getInstance();
     final biometricAvailable = await SecurityService.isBiometricHardwareAvailable();
     final biometricEnabled = await SecurityService.isBiometricEnabled();
+    String? secureUpiId;
+    try {
+      secureUpiId = await SecurePreferencesService.getUpiId();
+    } catch (e) {
+      if (kDebugMode) debugPrint('Secure UPI lookup failed; using profile cache: $e');
+    }
+    final cachedUpiId =
+        (prefs.getString('primary_upi_id') ?? prefs.getString('upi_id') ?? '').trim();
+    final initialUpiId =
+        cachedUpiId.isNotEmpty ? cachedUpiId : (secureUpiId ?? '');
 
+    if (!mounted) return;
     setState(() {
       shopNameController.text = prefs.getString('shop_name') ?? '';
       locationController.text = prefs.getString('location') ?? '';
@@ -70,7 +82,7 @@ class _ShopProfilePageState extends State<ShopProfilePage> {
       websiteController.text = prefs.getString('website') ?? '';
       playStoreUrlController.text = prefs.getString(RetailGrowthKit.kPlayStoreHint) ?? '';
       taglineController.text = prefs.getString('shop_tagline') ?? prefs.getString('tagline') ?? '';  // 🔧 Try backend key first
-      upiIdController.text = prefs.getString('primary_upi_id') ?? prefs.getString('upi_id') ?? '';  // 🔧 Try backend key first
+      upiIdController.text = initialUpiId; // Prefer shared profile cache; fall back to encrypted payment settings.
       gstController.text = prefs.getString('shop_gst') ?? prefs.getString('gst_number') ?? '';
       _scannedStateCode = prefs.getString('state') ?? prefs.getString('shop_state');  // 🔧 Try backend key first
       
@@ -164,8 +176,16 @@ class _ShopProfilePageState extends State<ShopProfilePage> {
     await prefs.setString('website', websiteController.text.trim());
     await prefs.setString(RetailGrowthKit.kPlayStoreHint, playStoreUrlController.text.trim());
     await prefs.setString('shop_tagline', taglineController.text.trim());
-    await prefs.setString('primary_upi_id', upiIdController.text.trim());
-    await prefs.setString('upi_id', upiIdController.text.trim()); // 🔧 Backwards compatibility
+    final upiId = upiIdController.text.trim();
+    await prefs.setString('primary_upi_id', upiId);
+    await prefs.setString('upi_id', upiId); // Backwards compatibility.
+    try {
+      // Payment detection and QR/payment flows use the encrypted setting.
+      // Keep it in sync with the editable shop profile on the very first save.
+      await SecurePreferencesService.setUpiId(upiId);
+    } catch (e) {
+      if (kDebugMode) debugPrint('Could not sync UPI ID to secure payment storage: $e');
+    }
     await prefs.setString('shop_gst', gstController.text.trim());
     await prefs.setString('gst_number', gstController.text.trim());
 
@@ -204,7 +224,7 @@ class _ShopProfilePageState extends State<ShopProfilePage> {
         },
       ).timeout(const Duration(seconds: 12));
 
-      if (kDebugMode) debugPrint('📥 Backend response: ${resp.statusCode} - ${resp.body}');
+      if (kDebugMode) debugPrint('📥 Shop profile response status: ${resp.statusCode}');
 
       if (resp.statusCode != 200) {
         if (kDebugMode) debugPrint('⚠️ Backend load failed with status ${resp.statusCode}');
