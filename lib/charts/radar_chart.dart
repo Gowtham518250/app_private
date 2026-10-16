@@ -2,7 +2,8 @@
 /// Most sold products by QUANTITY — spider web polygon radar
 /// Dark premium card with glowing fills + horizontal bar legend
 
-import 'package:flutter/material.dart';
+import 'package:flutter/material.dart' hide Text;
+import 'package:retail_mind/live_localized_text.dart';
 import 'package:flutter/foundation.dart';
 import 'package:fl_chart/fl_chart.dart';
 import 'package:google_fonts/google_fonts.dart';
