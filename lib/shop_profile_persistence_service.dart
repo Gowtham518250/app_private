@@ -109,17 +109,25 @@ class ShopProfilePersistenceService {
       // Be tolerant of flat, wrapped, and {data: {profile, settings}} payloads.
       // The freshly-entered UPI value should not be lost just because the API
       // response uses a different envelope shape.
-      final rawUpiId = shopData['primary_upi_id'] ??
-          shopData['upi_id'] ??
-          shopData['upi'] ??
-          profile['primary_upi_id'] ??
-          profile['upi_id'] ??
-          profile['upi'] ??
-          settings['primary_upi_id'] ??
-          settings['upi_id'] ??
-          settings['upi'];
-      if (rawUpiId != null) {
-        final upiId = rawUpiId.toString().trim();
+      String? upiId;
+      for (final candidate in <dynamic>[
+        shopData['primary_upi_id'],
+        shopData['upi_id'],
+        shopData['upi'],
+        profile['primary_upi_id'],
+        profile['upi_id'],
+        profile['upi'],
+        settings['primary_upi_id'],
+        settings['upi_id'],
+        settings['upi'],
+      ]) {
+        final value = candidate?.toString().trim() ?? '';
+        if (value.isNotEmpty) {
+          upiId = value;
+          break;
+        }
+      }
+      if (upiId != null) {
         await prefs.setString('primary_upi_id', upiId);
         await prefs.setString('upi_id', upiId);
         await SecurePreferencesService.setUpiId(upiId);
@@ -473,17 +481,25 @@ class ShopProfilePersistenceService {
         if (shopData['shop_tagline'] != null || shopData['tagline'] != null) {
           await prefs.setString('shop_tagline', (shopData['shop_tagline'] ?? shopData['tagline']).toString());
         }
-        final rawUpiId = shopData['primary_upi_id'] ??
-            shopData['upi_id'] ??
-            shopData['upi'] ??
-            profile['primary_upi_id'] ??
-            profile['upi_id'] ??
-            profile['upi'] ??
-            settings['primary_upi_id'] ??
-            settings['upi_id'] ??
-            settings['upi'];
-        if (rawUpiId != null) {
-          final upiId = rawUpiId.toString().trim();
+        String? upiId;
+        for (final candidate in <dynamic>[
+          shopData['primary_upi_id'],
+          shopData['upi_id'],
+          shopData['upi'],
+          profile['primary_upi_id'],
+          profile['upi_id'],
+          profile['upi'],
+          settings['primary_upi_id'],
+          settings['upi_id'],
+          settings['upi'],
+        ]) {
+          final value = candidate?.toString().trim() ?? '';
+          if (value.isNotEmpty) {
+            upiId = value;
+            break;
+          }
+        }
+        if (upiId != null) {
           await prefs.setString('primary_upi_id', upiId);
           await prefs.setString('upi_id', upiId);
           // Keep the encrypted value in sync with backend restores as well as
