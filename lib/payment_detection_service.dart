@@ -1978,6 +1978,10 @@ class PaymentDetectionService {
     return _Classifier.classify(text).name;
   }
 
+  @visibleForTesting
+  static bool debugHasIncomingCreditContext(String rawText) =>
+      _Classifier.hasIncomingCreditContext(_Normaliser.clean(rawText));
+
   /// Extracts the amount the same way the live pipeline does. Returns null
   /// if no confident amount was found (e.g. balance-only messages, or
   /// messages below PdsConfig.minAmount).
@@ -3337,10 +3341,19 @@ class PaymentDetectionService {
       }
 
       final isPartial = billResult == BillMatchResult.partial && !isBillSettled;
-      // Partial payments always stay LIKELY
-      final finalDecision = (isPartial && decision == PaymentDecision.confirmed)
-          ? PaymentDecision.likely
-          : decision;
+      // Never automatically confirm a payment inferred from an unregistered
+      // app, even if a notification happens to contain a reference-looking ID.
+      // The merchant can review/confirm it manually after matching the bank
+      // account or the real transaction reference.
+      if (isUnverifiedApp && decision == PaymentDecision.confirmed) {
+        decision = PaymentDecision.likely;
+        PdsLogger.w('L9', 'Unverified app payment capped at LIKELY ₹$amount');
+      }
+      // Partial payments and unverified sources always remain LIKELY.
+      final finalDecision =
+          ((isPartial || isUnverifiedApp) && decision == PaymentDecision.confirmed)
+              ? PaymentDecision.likely
+              : decision;
 
       final event = tempEvent.copyWith(
         id:               matched?.event.id,
