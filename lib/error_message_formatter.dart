@@ -1,4 +1,5 @@
-import 'package:flutter/material.dart';
+import 'package:flutter/material.dart' hide Text;
+import 'package:retail_mind/live_localized_text.dart';
 
 /// 🎯 User-friendly error message formatter
 /// Converts technical errors to shop owner-friendly messages
