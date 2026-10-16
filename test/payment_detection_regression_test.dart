@@ -44,6 +44,18 @@ void main() {
         ),
         'passed',
       );
+      expect(
+        PaymentDetectionService.debugHasIncomingCreditContext(
+          'Received INR 1,25,000.00 in your account',
+        ),
+        isTrue,
+      );
+      expect(
+        PaymentDetectionService.debugHasIncomingCreditContext(
+          'Your payment is pending; please pay Rs. 1,250',
+        ),
+        isFalse,
+      );
     });
   });
 }
