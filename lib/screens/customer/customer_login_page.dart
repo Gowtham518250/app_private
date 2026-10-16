@@ -1,5 +1,7 @@
+import 'dart:async';
 import 'dart:convert';
-import 'package:flutter/material.dart';
+import 'package:flutter/material.dart' hide Text;
+import 'package:retail_mind/live_localized_text.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:provider/provider.dart';
@@ -18,6 +20,14 @@ class CustomerLoginPage extends StatefulWidget {
 class _CustomerLoginPageState extends State<CustomerLoginPage> {
   bool _isLogin = true;
   bool _isLoading = false;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) unawaited(context.read<LanguageProvider>().unbindAccount());
+    });
+  }
   
   final _nameController = TextEditingController();
   final _emailController = TextEditingController();
