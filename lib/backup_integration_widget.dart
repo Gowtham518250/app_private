@@ -3,7 +3,8 @@
 /// Drop this into dashboard_page.dart to add backup/restore UI
 /// Integrates BackupService with dashboard maintenance section
 
-import 'package:flutter/material.dart';
+import 'package:flutter/material.dart' hide Text;
+import 'package:retail_mind/live_localized_text.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'backup_service.dart';
 
