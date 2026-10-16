@@ -77,10 +77,8 @@ class Text extends m.StatelessWidget {
   @override
   m.Widget build(m.BuildContext context) {
     if (textSpan != null) {
-      // Preserve rich styling and recognizers; simple Text widgets get full
-      // live translation. Rich spans remain safe if they contain widgets.
-      return m.Text.rich(
-        textSpan!,
+      return _LiveTranslationRichText(
+        textSpan: textSpan!,
         style: style,
         strutStyle: strutStyle,
         textAlign: textAlign,
@@ -114,6 +112,126 @@ class Text extends m.StatelessWidget {
       selectionColor: selectionColor,
     );
   }
+}
+
+
+/// RichText-compatible translator. It translates each TextSpan independently,
+/// retaining styling and recognizers. WidgetSpan content is left untouched.
+class _LiveTranslationRichText extends m.StatefulWidget {
+  const _LiveTranslationRichText({
+    required this.textSpan,
+    this.style,
+    this.strutStyle,
+    this.textAlign,
+    this.textDirection,
+    this.locale,
+    this.softWrap,
+    this.overflow,
+    this.textScaler,
+    this.maxLines,
+    this.semanticsLabel,
+    this.textWidthBasis,
+    this.textHeightBehavior,
+    this.selectionColor,
+  });
+
+  final m.InlineSpan textSpan;
+  final m.TextStyle? style;
+  final m.StrutStyle? strutStyle;
+  final m.TextAlign? textAlign;
+  final m.TextDirection? textDirection;
+  final m.Locale? locale;
+  final bool? softWrap;
+  final m.TextOverflow? overflow;
+  final m.TextScaler? textScaler;
+  final int? maxLines;
+  final String? semanticsLabel;
+  final m.TextWidthBasis? textWidthBasis;
+  final m.TextHeightBehavior? textHeightBehavior;
+  final m.Color? selectionColor;
+
+  @override
+  m.State<_LiveTranslationRichText> createState() =>
+      _LiveTranslationRichTextState();
+}
+
+class _LiveTranslationRichTextState
+    extends m.State<_LiveTranslationRichText> {
+  late m.InlineSpan _displaySpan;
+  int _generation = 0;
+  String? _lastLanguage;
+  m.InlineSpan? _lastInputSpan;
+
+  @override
+  void initState() {
+    super.initState();
+    _displaySpan = widget.textSpan;
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _refresh();
+  }
+
+  @override
+  void didUpdateWidget(covariant _LiveTranslationRichText oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.textSpan != widget.textSpan ||
+        oldWidget.locale != widget.locale) {
+      _refresh();
+    }
+  }
+
+  Future<m.InlineSpan> _translateSpan(
+    m.InlineSpan span,
+    String languageCode,
+  ) async {
+    if (languageCode == 'en' || span is! m.TextSpan) return span;
+
+    final translatedText = span.text == null
+        ? null
+        : await LiveTranslationService.translate(span.text!, languageCode);
+    final children = <m.InlineSpan>[];
+    for (final child in span.children ?? const <m.InlineSpan>[]) {
+      children.add(await _translateSpan(child, languageCode));
+    }
+    return span.copyWith(text: translatedText, children: children);
+  }
+
+  Future<void> _refresh() async {
+    final languageCode = widget.locale?.languageCode ??
+        m.Localizations.localeOf(context).languageCode;
+    if (_lastLanguage == languageCode &&
+        identical(_lastInputSpan, widget.textSpan)) {
+      return;
+    }
+
+    _lastLanguage = languageCode;
+    _lastInputSpan = widget.textSpan;
+    final generation = ++_generation;
+    final translated = await _translateSpan(widget.textSpan, languageCode);
+    if (!mounted || generation != _generation) return;
+    setState(() => _displaySpan = translated);
+  }
+
+  @override
+  m.Widget build(m.BuildContext context) => m.Text.rich(
+        _displaySpan,
+        style: widget.style,
+        strutStyle: widget.strutStyle,
+        textAlign: widget.textAlign,
+        textDirection: widget.textDirection,
+        locale: widget.locale,
+        softWrap: widget.softWrap,
+        overflow: widget.overflow,
+        textScaler: widget.textScaler,
+        maxLines: widget.maxLines,
+        semanticsLabel: widget.semanticsLabel,
+        textWidthBasis: widget.textWidthBasis,
+        textHeightBehavior: widget.textHeightBehavior,
+        selectionColor: widget.selectionColor,
+      );
 }
 
 class _LiveTranslationText extends m.StatefulWidget {
