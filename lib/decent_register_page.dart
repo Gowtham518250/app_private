@@ -135,8 +135,11 @@ class _DecentRegisterPageState extends State<DecentRegisterPage>
 
         if (token.isEmpty || refreshToken.isEmpty) {
           if (mounted) {
-            setState(() => errorMessage =
-                'Your account was created, but secure sign-in could not be completed because the server did not issue both session tokens. Please sign in again.');
+            setState(() {
+              errorMessage =
+                  'Your account was created, but secure sign-in could not be completed because the server did not issue both session tokens. Please sign in again.';
+              isLoading = false;
+            });
           }
           return;
         }
@@ -159,8 +162,11 @@ class _DecentRegisterPageState extends State<DecentRegisterPage>
         }
         if (userId <= 0) {
           if (mounted) {
-            setState(() => errorMessage =
-                'Your account was created, but the server returned no valid user ID. Please sign in again.');
+            setState(() {
+              errorMessage =
+                  'Your account was created, but the server returned no valid user ID. Please sign in again.';
+              isLoading = false;
+            });
           }
           return;
         }
@@ -180,8 +186,11 @@ class _DecentRegisterPageState extends State<DecentRegisterPage>
             await SecureTokenStorage.getRefreshToken() != refreshToken) {
           await SessionManagementService.clearTokens();
           if (mounted) {
-            setState(() => errorMessage =
-                'Your account was created, but this device could not save the secure session. Please sign in again.');
+            setState(() {
+              errorMessage =
+                  'Your account was created, but this device could not save the secure session. Please sign in again.';
+              isLoading = false;
+            });
           }
           return;
         }
