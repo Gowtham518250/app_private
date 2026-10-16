@@ -91,10 +91,18 @@ class ShopProfilePersistenceService {
         (value) => value is Map,
         orElse: () => profile,
       );
-      final shopData = rawProfile is Map
+      final envelopeData = rawProfile is Map
           ? Map<String, dynamic>.from(rawProfile)
           : profile;
-      final rawSettings = profile['settings'] ?? shopData['settings'];
+      final rawNestedShop = envelopeData['profile'] ??
+          envelopeData['shop_profile'] ??
+          envelopeData['shop'];
+      final shopData = rawNestedShop is Map
+          ? Map<String, dynamic>.from(rawNestedShop)
+          : envelopeData;
+      final rawSettings = profile['settings'] ??
+          envelopeData['settings'] ??
+          shopData['settings'];
       final settings = rawSettings is Map
           ? Map<String, dynamic>.from(rawSettings)
           : <String, dynamic>{};
