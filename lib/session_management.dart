@@ -35,6 +35,9 @@ class SessionManagementService {
   static const String _identityVerifiedAtKeyPrefix = 'identity_verified_at_';
 
   static final Lock _sessionLock = Lock();
+  // Refresh has its own lock: autoLogin calls saveTokens, which takes
+  // _sessionLock. Sharing the same lock here deadlocked every successful refresh.
+  static final Lock _autoLoginLock = Lock();
 
   static Timer? _sessionExpiryTimer;
   static const Duration _sessionCheckInterval = Duration(hours: 1);
@@ -69,17 +72,35 @@ class SessionManagementService {
       final sessionAge = now.difference(sessionDateTime);
 
       if (sessionAge > _maxSessionDuration) {
+        // Refresh first rather than logging the user out solely because the
+        // local access-token age crossed seven days. A revoked/expired refresh
+        // token is cleared by autoLogin and will still trigger secure logout.
+        final refreshToken = await SecureTokenStorage.getRefreshToken();
+        if (refreshToken != null && refreshToken.isNotEmpty) {
+          final refreshed = await autoLogin().timeout(
+            const Duration(seconds: 12),
+            onTimeout: () => null,
+          );
+          if (refreshed?['success'] == true) {
+            if (kDebugMode) debugPrint('🔔 Expired local session renewed with refresh token');
+            return;
+          }
+
+          // Do not destroy credentials on a timeout/5xx. Retry on the next
+          // health interval; an invalid refresh token has already been cleared.
+          final remainingRefreshToken = await SecureTokenStorage.getRefreshToken();
+          if (remainingRefreshToken != null && remainingRefreshToken.isNotEmpty) {
+            if (kDebugMode) debugPrint('🔔 Session refresh unavailable; retaining tokens for a later retry');
+            return;
+          }
+        }
+
         final connectivityResult = await Connectivity().checkConnectivity();
         final isOnline = connectivityResult != ConnectivityResult.none;
-
-        // The local session timestamp is the device-side security boundary.
-        // Offline mode must not disable expiry for sensitive actions. The
-        // server can revoke tokens when online, while the local max-age keeps
-        // an abandoned device from remaining authenticated forever offline.
-        if (isOnline) {
-          if (kDebugMode) debugPrint('🔔 Session expired (online) - enforcing logout for security');
-        } else {
-          if (kDebugMode) debugPrint('🔔 Session expired (offline) - enforcing local expiry');
+        if (kDebugMode) {
+          debugPrint(isOnline
+              ? '🔔 Session expired and refresh credentials are invalid - enforcing logout'
+              : '🔔 Session expired offline with no usable refresh token - enforcing local expiry');
         }
         await performSecureLogout(reason: isOnline ? 'Session expired' : 'Session expired offline');
       } else {
@@ -317,7 +338,7 @@ class SessionManagementService {
   }
 
   static Future<Map<String, dynamic>?> autoLogin() async {
-    return await _sessionLock.synchronized(() async {
+    return await _autoLoginLock.synchronized(() async {
       try {
         final prefs = await SharedPreferences.getInstance();
         final refreshToken = await SecureTokenStorage.getRefreshToken();
@@ -336,21 +357,45 @@ class SessionManagementService {
             },
           ).timeout(const Duration(seconds: 10));
           if (response.statusCode == 200) {
-            final data = jsonDecode(response.body);
+            final decoded = jsonDecode(response.body);
+            if (decoded is! Map<String, dynamic>) {
+              if (kDebugMode) debugPrint('⚠️ Refresh endpoint returned an invalid response');
+              return null;
+            }
+            final data = decoded;
+            final accessToken = (data['access_token'] ?? data['token'])?.toString().trim() ?? '';
+            final rawUserId = data['user_id'] ?? data['id'] ?? await getCurrentUserId();
+            final userId = int.tryParse(rawUserId?.toString() ?? '') ?? 0;
+            if (accessToken.isEmpty || userId <= 0) {
+              // Never overwrite a usable saved token with an empty token or ID.
+              if (kDebugMode) debugPrint('⚠️ Refresh response omitted access token or valid user ID');
+              return null;
+            }
+            final rotatedRefreshToken =
+                (data['refresh_token'] ?? refreshToken).toString();
             await saveTokens(
-              refreshToken: data['refresh_token'] ?? refreshToken,
-              accessToken: data['access_token'] ?? '',
+              refreshToken: rotatedRefreshToken,
+              accessToken: accessToken,
               deviceId: deviceId ?? 'flutter_app',
-              userId: data['user_id'] ?? (await getCurrentUserId()) ?? 0,
-              userName: data['user_name'] ?? '',
-              userEmail: data['email'] ?? '',
+              userId: userId,
+              userName: data['user_name']?.toString() ?? prefs.getString(_userNameKey) ?? '',
+              userEmail: data['email']?.toString() ?? prefs.getString(_userEmailKey) ?? '',
             );
+            // saveTokens intentionally catches storage errors; verify persistence
+            // before reporting the refresh as successful.
+            final persistedAccessToken = await SecureTokenStorage.getToken();
+            final persistedRefreshToken = await SecureTokenStorage.getRefreshToken();
+            if (persistedAccessToken != accessToken ||
+                persistedRefreshToken != rotatedRefreshToken) {
+              if (kDebugMode) debugPrint('⚠️ Refreshed credentials failed storage verification');
+              return null;
+            }
             if (kDebugMode) debugPrint('✅ Auto-login successful');
             return {
               'success': true,
-              'user_id': data['user_id'],
-              'user_name': data['user_name'],
-              'email': data['email'],
+              'user_id': userId,
+              'user_name': data['user_name'] ?? prefs.getString(_userNameKey),
+              'email': data['email'] ?? prefs.getString(_userEmailKey),
               'message': data['message'],
             };
           }
