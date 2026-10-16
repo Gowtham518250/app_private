@@ -38,6 +38,6 @@ void main() {
   test('financial values and backend error messages bypass live translation', () {
     expect(LiveTranslationService.shouldTranslate('₹150 received', 'te'), isFalse);
     expect(LiveTranslationService.shouldTranslate('Error: authentication failed', 'te'), isFalse);
-    expect(LiveTranslationService.shouldTranslate('Payment of $250 received', 'hi'), isFalse);
+    expect(LiveTranslationService.shouldTranslate('Payment of \\$250 received', 'hi'), isFalse);
   });
 }
