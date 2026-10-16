@@ -1,4 +1,5 @@
-import 'package:flutter/material.dart';
+import 'package:flutter/material.dart' hide Text;
+import 'package:retail_mind/live_localized_text.dart';
 import 'package:flutter/services.dart';
 
 /// ♿ Accessibility Helper for RETAIL MIND
