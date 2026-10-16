@@ -1,5 +1,6 @@
 import 'dart:ui';
-import 'package:flutter/material.dart';
+import 'package:flutter/material.dart' hide Text;
+import 'package:retail_mind/live_localized_text.dart';
 import 'package:google_fonts/google_fonts.dart';
 
 /// A premium button wrapper that provides a subtle, bouncy scale-down animation
