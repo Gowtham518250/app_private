@@ -575,8 +575,6 @@ class PdsConfig {
   static const Duration tcmLargeDrain     = Duration(seconds: 20);
   static const Duration tcmDrainInterval  = Duration(seconds: 2);
 
-  // FIX-K: LIKELY re-announce timeout
-  static const Duration likelyReannounceAfter = Duration(seconds: 12);
 
   // Dedup
   static const Duration dedupUtrTtl          = Duration(hours: 24);
@@ -2264,8 +2262,6 @@ class PaymentDetectionService {
   Timer? _midnightTimer;
   Timer? _healthTimer;
 
-  // FIX-K: LIKELY re-announcement timers
-  final _likelyTimers = <String, Timer>{};
 
   // FIX-D: track last confirmed event for repeat
   PaymentEvent? _lastConfirmed;
@@ -2299,14 +2295,12 @@ class PaymentDetectionService {
   PaymentEvent? confirmPayment(String id) {
     final confirmed = _confirmMgr.confirm(id);
     if (confirmed != null) {
-      _likelyTimers.remove(id)?.cancel();
       _emitFinal(confirmed);
     }
     return confirmed;
   }
 
   void rejectPayment(String id) {
-    _likelyTimers.remove(id)?.cancel();
     _confirmMgr.reject(id);
     final state = history.findById(id);
     if (state != null) {
@@ -2537,8 +2531,6 @@ class PaymentDetectionService {
     _tcmDrainTimer?.cancel(); _dedupTimer?.cancel();
     _dedupSaveTimer?.cancel(); _guardTimer?.cancel();
     _midnightTimer?.cancel();  _healthTimer?.cancel();
-    for (final t in _likelyTimers.values) t.cancel();
-    _likelyTimers.clear();
     await _notifSub?.cancel();
     _notifSub = null;
     if (_dedupDirty) await PdsStateStore.saveDedup(_dedupStore);
@@ -2594,14 +2586,6 @@ class PaymentDetectionService {
     _guardTimer = Timer.periodic(const Duration(minutes: 10), (_) {
       try {
         _floodGuard.cleanup(); _accRateLimit.cleanup(); _confirmMgr.cleanup();
-        // FIX: Clean up likely timers that are no longer in history or expired
-        _likelyTimers.removeWhere((id, timer) {
-          if (history.findById(id) == null) {
-            timer.cancel();
-            return true;
-          }
-          return false;
-        });
       } catch (e, st) { PdsLogger.e('GUARD', 'Guard timer error', e, st); }
     });
   }
@@ -3515,10 +3499,6 @@ class PaymentDetectionService {
     // ANTI-03: queue LIKELY for merchant confirmation (FIX-D: fully wired)
     if (finalEvent.decision == PaymentDecision.likely) {
       _confirmMgr.add(finalEvent, finalUi);
-      // Re-announce if not confirmed in 12s — but only for non-partial payments
-      if (!finalEvent.isPartialPayment) {
-        _scheduleLikelyReannounce(finalEvent.id, finalEvent.amount, finalEvent.fingerprint);
-      }
     }
 
     // ANTI-07: async bank verification for CONFIRMED
@@ -3645,18 +3625,6 @@ class PaymentDetectionService {
     return 'UNPAID';
   }
 
-  void _scheduleLikelyReannounce(String id, double amount, String fingerprint) {
-    _likelyTimers[id]?.cancel();
-    _likelyTimers[id] = Timer(PdsConfig.likelyReannounceAfter, () {
-      _likelyTimers.remove(id);
-      final state = history.findById(id);
-      if (state == null || state.isUserConfirmed || state.isUserRejected) return;
-      final text = VoiceBuilder.stillWaiting(amount, _voiceLanguage);
-      // Pass fingerprint — spoken-set blocks this if SMS already confirmed it
-      _voice.enqueueRaw(text, _VP.soft, fingerprint: '$fingerprint');
-      PdsLogger.i('SVC', 'LIKELY_REANNOUNCE ₹$amount');
-    });
-  }
 
   void _emitFinal(PaymentEvent event) {
     // FIX-D: reuse same id so UI can correlate the update
