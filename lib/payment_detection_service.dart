@@ -4004,7 +4004,7 @@ abstract class _Classifier {
   );
 
   static final _context = RegExp(
-    r'(?:\b(?:received|credited|credit|payment\s+received|payment\s+successful|payment\s+success|successfully\s+received|you\s+got|money\s+received|amount\s+credited|amount\s+received|transferred\s+(?:via\s+[A-Za-z0-9]+\s+)?to|paid\s+to\s+your|deposited|added\s+to\s+(?:your\s+)?(?:\w+\s+)?wallet|success|successful|recd|has\s+sent|sent\s+to\s+your|sent\s+to\s+you|prapt|mila|jama)\b'
+    r'(?:\b(?:received|credited|credit|payment\s+received|payment\s+successful|payment\s+success|successfully\s+received|you\s+got|you\s+received|money\s+received|amount\s+credited|amount\s+received|transferred\s+(?:via\s+[A-Za-z0-9]+\s+)?to|paid\s+(?:you|to\s+you|to\s+your|into\s+your)|sent\s+(?:you|to\s+you|to\s+your|into\s+your)|deposited|added\s+to\s+(?:your\s+)?(?:\w+\s+)?wallet|success|successful|recd|has\s+sent|sent\s+to\s+your|sent\s+to\s+you|prapt|mila|jama)\b'
     // FIX-39: Hindi
     r'|प्राप्त|जमा\s+हो|मिला|प्राप्त\s+हुआ|खाते\s+में\s+जमा'
     // FIX-39: Tamil
@@ -4052,7 +4052,7 @@ abstract class _Classifier {
   // An unverified notification can be shown as LIKELY only when it says an
   // incoming credit actually happened, rather than simply mentioning payment.
   static bool hasIncomingCreditContext(String t) => RegExp(
-        r'(?:\b(?:credited|received|deposited|credit(?:ed)?\s+(?:in|of|to)|payment\s+received|amount\s+credited|money\s+received|funds\s+received|you\s+got)\b|\bcr\b|खाते\s+में\s+जमा|जमा\s+हो|प्राप्त\s+हुआ|வரவு|பெறப்பட்டது|கணக்கில்\s+வரவு|జమ\s+అయింది|చెల్లింపు\s+వచ్చింది|ಜಮಾ\s+ಆಗಿದೆ|ಪಾವತಿ\s+ಬಂತು|জমা\s+হয়েছে|ലഭിച്ചു)',
+        r'(?:\b(?:credited|received|deposited|credit(?:ed)?\s+(?:in|of|to)|payment\s+received|amount\s+credited|money\s+received|funds\s+received|you\s+got|you\s+received|paid\s+(?:you|to\s+you|into\s+your|to\s+your)|sent\s+(?:you|to\s+you|into\s+your|to\s+your)|transferred\s+to\s+your)\b|\bcr\b|खाते\s+में\s+जमा|जमा\s+हो|प्राप्त\s+हुआ|வரவு|பெறப்பட்டது|கணக்கில்\s+வரவு|జమ\s+అయింది|చెల్లింపు\s+వచ్చింది|ಜಮಾ\s+ಆಗಿದೆ|ಪಾವತಿ\s+ಬಂತು|জমা\s+হয়েছে|ലഭിച്ചു)',
         caseSensitive: false,
       ).hasMatch(t);
 
@@ -4060,7 +4060,7 @@ abstract class _Classifier {
   // NOW includes Bengali, Malayalam, Punjabi for regional shops
   static final _creditVerb = RegExp(
     r'(?:\b(?:credited|received|deposited|credit|recd|prapt|mila|jama'
-    r'|has\s+sent|sent\s+to\s+your|paid\s+to\s+your|transferred\s+(?:via\s+[A-Za-z0-9]+\s+)?to'
+    r'|has\s+sent|sent\s+(?:you|to\s+you|to\s+your|into\s+your)|paid\s+(?:you|to\s+you|to\s+your|into\s+your)|transferred\s+(?:via\s+[A-Za-z0-9]+\s+)?to'
     r'|added\s+to\s+(?:your\s+)?(?:\w+\s+)?wallet|successful)\b'
     // Hindi
     r'|प्राप्त|जमा\s+हो|जमा\s+हुआ|खाते\s+में\s+जमा'
