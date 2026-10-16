@@ -2875,21 +2875,16 @@ class PaymentDetectionService {
         // dropped outright, silently, forever — closed via a content-based
         // fallback below.
         //
-        // FIX (security, critical): the fallback originally only checked
-        // for payment-context wording + a parseable amount. That means ANY
-        // installed app — including one a scammer talks a merchant into
-        // sideloading — could post a local notification saying "Payment
-        // received ₹5,000" and it would pass. Unlike the SMS path (which
-        // now has a sender-identity whitelist), a notification has no
-        // equivalent trusted-identity signal for an app outside our
-        // registry, so require a real transaction reference number too
-        // (UTR/txn id pattern) in addition to payment-context + amount.
-        // This raises the bar substantially — a scammer's fake app would
-        // now need to fabricate a plausible-looking reference id, not just
-        // a rupee amount and the word "credited".
-        final looksLikePayment = _Classifier.hasPaymentContext(fields) &&
-            _Extractor.amount(fields) != null &&
-            _Extractor.referenceId(fields) != null;
+        // Unregistered apps have no verified package identity. Still surface a
+        // clearly incoming-credit notification when it contains a parseable
+        // amount, but keep it unverified so it can never be auto-confirmed.
+        // This avoids missing legitimate payer notifications that omit a UTR;
+        // outgoing/debit, OTP, promotional and pending notifications are still
+        // filtered by the classifier before they enter the payment pipeline.
+        final looksLikePayment =
+            _Classifier.classify(fields) == _ClassifyResult.passed &&
+            _Classifier.hasIncomingCreditContext(fields) &&
+            _Extractor.amount(fields) != null;
         if (!looksLikePayment) return;
         app = PaymentApp.bankApp;
         isUnverifiedApp = true;
@@ -3886,7 +3881,10 @@ abstract class _Normaliser {
   static final _ms = RegExp(r' {2,}');
   static String clean(String raw) => raw
       .replaceAll(_ws, ' ')
-      .replaceAll(_dc, r'\1\2')
+      // Dart RegExp replacement strings use $1/$2, not \1/\2.
+      // Use replaceAllMapped to preserve digits and remove Indian/Western
+      // thousands separators without corrupting amounts such as 1,25,000.
+      .replaceAllMapped(_dc, (match) => '${match[1]}${match[2]}')
       .replaceAll(_ms, ' ')
       .trim();
 }
@@ -4025,6 +4023,13 @@ abstract class _Classifier {
   }
 
   static bool hasPaymentContext(String t) => _context.hasMatch(t);
+
+  // An unverified notification can be shown as LIKELY only when it says an
+  // incoming credit actually happened, rather than simply mentioning payment.
+  static bool hasIncomingCreditContext(String t) => RegExp(
+        r'(?:\\b(?:credited|received|deposited|payment\\s+received|amount\\s+credited|money\\s+received|funds\\s+received|credit\\s+of|you\\s+got)\\b|\\bcr\\b|खाते\\s+में\\s+जमा|जमा\\s+हो|प्राप्त\\s+हुआ|வரவு|பெறப்பட்டது|கணக்கில்\\s+வரவு|జమ\\s+అయింది|చెల్లింపు\\s+వచ్చింది|ಜಮಾ\\s+ಆಗಿದೆ|ಪಾವತಿ\\s+ಬಂತು|জমা\\s+হয়েছে|ലഭിച്ചു)',
+        caseSensitive: false,
+      ).hasMatch(t);
 
   // FIX-57: Multilanguage credit verbs (10 languages, not 5)
   // NOW includes Bengali, Malayalam, Punjabi for regional shops
