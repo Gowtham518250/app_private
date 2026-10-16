@@ -108,7 +108,7 @@ class _DecentRegisterPageState extends State<DecentRegisterPage>
 
       final data = _decodeResponseMap(response);
 
-      if (response.statusCode == 200) {
+      if (response.statusCode == 200 || response.statusCode == 201) {
         // Some backend deployments return only an access token from register.
         // Complete a normal login in that case so the refresh token is persisted
         // too; otherwise the new account is logged out when the local session
