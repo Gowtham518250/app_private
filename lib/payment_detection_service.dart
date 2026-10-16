@@ -3952,6 +3952,7 @@ abstract class _Classifier {
     // been announced as a payment RECEIVED. Now tolerant of an amount /
     // currency token appearing in between, bounded to avoid runaway
     // matching across sentence boundaries.
+    r'|(?:\u20b9|rs\.?|inr\.?)\s*[\d,]+(?:\.\d{1,2})?\s+(?:spent|debited|used)\s+(?:at|on)'
     r'|spent\s+(?:(?:\u20b9|rs\.?|inr\.?)\s*[\d,]+(?:\.\d{1,2})?\s+)?at'
     r'|purchase(?:d)?\s+(?:of\s+)?(?:(?:\u20b9|rs\.?|inr\.?)\s*[\d,]+(?:\.\d{1,2})?\s+)?at'
     r'|withdrawn\s+from|withdrawal\s+of|deducted\s+from|charged\s+to'
