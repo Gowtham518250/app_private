@@ -558,8 +558,8 @@ class _AttendancePageState extends State<AttendancePage>
     // session — sessionsMap only reflects the last *fetch*, which can lag
     // a few seconds behind a just-tapped local check-in.
     final checkInTime = isOpenNow
-        ? _mySession?['check_in_time']
-        : sessionData?['check_in_time'];
+        ? (_mySession == null ? null : _mySession!['check_in_time'])
+        : (sessionData == null ? null : sessionData['check_in_time']);
     final checkOutTime = sessionData?['check_out_time'];
     final isCompleted = !isOpenNow && checkOutTime != null;
     final isNotStarted = !isOpenNow && checkInTime == null;
