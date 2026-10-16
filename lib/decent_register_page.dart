@@ -109,21 +109,82 @@ class _DecentRegisterPageState extends State<DecentRegisterPage>
       final data = _decodeResponseMap(response);
 
       if (response.statusCode == 200) {
-        // Backend returns access_token directly on successful registration
-        // (auto-login) — see the "return {...}" at the end of /register.
-        final token = data['access_token']?.toString() ?? '';
-        final userId = data['user_id'] is int
-            ? data['user_id'] as int
-            : int.tryParse(data['user_id']?.toString() ?? '') ?? 0;
+        // Some backend deployments return only an access token from register.
+        // Complete a normal login in that case so the refresh token is persisted
+        // too; otherwise the new account is logged out when the local session
+        // reaches its seven-day limit.
+        var authData = Map<String, dynamic>.from(data);
+        var token = (authData['access_token'] ?? authData['token'])?.toString() ?? '';
+        var refreshToken = authData['refresh_token']?.toString() ?? '';
+
+        if (token.isEmpty || refreshToken.isEmpty) {
+          try {
+            final loginResponse = await ApiClient.postJson(ApiClient.loginEndpoint, {
+              'email': email,
+              'password': password,
+            }).timeout(const Duration(seconds: 20));
+            if (loginResponse.statusCode == 200) {
+              authData.addAll(_decodeResponseMap(loginResponse));
+              token = (authData['access_token'] ?? authData['token'])?.toString() ?? '';
+              refreshToken = authData['refresh_token']?.toString() ?? '';
+            }
+          } catch (e) {
+            if (kDebugMode) debugPrint('Post-registration sign-in attempt failed: $e');
+          }
+        }
+
+        if (token.isEmpty || refreshToken.isEmpty) {
+          if (mounted) {
+            setState(() => errorMessage =
+                'Your account was created, but secure sign-in could not be completed because the server did not issue both session tokens. Please sign in again.');
+          }
+          return;
+        }
+
+        int parseUserId(dynamic value) => int.tryParse(value?.toString() ?? '') ?? 0;
+        var userId = parseUserId(authData['user_id'] ?? authData['id']);
+        if (userId <= 0) {
+          try {
+            final parts = token.split('.');
+            if (parts.length == 3) {
+              final claimText = utf8.decode(base64Url.decode(base64Url.normalize(parts[1])));
+              final claims = json.decode(claimText);
+              if (claims is Map<String, dynamic>) {
+                userId = parseUserId(claims['user_id'] ?? claims['id'] ?? claims['sub']);
+              }
+            }
+          } catch (e) {
+            if (kDebugMode) debugPrint('Could not resolve account ID from auth response: $e');
+          }
+        }
+        if (userId <= 0) {
+          if (mounted) {
+            setState(() => errorMessage =
+                'Your account was created, but the server returned no valid user ID. Please sign in again.');
+          }
+          return;
+        }
 
         await UserDataClearService.clearAllUserData();
         await SessionManagementService.initializeSession(
           userId: userId,
           accessToken: token,
-          userName: data['username']?.toString() ?? username,
-          userEmail: email,
-          role: data['role']?.toString() ?? 'OWNER',
+          refreshToken: refreshToken,
+          userName: (authData['username'] ?? authData['user_name'])?.toString() ?? username,
+          userEmail: authData['email']?.toString() ?? email,
+          role: authData['role']?.toString() ?? 'OWNER',
         );
+
+        // Verify secure storage really committed both tokens before navigating.
+        if (await SecureTokenStorage.getToken() != token ||
+            await SecureTokenStorage.getRefreshToken() != refreshToken) {
+          await SessionManagementService.clearTokens();
+          if (mounted) {
+            setState(() => errorMessage =
+                'Your account was created, but this device could not save the secure session. Please sign in again.');
+          }
+          return;
+        }
 
         final prefs = await SharedPreferences.getInstance();
         if (shopName.isNotEmpty) {
@@ -132,8 +193,6 @@ class _DecentRegisterPageState extends State<DecentRegisterPage>
         }
 
         if (!mounted) return;
-        // 🔧 FIX: After registration, send new users to shop setup page first.
-        // Previously they went directly to the dashboard, skipping shop profile setup.
         Navigator.of(context).pushReplacementNamed('/shop-details');
       } else {
         // Surface the backend's real validation message, e.g.:
