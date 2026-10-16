@@ -426,12 +426,26 @@ class ShopProfilePersistenceService {
       // applying nothing, so a just-edited shop name/phone/etc. would
       // vanish back to its old value on the next load even though it was
       // genuinely saved to local storage. Now this accepts either shape.
-      final dynamic nestedRaw = profile['profile'] ?? profile['shop_profile'];
-      final Map<String, dynamic>? shopData = nestedRaw is Map
-          ? Map<String, dynamic>.from(nestedRaw)
-          : profile; // already flat — use as-is
+      final dynamic dataRaw = profile['profile'] ??
+          profile['shop_profile'] ??
+          profile['shop'] ??
+          profile['data'];
+      final Map<String, dynamic> envelopeData = dataRaw is Map
+          ? Map<String, dynamic>.from(dataRaw)
+          : profile;
+      final dynamic nestedShopRaw = envelopeData['profile'] ??
+          envelopeData['shop_profile'] ??
+          envelopeData['shop'];
+      final Map<String, dynamic> shopData = nestedShopRaw is Map
+          ? Map<String, dynamic>.from(nestedShopRaw)
+          : envelopeData;
+      final dynamic rawSettings =
+          profile['settings'] ?? envelopeData['settings'] ?? shopData['settings'];
+      final Map<String, dynamic> settings = rawSettings is Map
+          ? Map<String, dynamic>.from(rawSettings)
+          : <String, dynamic>{};
 
-      if (shopData != null) {
+      if (shopData.isNotEmpty) {
         // Apply individual fields to prefs for backward compatibility
         if (shopData['shop_name'] != null) {
           await prefs.setString('shop_name', shopData['shop_name'].toString());
@@ -451,10 +465,17 @@ class ShopProfilePersistenceService {
         if (shopData['shop_tagline'] != null || shopData['tagline'] != null) {
           await prefs.setString('shop_tagline', (shopData['shop_tagline'] ?? shopData['tagline']).toString());
         }
-        if (shopData['primary_upi_id'] != null || shopData['upi_id'] != null || shopData['upi'] != null) {
-          final upiId = (shopData['primary_upi_id'] ?? shopData['upi_id'] ?? shopData['upi'])
-              .toString()
-              .trim();
+        final rawUpiId = shopData['primary_upi_id'] ??
+            shopData['upi_id'] ??
+            shopData['upi'] ??
+            profile['primary_upi_id'] ??
+            profile['upi_id'] ??
+            profile['upi'] ??
+            settings['primary_upi_id'] ??
+            settings['upi_id'] ??
+            settings['upi'];
+        if (rawUpiId != null) {
+          final upiId = rawUpiId.toString().trim();
           await prefs.setString('primary_upi_id', upiId);
           await prefs.setString('upi_id', upiId);
           // Keep the encrypted value in sync with backend restores as well as
